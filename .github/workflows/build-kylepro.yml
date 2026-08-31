@@ -92,7 +92,7 @@ jobs:
           sed -i '/devicepkg_package $startdir $pkgname/a \\tinstall -Dm755 "$srcdir"/telnetd.start -t "$pkgdir"/etc/local.d' "$DEVICE_DIR/APKBUILD"
           
           cd "$DEVICE_DIR"
-          chown 10000:10000 "$DEVICE_DIR/telnetd.start"
+          sudo chown 10000:10000 "$DEVICE_DIR/telnetd.start"
           python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-kylepro
 
       - name: Build postmarketOS (Single Partition)
