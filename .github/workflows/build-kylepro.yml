@@ -1,0 +1,138 @@
+name: Build postmarketOS for GT-S7580 (samsung-kylepro)
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-pmos:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache
+          sudo apt-get purge -y '^mono-*' '^llvm-*' '^php*' '^mysql-*' '^postgresql-*' \
+            'google-chrome-*' 'microsoft-edge-*' firefox 'powershell' || true
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          df -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3 python3-pip openssl sudo util-linux \
+            qemu-user-static binfmt-support ca-certificates wget curl file tar gzip xz-utils unzip
+
+      - name: Clone pmbootstrap
+        run: |
+          git clone --depth=1 https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git ~/pmbootstrap
+          echo "$HOME/pmbootstrap" >> $GITHUB_PATH
+          python3 ~/pmbootstrap/pmbootstrap.py --version
+
+      - name: Patch pmbootstrap for kernel 3.4 ext4 rootfs compatibility
+        run: |
+          # GT-S7580 runs an extremely old kernel (3.4). Modern e2fsprogs enables
+          # metadata_csum, metadata_csum_seed, and meta_bg by default. These cause
+          # kernel panics or mount failures on downstream. We must disable them.
+          python3 - << 'PATCH'
+          from pathlib import Path
+          p = Path.home() / "pmbootstrap/pmb/install/format.py"
+          src = p.read_text()
+          old = r'''        if device_category.allows_downstream_ports():
+                      # Some downstream kernels don't support metadata_csum (#1364).
+                      # When changing the options of mkfs.ext4, also change them in the
+                      # recovery zip code (see 'grep -r mkfs\.ext4')!
+                      category_opts = ["-O", "^metadata_csum"]
+                  else:
+                      category_opts = []'''
+          new = '''        # samsung-kylepro: kernel 3.4 cannot mount ext4 with metadata_csum,
+                  # metadata_csum_seed, or meta_bg. Disable for ALL device categories.
+                  category_opts = ["-O", "^metadata_csum,^metadata_csum_seed,^meta_bg"]'''
+          if old not in src:
+              raise SystemExit("ERROR: pmbootstrap format.py changed upstream - update this patch")
+          p.write_text(src.replace(old, new))
+          print("pmbootstrap patched: ext4 rootfs will be safe for GT-S7580 kernel")
+          PATCH
+
+      - name: Initialize pmbootstrap
+        run: |
+          yes "" | python3 ~/pmbootstrap/pmbootstrap.py init 2>&1 || true
+          python3 ~/pmbootstrap/pmbootstrap.py config device || true
+          python3 ~/pmbootstrap/pmbootstrap.py config aports || true
+          
+          # Use samsung-kylepro which is already in pmOS testing!
+          # Add python3 and busybox-extras (for telnetd).
+          python3 ~/pmbootstrap/pmbootstrap.py config device samsung-kylepro
+          python3 ~/pmbootstrap/pmbootstrap.py config extra_packages python3,busybox-extras
+          python3 ~/pmbootstrap/pmbootstrap.py config ui console
+          python3 ~/pmbootstrap/pmbootstrap.py config user test
+          python3 ~/pmbootstrap/pmbootstrap.py config hostname s7580
+          python3 ~/pmbootstrap/pmbootstrap.py config timezone UTC
+          python3 ~/pmbootstrap/pmbootstrap.py config locale C.UTF-8
+
+      - name: Inject Rootfs Telnetd Script (Port 23 passwordless)
+        run: |
+          PMAPORTS=$(python3 ~/pmbootstrap/pmbootstrap.py config aports)
+          DEVICE_DIR="$PMAPORTS/device/testing/device-samsung-kylepro"
+          
+          # Create the startup script
+          cat > "$DEVICE_DIR/telnetd.start" << 'TELNET'
+          #!/bin/sh
+          # Drop directly to root shell on port 23
+          /usr/sbin/telnetd -l /bin/sh -p 23
+          TELNET
+          
+          # Update the device APKBUILD to include and install our telnet script
+          sed -i 's/source="/source="\n\ttelnetd.start/' "$DEVICE_DIR/APKBUILD"
+          sed -i '/devicepkg_package $startdir $pkgname/a \\tinstall -Dm755 "$srcdir"/telnetd.start -t "$pkgdir"/etc/local.d' "$DEVICE_DIR/APKBUILD"
+          
+          cd "$DEVICE_DIR"
+          python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-kylepro
+
+      - name: Build postmarketOS (Single Partition)
+        run: |
+          echo "Starting build at $(date)"
+          set -o pipefail
+          
+          # Use --single-partition so it generates a raw ext4 image, bypassing GPT issues
+          echo -e "test\ntest" | python3 ~/pmbootstrap/pmbootstrap.py install --single-partition 2>&1 | tee build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+
+          if [ $BUILD_EXIT -ne 0 ]; then
+            echo "=== BUILD FAILED ==="
+            tail -100 build.log
+            exit 1
+          fi
+
+      - name: Export and Verify Images
+        run: |
+          mkdir -p ~/pmos-export
+          python3 ~/pmbootstrap/pmbootstrap.py export ~/pmos-export
+          
+          IMG=$(readlink -f ~/pmos-export/samsung-kylepro.img)
+          echo "Rootfs Image: $IMG"
+          file -bL "$IMG"
+          
+          echo "Verifying ext4 features are safe..."
+          sudo tune2fs -l "$IMG" | grep "Filesystem features" > /tmp/features
+          cat /tmp/features
+          for bad in metadata_csum metadata_csum_seed meta_bg; do
+            if grep -qw "$bad" /tmp/features; then
+              echo "ERROR: feature '$bad' is set! The old kernel will panic."
+              exit 1
+            fi
+          done
+          echo "Rootfs is fully prepared and safe!"
+
+      - name: Upload artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postmarketOS-samsung-kylepro
+          path: ~/pmos-export/*
+          retention-days: 14
