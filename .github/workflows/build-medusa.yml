@@ -33,12 +33,12 @@ jobs:
           if [ -f "arch/arm/configs/j4primelte_defconfig" ]; then
              export ARCH=arm
              export CROSS_COMPILE=$CROSS_COMPILE_ARM32
-             make j4primelte_defconfig
+             make O=out j4primelte_defconfig
           elif [ -f "arch/arm64/configs/j4primelte_defconfig" ]; then
-             make j4primelte_defconfig
+             make O=out j4primelte_defconfig
           else
              # Generic exynos/msm config fallback
-             make msm8917_defconfig
+             make O=out msm8917_defconfig
           fi
           
           make -j$(nproc --all) O=out
