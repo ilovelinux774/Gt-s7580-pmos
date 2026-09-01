@@ -1,0 +1,73 @@
+name: Build ProjectMedusa Kernel for j4primelte
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: ProjectMedusaAndroid/android_kernel_samsung_msm8917_Q
+          path: kernel_source
+
+      - name: Setup toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabi gcc-aarch64-linux-gnu make bc ccache zip bc bison build-essential curl flex g++-multilib gcc-multilib git gnupg gperf lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev libncurses-dev
+          git clone --depth=1 https://github.com/crdroidandroid/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 -b 11.0 ~/arm-linux-androideabi-4.9
+          git clone --depth=1 https://github.com/crdroidandroid/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 -b 11.0 ~/aarch64-linux-android-4.9
+
+      - name: Build Kernel
+        run: |
+          cd kernel_source
+          export CROSS_COMPILE=$HOME/aarch64-linux-android-4.9/bin/aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=$HOME/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-
+          export ARCH=arm64
+          
+          # Since j4primelte uses a 64-bit kernel on 64-bit ROMs (LineageOS 18.1 is usually ARM64 for J4+)
+          # Or if it's 32-bit, we compile ARM. We will compile ARM to be safe for 3.18, 
+          # but let's check the defconfig
+          if [ -f "arch/arm/configs/j4primelte_defconfig" ]; then
+             export ARCH=arm
+             export CROSS_COMPILE=$CROSS_COMPILE_ARM32
+             make j4primelte_defconfig
+          elif [ -f "arch/arm64/configs/j4primelte_defconfig" ]; then
+             make j4primelte_defconfig
+          else
+             # Generic exynos/msm config fallback
+             make msm8917_defconfig
+          fi
+          
+          make -j$(nproc --all) O=out
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git
+          cd AnyKernel3
+          # Clean AnyKernel3
+          rm -rf .git README.md
+          
+          # Find the compiled kernel Image
+          if [ -f "../kernel_source/out/arch/arm/boot/zImage" ]; then
+             cp ../kernel_source/out/arch/arm/boot/zImage .
+          elif [ -f "../kernel_source/out/arch/arm64/boot/Image.gz" ]; then
+             cp ../kernel_source/out/arch/arm64/boot/Image.gz .
+          elif [ -f "../kernel_source/out/arch/arm64/boot/Image.gz-dtb" ]; then
+             cp ../kernel_source/out/arch/arm64/boot/Image.gz-dtb .
+          fi
+          
+          # Configure anykernel
+          sed -i 's/device.name1=maguro/device.name1=j4primelte/' anykernel.sh
+          sed -i 's/device.name2=toro/device.name2=j4+/' anykernel.sh
+          sed -i 's/device.name3=toroplus/device.name3=j4primelte/' anykernel.sh
+          
+          zip -r9 ../ProjectMedusa-j4primelte.zip *
+
+      - name: Upload Kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProjectMedusa-Kernel-j4primelte
+          path: ProjectMedusa-j4primelte.zip
