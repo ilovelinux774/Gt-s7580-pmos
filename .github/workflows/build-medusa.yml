@@ -62,6 +62,9 @@ jobs:
           fi
           
           # Configure anykernel
+          
+          sed -i 's|block=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;|block=/dev/block/bootdevice/by-name/boot;|g' anykernel.sh
+
           sed -i 's/device.name1=maguro/device.name1=j4primelte/' anykernel.sh
           sed -i 's/device.name2=toro/device.name2=j4+/' anykernel.sh
           sed -i 's/device.name3=toroplus/device.name3=j4primelte/' anykernel.sh
