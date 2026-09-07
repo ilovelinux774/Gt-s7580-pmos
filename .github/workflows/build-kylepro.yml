@@ -181,12 +181,20 @@ jobs:
           set -o pipefail
 
           # Use --single-partition so it generates a raw ext4 image, bypassing GPT issues
+          set +e
           echo -e "test\ntest" | python3 ~/pmbootstrap/pmbootstrap.py install --single-partition 2>&1 | tee build.log
           BUILD_EXIT=${PIPESTATUS[0]}
+          set -e
 
           if [ $BUILD_EXIT -ne 0 ]; then
             echo "=== BUILD FAILED ==="
-            tail -100 build.log
+            echo "=== pmbootstrap log (last 200 lines) ==="
+            python3 ~/pmbootstrap/pmbootstrap.py log 2>&1 | tail -200 || true
+            LOGFILE=~/.local/var/pmbootstrap/log.txt
+            if [ -f "$LOGFILE" ]; then
+              echo "=== raw log file (last 200 lines) ==="
+              tail -200 "$LOGFILE"
+            fi
             exit 1
           fi
 
