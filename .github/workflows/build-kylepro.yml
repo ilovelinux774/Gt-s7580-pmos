@@ -64,7 +64,7 @@ jobs:
           yes "" | python3 ~/pmbootstrap/pmbootstrap.py init 2>&1 || true
           python3 ~/pmbootstrap/pmbootstrap.py config device || true
           python3 ~/pmbootstrap/pmbootstrap.py config aports || true
-          
+
           # Use samsung-kylepro which is already in pmOS testing!
           # Add python3 and busybox-extras (for telnetd).
           python3 ~/pmbootstrap/pmbootstrap.py config device samsung-kylepro
@@ -75,31 +75,94 @@ jobs:
           python3 ~/pmbootstrap/pmbootstrap.py config timezone UTC
           python3 ~/pmbootstrap/pmbootstrap.py config locale C.UTF-8
 
-      - name: Inject Rootfs Telnetd Script (Port 23 passwordless)
+      - name: Inject Rootfs Telnetd (root shell on port 23, OpenRC + systemd)
         run: |
+          set -euo pipefail
           PMAPORTS=$(python3 ~/pmbootstrap/pmbootstrap.py config aports)
           DEVICE_DIR="$PMAPORTS/device/testing/device-samsung-kylepro"
-          
-          # Create the startup script
+          test -d "$DEVICE_DIR" || { echo "ERROR: device dir not found: $DEVICE_DIR"; exit 1; }
+
+          # OpenRC service script (runs at boot via /etc/local.d if OpenRC is used)
           cat > "$DEVICE_DIR/telnetd.start" << 'TELNET'
           #!/bin/sh
           # Drop directly to root shell on port 23
           /usr/sbin/telnetd -l /bin/sh -p 23
           TELNET
-          
-          # Update the device APKBUILD to include and install our telnet script
-          sed -i 's/source="/source="\n\ttelnetd.start/' "$DEVICE_DIR/APKBUILD"
-          sed -i '/devicepkg_package $startdir $pkgname/a \\tinstall -Dm755 "$srcdir"/telnetd.start -t "$pkgdir"/etc/local.d' "$DEVICE_DIR/APKBUILD"
-          
-          cd "$DEVICE_DIR"
-          sudo chmod 777 "$DEVICE_DIR/telnetd.start" ; sudo chmod 777 "$DEVICE_DIR/APKBUILD"
+
+          # systemd unit (pmOS edge defaults to systemd; enable via multi-user.target.wants)
+          cat > "$DEVICE_DIR/telnetd.service" << 'UNIT'
+          [Unit]
+          Description=Root telnet shell on port 23 (debug access)
+          After=network.target
+
+          [Service]
+          Type=forking
+          ExecStart=/usr/sbin/telnetd -l /bin/sh -p 23
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          chmod 755 "$DEVICE_DIR/telnetd.start"
+          chmod 644 "$DEVICE_DIR/telnetd.service"
+
+          # Patch the APKBUILD with a robust python editor (the old sed-based
+          # patch produced `telnetd.startdeviceinfo"` — two source files glued
+          # together — which made `abuild checksum` fail).
+          python3 - "$DEVICE_DIR/APKBUILD" << 'PATCH'
+          import sys
+          from pathlib import Path
+
+          p = Path(sys.argv[1])
+          src = p.read_text()
+
+          old_source = 'source="deviceinfo"'
+          new_source = (
+              'source="\n'
+              '\ttelnetd.start\n'
+              '\ttelnetd.service\n'
+              '\tdeviceinfo"'
+          )
+          if old_source not in src:
+              raise SystemExit("ERROR: source= line in APKBUILD does not match expected form")
+          src = src.replace(old_source, new_source)
+
+          old_package = (
+              "package() {\n"
+              "\tdevicepkg_package $startdir $pkgname\n"
+              "}"
+          )
+          new_package = (
+              "package() {\n"
+              "\tdevicepkg_package $startdir $pkgname\n"
+              "\n"
+              '\tinstall -Dm755 "$srcdir"/telnetd.start -t "$pkgdir"/etc/local.d\n'
+              '\tinstall -Dm644 "$srcdir"/telnetd.service -t "$pkgdir"/usr/lib/systemd/system\n'
+              '\tinstall -d "$pkgdir"/usr/lib/systemd/system/multi-user.target.wants\n'
+              '\tln -s ../telnetd.service "$pkgdir"/usr/lib/systemd/system/multi-user.target.wants/telnetd.service\n'
+              "}"
+          )
+          if old_package not in src:
+              raise SystemExit("ERROR: package() block in APKBUILD does not match expected form")
+          src = src.replace(old_package, new_package)
+
+          p.write_text(src)
+          print("APKBUILD patched: source files + install lines added")
+          PATCH
+
+          echo "=== Patched APKBUILD ==="
+          cat "$DEVICE_DIR/APKBUILD"
+
+          # Regenerate sha512sums for the new source files
           python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-kylepro
+          echo "checksums updated OK"
 
       - name: Build postmarketOS (Single Partition)
         run: |
           echo "Starting build at $(date)"
           set -o pipefail
-          
+
           # Use --single-partition so it generates a raw ext4 image, bypassing GPT issues
           echo -e "test\ntest" | python3 ~/pmbootstrap/pmbootstrap.py install --single-partition 2>&1 | tee build.log
           BUILD_EXIT=${PIPESTATUS[0]}
@@ -114,11 +177,11 @@ jobs:
         run: |
           mkdir -p ~/pmos-export
           python3 ~/pmbootstrap/pmbootstrap.py export ~/pmos-export
-          
+
           IMG=$(readlink -f ~/pmos-export/samsung-kylepro.img)
           echo "Rootfs Image: $IMG"
           file -bL "$IMG"
-          
+
           echo "Verifying ext4 features are safe..."
           sudo tune2fs -l "$IMG" | grep "Filesystem features" > /tmp/features
           cat /tmp/features
