@@ -26,7 +26,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y git python3 python3-pip openssl sudo util-linux \
-            qemu-user-static binfmt-support ca-certificates wget curl file tar gzip xz-utils unzip
+            qemu-user-static binfmt-support ca-certificates wget curl file tar gzip xz-utils unzip \
+            android-sdk-libsparse-utils
 
       - name: Clone pmbootstrap
         run: |
@@ -191,21 +192,38 @@ jobs:
 
       - name: Export and Verify Images
         run: |
+          set -euo pipefail
           mkdir -p ~/pmos-export
           # --no-install: skip rebuilding the initramfs at export time.
           # mkinitfs already ran inside 'pmbootstrap install' with the
           # final UUIDs; the post-install remount in export's autoinstall
           # path fails under CI ("chroot not initialized" -> mkinitfs exit 1).
           python3 ~/pmbootstrap/pmbootstrap.py export --no-install ~/pmos-export
+
+          # pmbootstrap replaces the raw ext4 image with an Android sparse
+          # image (deviceinfo_flash_sparse=true) and export creates symlinks.
+          # Dereference symlinks into real files so the artifact upload gets
+          # the actual binaries (and tune2fs/simg2img can inspect them).
+          cd ~/pmos-export
+          for l in *; do
+            if [ -L "$l" ]; then
+              target="$(readlink -f "$l")"
+              rm "$l"
+              cp "$target" "$l"
+            fi
+          done
+
           echo "=== Exported files ==="
           ls -la ~/pmos-export/
 
-          IMG=$(readlink -f ~/pmos-export/samsung-kylepro.img)
+          IMG=~/pmos-export/samsung-kylepro.img
           echo "Rootfs Image: $IMG"
-          file -bL "$IMG"
+          file -b "$IMG"
 
           echo "Verifying ext4 features are safe..."
-          sudo tune2fs -l "$IMG" | grep "Filesystem features" > /tmp/features
+          # The exported image is Android-sparse; un-sparse to raw ext4 first.
+          simg2img "$IMG" /tmp/rootfs.raw
+          sudo tune2fs -l /tmp/rootfs.raw | grep "Filesystem features" > /tmp/features
           cat /tmp/features
           for bad in metadata_csum metadata_csum_seed meta_bg; do
             if grep -qw "$bad" /tmp/features; then
@@ -220,5 +238,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: postmarketOS-samsung-kylepro
-          path: ~/pmos-export/*
+          path: /home/runner/pmos-export/
           retention-days: 14
