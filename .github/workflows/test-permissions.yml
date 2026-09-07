@@ -1,0 +1,14 @@
+name: Test permissions
+
+on:
+  push:
+    branches:
+      - 'arena/**'
+  workflow_dispatch:
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Greet
+        run: echo "Hello from arena-ai-coding-agent[bot]!"
