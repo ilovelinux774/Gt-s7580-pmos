@@ -180,21 +180,19 @@ jobs:
           echo "Starting build at $(date)"
           set -o pipefail
 
-          # Use --single-partition so it generates a raw ext4 image, bypassing GPT issues
-          set +e
-          echo -e "test\ntest" | python3 ~/pmbootstrap/pmbootstrap.py install --single-partition 2>&1 | tee build.log
-          BUILD_EXIT=${PIPESTATUS[0]}
-          set -e
-
-          if [ $BUILD_EXIT -ne 0 ]; then
+          # Use --single-partition so it generates a raw ext4 image, bypassing GPT issues.
+          # pipefail ensures a pmbootstrap failure fails the step even through tee.
+          set -o pipefail
+          if ! echo -e "test\ntest" | python3 ~/pmbootstrap/pmbootstrap.py install --single-partition 2>&1 | tee build.log; then
             echo "=== BUILD FAILED ==="
-            echo "=== pmbootstrap log (last 200 lines) ==="
-            python3 ~/pmbootstrap/pmbootstrap.py log 2>&1 | tail -200 || true
             LOGFILE=~/.local/var/pmbootstrap/log.txt
             if [ -f "$LOGFILE" ]; then
-              echo "=== raw log file (last 200 lines) ==="
-              tail -200 "$LOGFILE"
+              echo "=== raw pmbootstrap log file (last 300 lines) ==="
+              tail -300 "$LOGFILE"
             fi
+            # The rootfs image may still exist from a previous/failed run;
+            # clean stale chroots so a retry starts from a consistent state.
+            python3 ~/pmbootstrap/pmbootstrap.py zap 2>&1 | tail -5 || true
             exit 1
           fi
 
