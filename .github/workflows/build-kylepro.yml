@@ -60,6 +60,25 @@ jobs:
           print("pmbootstrap patched: ext4 rootfs will be safe for GT-S7580 kernel")
           PATCH
 
+      - name: Patch pmbootstrap chroot env (GOGC=off for qemu Go binaries)
+        run: |
+          # mkinitfs is a Go binary that runs for armv7 under qemu-user.
+          # Go's concurrent garbage collector crashes under qemu emulation
+          # ("fatal error: found pointer to free object"). pmbootstrap runs
+          # chroot commands with 'sudo env -i' (host env stripped), so inject
+          # GOGC=off into the default chroot environment.
+          python3 - << 'PATCH'
+          from pathlib import Path
+          p = Path.home() / "pmbootstrap/pmb/chroot/run.py"
+          src = p.read_text()
+          old = '        "CHARSET": "UTF-8",'
+          new = '        "GOGC": "off",\n        "CHARSET": "UTF-8",'
+          if old not in src:
+              raise SystemExit("ERROR: pmbootstrap run.py changed upstream - update this patch")
+          p.write_text(src.replace(old, new))
+          print("pmbootstrap patched: GOGC=off in chroot environment")
+          PATCH
+
       - name: Initialize pmbootstrap
         run: |
           yes "" | python3 ~/pmbootstrap/pmbootstrap.py init 2>&1 || true
@@ -182,6 +201,8 @@ jobs:
 
           # Use --single-partition so it generates a raw ext4 image, bypassing GPT issues.
           # pipefail ensures a pmbootstrap failure fails the step even through tee.
+          # (GOGC=off for the qemu-emulated mkinitfs is injected via the
+          # "Patch pmbootstrap chroot env" step above.)
           set -o pipefail
           if ! echo -e "test\ntest" | python3 ~/pmbootstrap/pmbootstrap.py install --single-partition 2>&1 | tee build.log; then
             echo "=== BUILD FAILED ==="
