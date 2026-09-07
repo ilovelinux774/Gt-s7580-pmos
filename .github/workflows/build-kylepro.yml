@@ -199,12 +199,15 @@ jobs:
           echo "Starting build at $(date)"
           set -o pipefail
 
-          # Use --single-partition so it generates a raw ext4 image, bypassing GPT issues.
+          # --single-partition: generate a single flat ext4 image with no GPT/
+          #   partition table (easy to flash via TWRP -> Flash image to system).
+          # --no-sparse: do NOT wrap it in Android sparse format (that is only
+          #   for Odin/heimdall; TWRP wants the raw ext4 image).
           # pipefail ensures a pmbootstrap failure fails the step even through tee.
           # (GOGC=off for the qemu-emulated mkinitfs is injected via the
           # "Patch pmbootstrap chroot env" step above.)
           set -o pipefail
-          if ! echo -e "test\ntest" | python3 ~/pmbootstrap/pmbootstrap.py install --single-partition 2>&1 | tee build.log; then
+          if ! echo -e "test\ntest" | python3 ~/pmbootstrap/pmbootstrap.py install --single-partition --no-sparse 2>&1 | tee build.log; then
             echo "=== BUILD FAILED ==="
             LOGFILE=~/.local/var/pmbootstrap/log.txt
             if [ -f "$LOGFILE" ]; then
@@ -227,10 +230,9 @@ jobs:
           # path fails under CI ("chroot not initialized" -> mkinitfs exit 1).
           python3 ~/pmbootstrap/pmbootstrap.py export --no-install ~/pmos-export
 
-          # pmbootstrap replaces the raw ext4 image with an Android sparse
-          # image (deviceinfo_flash_sparse=true) and export creates symlinks.
-          # Dereference symlinks into real files so the artifact upload gets
-          # the actual binaries (and tune2fs/simg2img can inspect them).
+          # export() creates convenience symlinks pointing into the chroots.
+          # Dereference them into real files so the artifact upload gets the
+          # actual binaries.
           cd ~/pmos-export
           for l in *; do
             if [ -L "$l" ]; then
@@ -239,19 +241,61 @@ jobs:
               cp "$target" "$l"
             fi
           done
+          [ -d dtbs ] && find dtbs -type l -exec sh -c 't=$(readlink -f "$1"); rm "$1"; cp "$t" "$1"' _ {} \; || true
+
+          # Give the rootfs a TWRP-friendly name (it is a raw ext4 filesystem,
+          # no partition table) and drop a flashing guide next to it.
+          mv samsung-kylepro.img rootfs.img
+          cat > FLASHING.txt << 'EOF'
+          postmarketOS for Samsung GT-S7580 (samsung-kylepro) — TWRP flashing
+          =====================================================================
+
+          Files:
+            boot.img    Android boot image (kernel + initramfs) -> flash to BOOT
+            rootfs.img  Raw ext4 root filesystem (NO partition table) -> flash to SYSTEM
+            vmlinuz     Raw kernel (not needed for TWRP; boot.img already contains it)
+            dtbs/       Device tree blobs (not needed; appended to kernel)
+
+          Steps in TWRP:
+            1. Boot to TWRP (power + vol-up / vol-down as usual).
+            2. Push the files to /tmp or external SD (adb push boot.img rootfs.img /sdcard/).
+            3. Wipe -> Advanced Wipe -> tick System (do NOT use the default wipe,
+               it expects the old Android/fsck layout; format System as ext2/ext4 if asked).
+            4. Install -> Install Image -> choose boot.img -> flash to "Boot".
+            5. Install -> Install Image -> choose rootfs.img -> flash to "System".
+            6. Reboot.
+
+          First boot:
+            - serial console on the UART getty (ttyS2 @115200) if you have a dock.
+            - a root shell is also listening on telnet port 23 (debug only!).
+            - user "test" / password "test".
+
+          NOTE: rootfs.img is a flat ext4 filesystem for the whole SYSTEM
+          partition. It has NO GPT/partition table and is NOT sparse, so TWRP
+          can write it directly with "dd"-style image flashing.
+          EOF
+          # strip the leading indentation added by the heredoc in YAML
+          sed -i 's/^          //' FLASHING.txt
 
           echo "=== Exported files ==="
           ls -la ~/pmos-export/
 
-          IMG=~/pmos-export/samsung-kylepro.img
-          echo "Rootfs Image: $IMG"
-          file -b "$IMG"
+          echo "Rootfs image:"
+          file -b rootfs.img
 
-          echo "Verifying ext4 features are safe..."
-          # The exported image is Android-sparse; un-sparse to raw ext4 first.
-          simg2img "$IMG" /tmp/rootfs.raw
-          sudo tune2fs -l /tmp/rootfs.raw | grep "Filesystem features" > /tmp/features
-          cat /tmp/features
+          echo "Verifying there is NO partition table (must be bare ext4)..."
+          # ext4 magic must be at offset 0x438...
+          od -An -tx1 -j 1080 -N 2 rootfs.img | grep -qi "53 ef" \
+            || { echo "ERROR: ext4 magic not found"; exit 1; }
+          # ...and the GPT signature at sector 1 must be absent (no 'EFI PART').
+          if od -An -tx1 -j 512 -N 8 rootfs.img | grep -qi "45 46 49 20"; then
+            echo "ERROR: GPT signature present — image has a partition table!"
+            exit 1
+          fi
+          echo "OK: bare ext4 filesystem, no GPT/UEFI, no subpartitions."
+
+          echo "Verifying ext4 features are safe for the 3.4 kernel..."
+          sudo tune2fs -l rootfs.img | grep "Filesystem features" | tee /tmp/features
           for bad in metadata_csum metadata_csum_seed meta_bg; do
             if grep -qw "$bad" /tmp/features; then
               echo "ERROR: feature '$bad' is set! The old kernel will panic."
