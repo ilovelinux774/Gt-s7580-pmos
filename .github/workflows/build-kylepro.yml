@@ -164,11 +164,13 @@ jobs:
           PMAPORTS=$(python3 ~/pmbootstrap/pmbootstrap.py config aports)
           DEVICE_INFO="$PMAPORTS/device/testing/device-samsung-kylepro/deviceinfo"
           test -f "$DEVICE_INFO" || { echo "ERROR: deviceinfo not found"; exit 1; }
-          # pmbootstrap refuses --single-partition when initramfs-extra is enabled;
-          # kylepro only needs a raw single-partition ext4 image, so turn it off.
-          sed -i 's/^deviceinfo_create_initfs_extra="true"/deviceinfo_create_initfs_extra="false"/' "$DEVICE_INFO"
-          echo "=== deviceinfo initfs setting now: ==="
-          grep create_initfs_extra "$DEVICE_INFO"
+          # pmbootstrap refuses --single-partition when initramfs-extra is enabled.
+          # NOTE: pmbootstrap parses deviceinfo values as raw strings, so setting
+          # ="false" is still truthy — the variable must be UNSET to disable it
+          # (it then falls back to the default of False).
+          sed -i '/^deviceinfo_create_initfs_extra=/d' "$DEVICE_INFO"
+          echo "=== deviceinfo initfs setting now (should print nothing): ==="
+          grep create_initfs_extra "$DEVICE_INFO" && { echo "ERROR: initfs-extra still enabled"; exit 1; } || echo "initramfs-extra disabled"
           # deviceinfo is a source file of the package -> refresh its checksum
           python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-kylepro
 
