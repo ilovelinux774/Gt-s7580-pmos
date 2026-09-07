@@ -158,6 +158,20 @@ jobs:
           python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-kylepro
           echo "checksums updated OK"
 
+      - name: Disable initramfs-extra (required for --single-partition image)
+        run: |
+          set -euo pipefail
+          PMAPORTS=$(python3 ~/pmbootstrap/pmbootstrap.py config aports)
+          DEVICE_INFO="$PMAPORTS/device/testing/device-samsung-kylepro/deviceinfo"
+          test -f "$DEVICE_INFO" || { echo "ERROR: deviceinfo not found"; exit 1; }
+          # pmbootstrap refuses --single-partition when initramfs-extra is enabled;
+          # kylepro only needs a raw single-partition ext4 image, so turn it off.
+          sed -i 's/^deviceinfo_create_initfs_extra="true"/deviceinfo_create_initfs_extra="false"/' "$DEVICE_INFO"
+          echo "=== deviceinfo initfs setting now: ==="
+          grep create_initfs_extra "$DEVICE_INFO"
+          # deviceinfo is a source file of the package -> refresh its checksum
+          python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-kylepro
+
       - name: Build postmarketOS (Single Partition)
         run: |
           echo "Starting build at $(date)"
