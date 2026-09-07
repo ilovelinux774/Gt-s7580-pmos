@@ -192,7 +192,13 @@ jobs:
       - name: Export and Verify Images
         run: |
           mkdir -p ~/pmos-export
-          python3 ~/pmbootstrap/pmbootstrap.py export ~/pmos-export
+          # --no-install: skip rebuilding the initramfs at export time.
+          # mkinitfs already ran inside 'pmbootstrap install' with the
+          # final UUIDs; the post-install remount in export's autoinstall
+          # path fails under CI ("chroot not initialized" -> mkinitfs exit 1).
+          python3 ~/pmbootstrap/pmbootstrap.py export --no-install ~/pmos-export
+          echo "=== Exported files ==="
+          ls -la ~/pmos-export/
 
           IMG=$(readlink -f ~/pmos-export/samsung-kylepro.img)
           echo "Rootfs Image: $IMG"
