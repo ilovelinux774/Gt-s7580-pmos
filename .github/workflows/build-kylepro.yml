@@ -89,13 +89,15 @@ jobs:
           # Add python3 and busybox-extras (for telnetd).
           python3 ~/pmbootstrap/pmbootstrap.py config device samsung-kylepro
           python3 ~/pmbootstrap/pmbootstrap.py config extra_packages python3,busybox-extras
+          # kernel 3.4 is NOT compatible with systemd (dies at init). Use OpenRC.
+          python3 ~/pmbootstrap/pmbootstrap.py config systemd never
           python3 ~/pmbootstrap/pmbootstrap.py config ui console
           python3 ~/pmbootstrap/pmbootstrap.py config user test
           python3 ~/pmbootstrap/pmbootstrap.py config hostname s7580
           python3 ~/pmbootstrap/pmbootstrap.py config timezone UTC
           python3 ~/pmbootstrap/pmbootstrap.py config locale C.UTF-8
 
-      - name: Inject Rootfs Telnetd (root shell on port 23, OpenRC + systemd)
+      - name: Inject Rootfs Telnetd (root shell on port 23, OpenRC)
         run: |
           set -euo pipefail
           PMAPORTS=$(python3 ~/pmbootstrap/pmbootstrap.py config aports)
