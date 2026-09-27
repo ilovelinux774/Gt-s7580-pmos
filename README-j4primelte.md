@@ -28,16 +28,30 @@ that root-level boot.img onto the J4+.** Use only this branch's new Actions arti
 
 ## Run the build
 
-Select **Build postmarketOS J4+ SM-J415F (USB debug)** in Actions, choose this branch,
-and run it. The workflow has read-only repository permissions and requires no PAT
-in the workflow or its artifacts. The operator's token is only used externally to
-commit the branch and dispatch the run.
+Open the existing **build-medusa.yml** Actions workflow, choose the
+`pmos-j4primelte-20260927` branch, and run it. Its sidebar label may still be the
+ProjectMedusa Android-kernel name from `main`; this branch runs the pmOS workflow.
+It has read-only repository permissions and requires no PAT in the workflow or
+its artifacts. The operator's token is only used externally to commit the branch
+and dispatch the run.
 
-Two artifacts are expected:
+The workflow first checks pmbootstrap's channel metadata and initializes the
+native APK/chroot environment, BEFORE the long kernel compile. The release tree
+and `origin/main` channel metadata have separate commit pins; fetching metadata
+does not switch the build to edge. Successful kernel outputs are saved before
+rootfs packaging and reused only after recipe and file-checksum verification.
+Changing only the userspace configuration does not invalidate the kernel cache.
+The first cache-producing run still needs a compile; the previous failed run
+saved logs only, so its compiled binary cannot be recovered from that artifact.
+
+Three artifacts are expected as their respective stages succeed:
 
 1. `pmos-j4primelte-SM-J415F-usb-debug-<run>` — validated-format test images.
 2. `j4primelte-build-logs-<run>` — logs, final kernel config, source pins and patches,
    uploaded even if compilation or packaging fails.
+3. `j4primelte-kernel-inputs-<run>` — compiler outputs and provenance for rebuilding
+   packages; **NOT boot.img or a recovery-flashable ZIP**. Saved even if the later
+   rootfs stage fails.
 
 ## Image files
 

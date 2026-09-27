@@ -42,8 +42,53 @@ jobs:
             qemu-user-static binfmt-support e2fsprogs sudo util-linux
           df -h
 
+      - name: Check scripts and kernel cache tests
+        run: |
+          bash -n ci/j4primelte/build-kernel.sh ci/j4primelte/prepare-pmos.sh ci/j4primelte/build-pmos.sh
+          python3 -m compileall -q ci/j4primelte
+          python3 ci/j4primelte/test-kernel-cache.py
+
+      - name: Preflight pmbootstrap before the long kernel compile
+        run: bash ci/j4primelte/prepare-pmos.sh 2>&1 | tee artifacts/logs/preflight.log
+
+      - name: Calculate kernel-only cache key
+        id: kernel_key
+        run: echo "value=$(python3 ci/j4primelte/kernel-cache.py key)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore successful kernel inputs
+        id: kernel_cache
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: artifacts/kernel-cache
+          key: j4-kernel-v1-ubuntu22-${{ steps.kernel_key.outputs.value }}
+
       - name: Build the pinned J4+ kernel with the pmOS configuration
+        if: steps.kernel_cache.outputs.cache-hit != 'true'
         run: bash ci/j4primelte/build-kernel.sh 2>&1 | tee artifacts/logs/kernel-build.log
+
+      - name: Record compiler outputs and provenance
+        if: steps.kernel_cache.outputs.cache-hit != 'true'
+        run: python3 ci/j4primelte/kernel-cache.py capture
+
+      - name: Verify and stage kernel inputs
+        run: python3 ci/j4primelte/kernel-cache.py restore
+
+      - name: Save successful kernel before image packaging
+        if: steps.kernel_cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: artifacts/kernel-cache
+          key: j4-kernel-v1-ubuntu22-${{ steps.kernel_key.outputs.value }}
+
+      - name: Upload compiler outputs (not flashable images)
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-kernel-inputs-${{ github.run_number }}
+          path: artifacts/kernel-cache/
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Build OpenRC postmarketOS and USB debug images
         run: bash ci/j4primelte/build-pmos.sh 2>&1 | tee artifacts/logs/pmos-build.log

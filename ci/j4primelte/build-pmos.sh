@@ -10,52 +10,18 @@ CFG="$HOME/j4-pmbootstrap.cfg"
 IMAGES="$ROOT/artifacts/images"
 LOGS="$ROOT/artifacts/logs"
 mkdir -p "$IMAGES" "$LOGS"
-checkout_pin() {
-    local url=$1 sha=$2 dest=$3
-    git init "$dest"
-    git -C "$dest" remote add origin "$url"
-    git -C "$dest" fetch --depth=1 origin "$sha"
-    git -C "$dest" checkout --detach FETCH_HEAD
-    test "$(git -C "$dest" rev-parse HEAD)" = "$sha"
+# The workflow prepares and checks this environment BEFORE compiling Linux.
+test -f "$WORK/j4-preflight-pins" || {
+    echo 'Run ci/j4primelte/prepare-pmos.sh first'; exit 1;
 }
-checkout_pin "$PMBOOTSTRAP_URL" "$PMBOOTSTRAP_COMMIT" "$PMB"
-checkout_pin "$PMAPORTS_URL" "$PMAPORTS_COMMIT" "$PORTS"
-mkdir -p "$PORTS/device/downstream"
+EXPECTED=$(printf '%s\n' "$PMBOOTSTRAP_COMMIT" "$PMAPORTS_COMMIT" "$PMAPORTS_CHANNELS_COMMIT")
+test "$(cat "$WORK/j4-preflight-pins")" = "$EXPECTED"
+test "$(git -C "$PORTS" rev-parse HEAD)" = "$PMAPORTS_COMMIT"
+# Copy the actual compiler outputs, not just the metadata staged by preflight.
 cp -a "$ROOT/pmaports/device/downstream/"* "$PORTS/device/downstream/"
-python3 "$ROOT/ci/j4primelte/patch-pmbootstrap.py" "$PMB"
-git -C "$PMB" diff > "$LOGS/pmbootstrap.patch"
-
-cat > "$CFG" <<EOF
-[pmbootstrap]
-aports = $PORTS
-work = $WORK
-device = samsung-j4primelte
-ui = console
-user = user
-hostname = j4-debug
-service_manager = openrc
-timezone = Europe/Istanbul
-locale = C.UTF-8
-extra_space = 128
-build_pkgs_on_install = False
-ssh_keys = False
-[providers]
-[mirrors]
-alpine = https://dl-cdn.alpinelinux.org/alpine/
-pmaports = https://mirror.postmarketos.org/postmarketos/
-EOF
-# Initialize a new CI work directory without interactive init or ignored errors.
-mkdir -p "$WORK/cache_git"
-python3 - "$PMB" "$WORK" <<'PY'
-import sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1])
-import pmb.config
-(Path(sys.argv[2]) / 'version').write_text(f'{pmb.config.work_version}\n')
-PY
+cp "$ROOT/ci/j4primelte/sources.env" "$LOGS/sources.env"
+printf 'image_repository_commit=%s\n' "$(git -C "$ROOT" rev-parse HEAD)" >> "$LOGS/sources.env"
 PM=(python3 "$PMB/pmbootstrap.py" -c "$CFG" --details-to-stdout --assume-yes)
-"${PM[@]}" work_migrate
-"${PM[@]}" status > "$LOGS/pmbootstrap-status.txt"
 "${PM[@]}" checksum linux-samsung-j4primelte
 "${PM[@]}" checksum device-samsung-j4primelte
 "${PM[@]}" build --arch armv7 linux-samsung-j4primelte
@@ -82,7 +48,7 @@ sync
 sudo umount "$MOUNT"
 trap - EXIT
 
-sudo tune2fs -l "$IMAGES/rootfs.img" > "$LOGS/rootfs-superblock.txt"
+sudo tune2fs -l "$IMAGES/rootfs.img" | tee "$LOGS/rootfs-superblock.txt" >/dev/null
 FEATURES=$(grep 'Filesystem features:' "$LOGS/rootfs-superblock.txt")
 for unsupported in metadata_csum metadata_csum_seed orphan_file 64bit meta_bg; do
     if grep -qw "$unsupported" <<< "$FEATURES"; then
@@ -92,7 +58,7 @@ done
 python3 "$ROOT/ci/j4primelte/verify-images.py" "$IMAGES" | tee "$LOGS/image-validation.txt"
 cp "$ROOT/README-j4primelte.md" "$IMAGES/README.md"
 cp "$LOGS/sources.env" "$LOGS/kernel.config" "$LOGS/installed-packages.txt" "$IMAGES/"
-cp "$LOGS/kernel-source.patch" "$LOGS/pmbootstrap.patch" "$IMAGES/"
+cp "$LOGS/kernel-source.patch" "$LOGS/pmbootstrap.patch" "$LOGS/kernel-build-provenance.json" "$IMAGES/"
 (
     cd "$IMAGES"
     sha256sum rootfs.img > ROOTFS-UNCOMPRESSED.sha256
