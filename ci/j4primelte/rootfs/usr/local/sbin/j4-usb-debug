@@ -50,5 +50,15 @@ telnetpid=$!
 echo "USB debug listeners requested on $iface at $ipaddr; PIDs $sshpid / $telnetpid"
 sleep 2
 /usr/local/sbin/j4-collect-logs || true
-# On an SSH daemon failure OpenRC respawns us; telnet isn't silently left behind.
-wait "$sshpid"
+# Keep telnet usable even if SSH repeatedly crashes; restart only Dropbear.
+# If telnet itself exits, OpenRC restarts this service and both listeners.
+while kill -0 "$telnetpid" 2>/dev/null; do
+    if ! kill -0 "$sshpid" 2>/dev/null; then
+        wait "$sshpid" || true
+        echo 'Dropbear exited; retrying without interrupting the telnet fallback.'
+        /usr/sbin/dropbear -F -E -B -R -p "$ipaddr:22" >>/var/log/j4/dropbear.log 2>&1 &
+        sshpid=$!
+    fi
+    sleep 5
+done
+wait "$telnetpid"

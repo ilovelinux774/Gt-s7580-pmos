@@ -7,6 +7,7 @@ KERNEL="$HOME/j4-kernel"
 TC="$HOME/j4-toolchain"
 LOGS="$ROOT/artifacts/logs"
 mkdir -p "$LOGS"
+cp "$ROOT/ci/j4primelte/sources.env" "$LOGS/sources.env"
 
 checkout_pin() {
     local url=$1 sha=$2 dest=$3
@@ -22,17 +23,8 @@ CROSS="$TC/bin/arm-linux-androideabi-"
 "${CROSS}gcc" --version
 cd "$KERNEL"
 
-# GCC 10+ changed the host compiler's default to -fno-common. The old DTC
-# lexer must refer to, rather than define, the parser's yylloc variable.
-python3 - <<'PY'
-from pathlib import Path
-for name in ['scripts/dtc/dtc-lexer.l', 'scripts/dtc/dtc-lexer.lex.c_shipped']:
-    p = Path(name)
-    text = p.read_text()
-    if 'YYLTYPE yylloc;' not in text:
-        raise SystemExit(f'Expected DTC declaration missing: {name}')
-    p.write_text(text.replace('\nYYLTYPE yylloc;', '\nextern YYLTYPE yylloc;'))
-PY
+# This pinned source already removed DTC's duplicate lexer yylloc definition.
+# Do not attempt to reapply an obsolete compiler-compatibility patch.
 
 # Explicitly use ARM/j4primelte. Do not fall back to a generic SoC or ARM64 config.
 MAKE=(make O=out ARCH=arm "CROSS_COMPILE=$CROSS" "CC=${CROSS}gcc" PYTHON=python2)
@@ -70,9 +62,21 @@ git diff > "$LOGS/kernel-source.patch"
 export KBUILD_BUILD_USER=pmos-ci KBUILD_BUILD_HOST=github-actions
 export KBUILD_BUILD_TIMESTAMP="$(git show -s --format=%cD HEAD)"
 "${MAKE[@]}" -j"$(nproc)"
+# The vendor boot Makefile discovers DTBs at parse time. Re-enter it after
+# dtbs are built so a fresh parallel build cannot omit the appended trees.
+"${MAKE[@]}" -j"$(nproc)" dtbs
+"${MAKE[@]}" zImage-dtb
 test -s out/arch/arm/boot/zImage-dtb
 find out/arch/arm/boot -name '*j4primelte-sea*.dtb' -print | tee "$LOGS/dtbs.txt"
 test -s "$LOGS/dtbs.txt"
+python3 - <<'PY'
+from pathlib import Path
+folder = Path('out/arch/arm/boot')
+z = (folder / 'zImage').read_bytes()
+combined = (folder / 'zImage-dtb').read_bytes()
+assert combined.startswith(z), 'Appended image does not start with zImage'
+assert combined[len(z):len(z)+4] == bytes.fromhex('d00dfeed'), 'Appended DTB missing'
+PY
 
 STAGING="$HOME/j4-kernel-modules"
 mkdir -p "$STAGING/lib/modules"
