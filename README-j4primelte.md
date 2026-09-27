@@ -1,8 +1,23 @@
 # Galaxy J4+ / SM-J415F: postmarketOS USB bring-up
 
-**Experimental, hardware-untested test images. A green Actions run proves a build,
-not that the phone boots. The screen, touch, Wi-Fi, sound, and modem are NOT
-claimed to work.** The first milestone is a reliable shell and useful logs.
+**Experimental bring-up, not a secure daily-driver image.** A green Actions run
+alone is not hardware validation. The owner has now tested selected components
+on one SM-J415F using run 13 (image revision `0fdfd5569c9a32f34c7a426bf2b554d7790dcb64`):
+
+- Read/write pmOS rootfs, OpenRC, RNDIS and blank-password root SSH work.
+- A temporary RGB-bar program produced visible framebuffer output and backlight.
+  No desktop or GPU acceleration has been demonstrated. The MDSS driver powers
+  the panel down on the last framebuffer close; keep a display consumer open.
+  Real brightness control is `/sys/class/leds/lcd-backlight/brightness`, not the
+  Samsung stub `/sys/class/backlight/panel`.
+- Wi-Fi scanned, associated and obtained an IPv4 address after stock-firmware
+  provisioning, disabling NM management of `p2p0`, and selecting a permanent MAC
+  for the connection. A wlan0-bound Internet ping returned 3/3 replies, DNS worked,
+  and the system clock was correct. The two compatibility changes were tested
+  together: neither one alone has been proven to be the cause/fix.
+- Touchscreen `sec_ts`/I2C clock-timeout flooding has been observed and remains
+  unresolved. Audio, cellular service, GPU acceleration and general stability are
+  not validated. Wi-Fi cold-boot automation below still requires an on-device test.
 
 ## What changed
 
@@ -65,8 +80,10 @@ Three artifacts are expected as their respective stages succeed:
 - `ROOTFS-UNCOMPRESSED.sha256`: hash after decompression.
 - `image-info.json`: actual sizes and boot-header validation results.
 
-No automatic flashing script is supplied. The custom recovery name and actual
-partition sizes/paths still need verification. Back up the current BOOT and SYSTEM
+**Recovery confirmed: OrangeFox.** No automatic flashing script is supplied. The
+owner reported BOOT `/dev/mmcblk0p23` (32M in lsblk), SYSTEM `/dev/mmcblk0p47`,
+APNHLOS `/dev/mmcblk0p45` and VENDOR `/dev/mmcblk0p48` on this phone; still verify
+labels and byte capacities on the actual target. Back up the current BOOT and SYSTEM
 and any Android data you want to keep before replacing anything. The intended
 layout is the test boot image on BOOT and the flat root filesystem on SYSTEM;
 **do not assume numeric mmcblk partition numbers, format USERDATA, or touch EFS,
@@ -103,13 +120,58 @@ telnet 172.16.42.1 23
 
 Both rootfs listeners bind the USB IP; iptables additionally drops access to their
 ports arriving on any non-USB interface. The service refuses to open them if those
-rules cannot be installed. No Wi-Fi is configured. This access is intentionally
-unauthenticated; use it only with a trusted directly connected computer and remove
-it before enabling other networking or using the phone normally.
+rules cannot be installed. No private Wi-Fi profile or stock firmware is included
+in the CI image. The optional live-device setup below does not broaden SSH/telnet
+access to Wi-Fi. This access is intentionally unauthenticated; use a trusted,
+directly connected computer and remove the debug services before normal,
+untrusted-use deployment.
 
 With `boot-debug.img`, connect by telnet to inspect the initramfs. Use
 `cat /pmOS_init.log`, `dmesg`, and `ip address`. Run `pmos_continue_boot` if you want
 to continue booting. That image is specifically for failures before OpenRC starts.
+
+## Persist the live-tested Wi-Fi setup (no reflash)
+
+`ci/j4primelte/wifi-setup.py` is an **opt-in live-device helper**, not a flashable
+image. It requires the tested ARM32/kernel/deviceinfo, the real firmware files
+already copied into `/lib/firmware`, and an active, working wlan0 profile with a
+saved PSK. It refuses to overwrite pre-existing files not owned by the helper.
+Run it ON THE PHONE while USB SSH and Wi-Fi are working:
+
+```sh
+python3 /tmp/j4-wifi-setup.py --check
+```
+
+```sh
+python3 /tmp/j4-wifi-setup.py --install
+```
+
+It installs:
+
+- `/usr/local/sbin/j4-wifi`: guarded WCNSS initialization with no automatic retry
+  after a failed attempt, and no reinitialization if wlan0 already exists.
+- `/etc/init.d/j4-wifi`, enabled in **default**, AFTER NetworkManager and
+  wpa_supplicant. This deliberately reproduces the successful late/manual
+  sequence and avoids wpa_supplicant selecting p2p0 at early boot.
+- `/etc/NetworkManager/conf.d/90-j4-legacy-wifi.conf`: ignore only p2p0 and use a
+  permanent connection MAC by default only on wlan0. Global scan randomization,
+  other interfaces, WPA settings, USB addresses and SSH services are unchanged.
+- Saves the current working profile by UUID, with permanent MAC, autoconnect
+  enabled and priority 100. It does not ask for or print the password, start a
+  new connection, reload/restart NM, or rerun firmware initialization at install.
+
+Private backups (including the existing Wi-Fi keyfile) are stored root-only in
+`/var/lib/j4-wifi/backup-*`. **Never upload that directory or its contents.** It is
+outside `j4-collect-logs`' archive path. Firmware is not mounted, fetched or copied
+by the helper, and stock/calibration partitions are not modified.
+
+Require `CHECK_OK`, then `INSTALL_OK`. If it stops, keep the current connection
+and report the error without sharing keyfiles. A successful installation only
+schedules the boot path: **cold-boot/reconnection still needs to be verified**.
+On the next boot, inspect `rc-service j4-wifi status` and
+`/var/log/j4/wifi-start.log`. If the host loses its manual USB address while the
+phone reboots, restore host `172.16.42.2/24` on the actual USB interface before
+reconnecting to the phone at `172.16.42.1`.
 
 ## Collect logs
 
