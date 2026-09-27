@@ -1,0 +1,30 @@
+#!/bin/sh
+# Deliberately no /etc/shadow, environment dump, or wireless credentials.
+set -u
+DEST=/var/log/j4
+mkdir -p "$DEST"
+uname -a > "$DEST/uname.txt"
+dmesg > "$DEST/dmesg.txt"
+cat /proc/cmdline > "$DEST/cmdline.txt"
+cat /proc/partitions > "$DEST/partitions.txt"
+cat /proc/mounts > "$DEST/mounts.txt"
+cat /proc/fb > "$DEST/framebuffers.txt" 2>&1
+ip -details address > "$DEST/ip-address.txt" 2>&1
+ip route > "$DEST/ip-route.txt" 2>&1
+ss -lntp > "$DEST/listeners.txt" 2>&1
+ps > "$DEST/processes.txt"
+rc-status -a > "$DEST/openrc-status.txt" 2>&1
+ls -la /sys/class/graphics /sys/class/backlight /sys/class/net /sys/class/udc \
+    > "$DEST/sysfs-classes.txt" 2>&1
+if [ -e /proc/config.gz ]; then cp /proc/config.gz "$DEST/config.gz"; fi
+if [ -e /var/log/rc.log ]; then cp /var/log/rc.log "$DEST/openrc-boot.log"; fi
+if [ -d /sys/fs/pstore ]; then cp -a /sys/fs/pstore "$DEST/" 2>/dev/null || true; fi
+for path in /sys/class/android_usb/android0/state /sys/class/android_usb/android0/functions \
+    /sys/kernel/debug/msm_otg/mode; do
+    [ -e "$path" ] || continue
+    printf '\n%s\n' "$path"
+    cat "$path"
+done > "$DEST/usb-gadget.txt" 2>&1
+sync
+tar -czf /var/log/j4-diagnostics.tar.gz -C /var/log j4
+printf 'Saved /var/log/j4-diagnostics.tar.gz\n'

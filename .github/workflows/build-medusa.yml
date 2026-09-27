@@ -1,82 +1,82 @@
-name: Build ProjectMedusa Kernel for j4primelte
+name: Build postmarketOS J4+ SM-J415F (USB debug)
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: j4primelte-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      GIT_TERMINAL_PROMPT: "0"
+      PYTHONUNBUFFERED: "1"
     steps:
-      - name: Checkout kernel source
+      - name: Checkout this branch
         uses: actions/checkout@v4
         with:
-          repository: ProjectMedusaAndroid/android_kernel_samsung_msm8917_Q
-          path: kernel_source
+          persist-credentials: false
 
-      - name: Setup toolchain
+      - name: Python for pmbootstrap
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
         run: |
+          mkdir -p artifacts/logs
           sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabi gcc-aarch64-linux-gnu make bc ccache zip bc bison build-essential curl flex git gnupg gperf lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev libncurses-dev python2
-          sudo ln -sf /usr/bin/python2 /usr/bin/python
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 -b lineage-18.1 ~/arm-linux-androideabi-4.9
-          sudo ln -sf /usr/bin/python2 /usr/bin/python
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 -b lineage-18.1 ~/aarch64-linux-android-4.9
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex git curl ca-certificates python2 \
+            libssl-dev libelf-dev libncurses5 libncurses-dev zlib1g-dev \
+            lib32z1 lib32stdc++6 cpio rsync xz-utils file kmod kpartx \
+            qemu-user-static binfmt-support e2fsprogs sudo util-linux
+          df -h
 
-      - name: Build Kernel
+      - name: Build the pinned J4+ kernel with the pmOS configuration
+        run: bash ci/j4primelte/build-kernel.sh 2>&1 | tee artifacts/logs/kernel-build.log
+
+      - name: Build OpenRC postmarketOS and USB debug images
+        run: bash ci/j4primelte/build-pmos.sh 2>&1 | tee artifacts/logs/pmos-build.log
+
+      - name: Collect diagnostics even on failure
+        if: always()
         run: |
-          cd kernel_source
-          export CROSS_COMPILE=$HOME/aarch64-linux-android-4.9/bin/aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=$HOME/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-
-          export ARCH=arm64
-          
-          # Since j4primelte uses a 64-bit kernel on 64-bit ROMs (LineageOS 18.1 is usually ARM64 for J4+)
-          # Or if it's 32-bit, we compile ARM. We will compile ARM to be safe for 3.18, 
-          # but let's check the defconfig
-          if [ -f "arch/arm/configs/j4primelte_defconfig" ]; then
-             export ARCH=arm
-             export CROSS_COMPILE=$CROSS_COMPILE_ARM32
-             make O=out j4primelte_defconfig
-          elif [ -f "arch/arm64/configs/j4primelte_defconfig" ]; then
-             make O=out j4primelte_defconfig
-          else
-             # Generic exynos/msm config fallback
-             make O=out msm8917_defconfig
+          mkdir -p artifacts/logs
+          if [ -f "$HOME/j4-pmos-work/log.txt" ]; then
+            sudo cp "$HOME/j4-pmos-work/log.txt" artifacts/logs/pmbootstrap.log
           fi
-          
-          make -j$(nproc --all) O=out
-
-      - name: Package with AnyKernel3
-        run: |
-          git clone https://github.com/osm0sis/AnyKernel3.git
-          cd AnyKernel3
-          # Clean AnyKernel3
-          rm -rf .git README.md
-          
-          # Find the compiled kernel Image
-          if [ -f "../kernel_source/out/arch/arm/boot/zImage" ]; then
-             cp ../kernel_source/out/arch/arm/boot/zImage .
-          elif [ -f "../kernel_source/out/arch/arm64/boot/Image.gz" ]; then
-             cp ../kernel_source/out/arch/arm64/boot/Image.gz .
-          elif [ -f "../kernel_source/out/arch/arm64/boot/Image.gz-dtb" ]; then
-             cp ../kernel_source/out/arch/arm64/boot/Image.gz-dtb .
+          if [ -f "$HOME/j4-kernel/out/.config" ]; then
+            cp "$HOME/j4-kernel/out/.config" artifacts/logs/kernel.config
           fi
-          
-          # Configure anykernel
-          
-          
-          # Force set the block path
-          sed -i 's/^block=.*/block=\/dev\/block\/bootdevice\/by-name\/boot;/g' anykernel.sh
-          sed -i 's/^is_slot_device=.*/is_slot_device=0;/g' anykernel.sh
+          git diff --stat > artifacts/logs/worktree.txt
+          sudo chown -R "$(id -u):$(id -g)" artifacts
+          df -h > artifacts/logs/disk-space.txt
 
-
-          sed -i 's/device.name1=maguro/device.name1=j4primelte/' anykernel.sh
-          sed -i 's/device.name2=toro/device.name2=j4+/' anykernel.sh
-          sed -i 's/device.name3=toroplus/device.name3=j4primelte/' anykernel.sh
-          
-          zip -r9 ../ProjectMedusa-j4primelte.zip *
-
-      - name: Upload Kernel
+      - name: Upload images (only after validation)
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ProjectMedusa-Kernel-j4primelte
-          path: ProjectMedusa-j4primelte.zip
+          name: pmos-j4primelte-SM-J415F-usb-debug-${{ github.run_number }}
+          path: artifacts/images/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload build logs and source manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-build-logs-${{ github.run_number }}
+          path: artifacts/logs/
+          if-no-files-found: warn
+          retention-days: 14

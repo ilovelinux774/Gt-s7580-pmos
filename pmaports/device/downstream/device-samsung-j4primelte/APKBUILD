@@ -1,0 +1,38 @@
+# Experimental local bring-up package, not an upstream support claim.
+pkgname=device-samsung-j4primelte
+pkgver=1
+pkgrel=0
+pkgdesc="Samsung Galaxy J4+ SM-J415F (experimental USB debug)"
+url="https://github.com/ilovelinux774/Gt-s7580-pmos"
+arch="armv7"
+license="MIT"
+options="!check !archcheck"
+depends="
+	linux-samsung-j4primelte
+	mkbootimg
+	postmarketos-base
+	postmarketos-base-downstream-disable-udev-v4l
+	postmarketos-mkinitfs-hook-debug-shell
+	dropbear
+	dropbear-openrc
+	busybox-extras
+	iproute2
+	iptables
+	iptables-legacy
+"
+makedepends="devicepkg-dev"
+source="deviceinfo kernel-cmdline.conf initfs-hook.sh cleanup-hook.sh initfs.files"
+
+build() {
+	devicepkg_build "$startdir" "$pkgname"
+}
+
+package() {
+	devicepkg_package "$startdir" "$pkgname"
+	install -Dm644 "$srcdir/cleanup-hook.sh" \
+		"$pkgdir/usr/share/j4primelte/cleanup-hook.sh"
+	install -Dm644 "$srcdir/initfs.files" \
+		"$pkgdir/usr/share/mkinitfs/files/90-j4primelte.files"
+}
+
+sha512sums=""

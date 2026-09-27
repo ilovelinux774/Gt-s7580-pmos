@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+name="J4+ USB-only bring-up access"
+description="Dropbear and debug shell on the pmOS USB link, with persistent logs"
+supervisor="supervise-daemon"
+command="/usr/local/sbin/j4-usb-debug"
+respawn_delay=5
+respawn_max=0
+
+depend() {
+    need localmount
+    after bootmisc
+}

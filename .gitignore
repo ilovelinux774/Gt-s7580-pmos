@@ -1,0 +1,6 @@
+/artifacts/
+/ci/j4primelte/__pycache__/
+/pmaports/device/downstream/linux-samsung-j4primelte/zImage-dtb
+/pmaports/device/downstream/linux-samsung-j4primelte/kernel.release
+/pmaports/device/downstream/linux-samsung-j4primelte/kernel.config
+/pmaports/device/downstream/linux-samsung-j4primelte/kernel-modules.tar.gz

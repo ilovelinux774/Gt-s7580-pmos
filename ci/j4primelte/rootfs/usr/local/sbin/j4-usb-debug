@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+mkdir -p /var/log/j4
+exec >>/var/log/j4/usb-debug.log 2>&1
+echo "=== J4 USB debug start: $(date -u) ==="
+ipaddr=172.16.42.1
+iface=''
+i=0
+while [ "$i" -lt 60 ]; do
+    for candidate in rndis0 usb0 ncm0; do
+        if [ -d "/sys/class/net/$candidate" ]; then
+            iface=$candidate
+            break
+        fi
+    done
+    [ -z "$iface" ] || break
+    i=$((i + 1))
+    sleep 1
+done
+if [ -z "$iface" ]; then
+    echo 'No USB network interface; leaving debug listeners closed.'
+    /usr/local/sbin/j4-collect-logs || true
+    exit 1
+fi
+ip link set dev "$iface" up
+ip addr replace "$ipaddr/24" dev "$iface"
+
+# Binding an IP alone is not interface isolation on Linux's weak host model.
+# Fail closed unless non-USB ingress to these two ports is blocked as well.
+fw=$(command -v iptables-legacy) || { echo 'iptables-legacy missing'; exit 1; }
+for port in 22 23; do
+    "$fw" -w 5 -C INPUT ! -i "$iface" -p tcp --dport "$port" -j DROP 2>/dev/null ||
+        "$fw" -w 5 -I INPUT 1 ! -i "$iface" -p tcp --dport "$port" -j DROP
+done
+
+# The final-image customization empties root's password; -B explicitly permits
+# a blank password. No shared private host key is generated in CI.
+sshpid=''
+telnetpid=''
+cleanup() {
+    [ -z "$sshpid" ] || kill "$sshpid" 2>/dev/null || true
+    [ -z "$telnetpid" ] || kill "$telnetpid" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 0' INT TERM
+/usr/sbin/dropbear -F -E -B -R -p "$ipaddr:22" >>/var/log/j4/dropbear.log 2>&1 &
+sshpid=$!
+/usr/sbin/telnetd -F -b "$ipaddr" -p 23 -l /bin/sh >>/var/log/j4/telnet.log 2>&1 &
+telnetpid=$!
+echo "USB debug listeners requested on $iface at $ipaddr; PIDs $sshpid / $telnetpid"
+sleep 2
+/usr/local/sbin/j4-collect-logs || true
+# On an SSH daemon failure OpenRC respawns us; telnet isn't silently left behind.
+wait "$sshpid"
