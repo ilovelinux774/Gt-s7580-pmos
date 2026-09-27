@@ -145,6 +145,18 @@ The service intentionally owns fb0. **Stop/disable `j4-fb-splash` before install
 a desktop compositor or framebuffer console later.** Stopping it blanks the screen
 by driver design. It changes no partitions, firmware, network or SSH settings.
 
+## Install the touch-oriented LXQt desktop (live, no reflash)
+
+`ci/j4primelte/lxqt-setup.py` apk-installs **postmarketos-ui-lxqt**, which is
+pmOS's tablet-tuned LXQt profile (touch-sized panel, onboard on-screen keyboard
+autostart, cursor auto-hide), plus `onboard`, `unclutter-xfixes` and
+`network-manager-applet`. It stops/disables `j4-fb-splash` first so X can own
+fb0, writes an autostart that disables X blanking/DPMS, and enables `tinydm`.
+Requires ~1 GiB free and a working `sec_touchscreen` input node (both verified
+on the owner's phone). Wi-Fi profiles, firmware staging, USB debug and all
+partitions stay untouched. **Software rendering only** (kernel has no DRM):
+usable, not GPU-accelerated. Run `--check`, then `--install`, ON THE PHONE.
+
 ## Persist the live-tested Wi-Fi setup (no reflash)
 
 `ci/j4primelte/wifi-setup.py` is an **opt-in live-device helper**, not a flashable
