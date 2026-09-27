@@ -7,6 +7,15 @@ tablet-tuned LXQt profile with onboard OSK autostart) plus the on-screen-keyboar
 and Wi-Fi applet, writes two small autostart files, and enables the tinydm
 display manager. It STOPS the j4-fb-splash service first (both want fb0).
 
+It also installs the j4-x-sysfs boot service. This Samsung MDSS framebuffer
+registers with framebuffer_alloc(..., NULL), so /sys/class/graphics/fb0 has no
+"device" symlink; xorg-server 21.1.23's fbdevhw probes readlink
+/sys/class/graphics/fb0/device/subsystem and silently rejects the device when
+that link is missing ("No devices detected"). The service bind-mounts a tiny
+fake sysfs tree over the fb0 class directory BEFORE tinydm starts X, and the
+session hook re-writes the MDSS backlight register (it can read 256 while the
+panel stays dark until written).
+
 Run --check first (only an APK index refresh), then --install ON THE PHONE.
 USB SSH/RNDIS, Wi-Fi profiles, firmware staging and all partitions are untouched.
 Rendering is software (no DRM/GPU driver on this kernel) — expect a functional
@@ -32,10 +41,16 @@ BACKUP = Path('/var/lib/j4-lxqt')
 INPUT_DEVICES = Path('/proc/bus/input/devices')
 FB_INIT = Path('/etc/init.d/j4-fb-splash')
 FB_STARTED = Path('/run/openrc/started/j4-fb-splash')
+X_SYSFS_INIT = Path('/etc/init.d/j4-x-sysfs')
 
 SCREEN_ON_TEXT = '''#!/bin/sh
 # J4_LXQT_SETUP_V1 - keep the panel lit on this MDSS driver.
+# The MDSS backlight register only takes effect when written: it can read
+# 256 while the panel stays dark. Wake it at session start and once more
+# after the X session settles.
+echo 255 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null
 sleep 2
+echo 255 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null
 xset s off 2>/dev/null || true
 xset s noblank 2>/dev/null || true
 xset -dpms 2>/dev/null || true
@@ -72,6 +87,38 @@ if [ "$(id -u)" = 0 ] && [ -d /home/user ]; then
     exec su -s /bin/sh user -c 'exec startx /usr/bin/startlxqt -- :0 vt7 -nolisten tcp'
 fi
 exec startx /usr/bin/startlxqt -- :0 vt7 -nolisten tcp
+'''
+
+X_SYSFS_INIT_TEXT = '''#!/sbin/openrc-run
+# J4_LXQT_SETUP_V1 - make Xorg fbdev accept the MDSS framebuffer.
+# This kernel registers fb0 without a parent device, so the sysfs link
+# /sys/class/graphics/fb0/device/subsystem does not exist and xorg-server
+# 21.1.23 fbdevhw silently rejects the frame buffer. Fake the link via a
+# bind mount before tinydm starts X, and wake the panel backlight after.
+name="j4-x-sysfs"
+description="Fake fb0 sysfs parent for Xorg fbdev and wake the backlight"
+
+depend() {
+    need localmount
+    before tinydm
+}
+
+start() {
+    ebegin "Preparing fb0 sysfs for Xorg fbdev"
+    mkdir -p /tmp/x-fb-sysfs/device
+    ln -sf /sys/bus/platform /tmp/x-fb-sysfs/device/subsystem
+    target="$(readlink -f /sys/class/graphics/fb0)"
+    umount "$target" 2>/dev/null
+    mount --bind /tmp/x-fb-sysfs "$target"
+    ( sleep 8; echo 255 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null ) >/dev/null 2>&1 &
+    eend $?
+}
+
+stop() {
+    ebegin "Removing fb0 sysfs bind mount"
+    umount "$(readlink -f /sys/class/graphics/fb0)" 2>/dev/null
+    eend 0
+}
 '''
 
 
@@ -165,14 +212,14 @@ def install():
     print('---- apk plan (simulation) ----')
     print(plan.strip())
     print('--------------------------------')
-    for path in (SCREEN_ON, AUTOSTART):
+    for path in (SCREEN_ON, AUTOSTART, X_SYSFS_INIT):
         if path.is_symlink():
             raise SetupError(f'Refusing to replace a symlink: {path}')
         if path.exists() and MARKER not in path.read_text(errors='replace')[:256]:
             raise SetupError(f'Existing file is not owned by this helper: {path}')
     BACKUP.mkdir(mode=0o700, parents=True, exist_ok=True)
     BACKUP.chmod(0o700)
-    for path in (SCREEN_ON, AUTOSTART):
+    for path in (SCREEN_ON, AUTOSTART, X_SYSFS_INIT):
         if path.exists():
             shutil.copyfile(path, BACKUP / ('old-' + path.name))
     # CRITICAL order: give up fb0 BEFORE any X server may claim it.
@@ -186,6 +233,10 @@ def install():
     run('apk', 'add', '--no-progress', *PACKAGES, timeout=1800)
     atomic_write(SCREEN_ON, SCREEN_ON_TEXT.encode(), 0o755)
     atomic_write(AUTOSTART, AUTOSTART_TEXT.encode(), 0o644)
+    atomic_write(X_SYSFS_INIT, X_SYSFS_INIT_TEXT.encode(), 0o755)
+    run('rc-update', 'add', 'j4-x-sysfs', 'default')
+    # The fake sysfs link must exist before any X server probes /dev/fb0.
+    subprocess.run(['rc-service', 'j4-x-sysfs', 'start'], capture_output=True, text=True)
     service = display_service()
     if service:
         run('rc-update', 'add', service, 'default')

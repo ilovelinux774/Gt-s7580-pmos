@@ -152,6 +152,14 @@ pmOS's tablet-tuned LXQt profile (touch-sized panel, onboard on-screen keyboard
 autostart, cursor auto-hide), plus `onboard`, `unclutter-xfixes` and
 `network-manager-applet`. It stops/disables `j4-fb-splash` first so X can own
 fb0, writes an autostart that disables X blanking/DPMS, and enables `tinydm`.
+It also installs the `j4-x-sysfs` boot service (runs before `tinydm`): this
+kernel's MDSS framebuffer registers without a parent device, so the sysfs link
+`/sys/class/graphics/fb0/device/subsystem` never exists and xorg-server 21.1.23
+fbdevhw silently rejects the framebuffer ("No devices detected"); the service
+bind-mounts a tiny fake sysfs tree to satisfy the probe. The session hook also
+rewrites `/sys/class/leds/lcd-backlight/brightness` — the MDSS backlight
+register only takes effect when written (it reads 256 while the panel stays
+dark until a write lands).
 Requires ~1 GiB free and a working `sec_touchscreen` input node (both verified
 on the owner's phone). Wi-Fi profiles, firmware staging, USB debug and all
 partitions stay untouched. **Software rendering only** (kernel has no DRM):

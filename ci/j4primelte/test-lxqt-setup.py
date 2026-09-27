@@ -40,7 +40,16 @@ class LxqtSetupTests(unittest.TestCase):
         self.assertIn('Type=Application', setup.AUTOSTART_TEXT)
         self.assertIn('Exec=/usr/local/sbin/j4-screen-on', setup.AUTOSTART_TEXT)
         self.assertIn('xset -dpms', setup.SCREEN_ON_TEXT)
+        self.assertIn('lcd-backlight/brightness', setup.SCREEN_ON_TEXT)
         self.assertTrue(setup.SCREEN_ON_TEXT.startswith('#!/bin/sh'))
+
+    def test_x_sysfs_service_fakes_parent_link(self):
+        self.assertTrue(setup.X_SYSFS_INIT_TEXT.startswith('#!/sbin/openrc-run'))
+        self.assertIn('mount --bind /tmp/x-fb-sysfs', setup.X_SYSFS_INIT_TEXT)
+        self.assertIn('/tmp/x-fb-sysfs/device/subsystem', setup.X_SYSFS_INIT_TEXT)
+        self.assertIn('before tinydm', setup.X_SYSFS_INIT_TEXT)
+        self.assertIn('lcd-backlight/brightness', setup.X_SYSFS_INIT_TEXT)
+        self.assertEqual(setup.X_SYSFS_INIT, Path('/etc/init.d/j4-x-sysfs'))
 
     def test_atomic_write_modes_and_replacement(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -85,6 +94,7 @@ class LxqtSetupTests(unittest.TestCase):
             paths = dict(SCREEN_ON=root / 'usr/local/sbin/j4-screen-on',
                          AUTOSTART=root / 'etc/xdg/autostart/j4-screen-on.desktop',
                          BACKUP=root / 'var/lib/j4-lxqt',
+                         X_SYSFS_INIT=root / 'etc/init.d/j4-x-sysfs',
                          FB_INIT=fb_init,
                          FB_STARTED=root / 'not-started')
             out = io.StringIO()
@@ -97,8 +107,11 @@ class LxqtSetupTests(unittest.TestCase):
                 setup.install()
             self.assertIn('INSTALL_OK', out.getvalue())
             self.assertIn('xset', paths['SCREEN_ON'].read_text())
+            self.assertIn('lcd-backlight/brightness', paths['SCREEN_ON'].read_text())
             self.assertIn('Type=Application', paths['AUTOSTART'].read_text())
+            self.assertIn('mount --bind', paths['X_SYSFS_INIT'].read_text())
             self.assertEqual(stat.S_IMODE(paths['SCREEN_ON'].stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(paths['X_SYSFS_INIT'].stat().st_mode), 0o755)
         stop_index = next(i for i, c in enumerate(calls)
                           if c[:2] == ('rc-service', 'j4-fb-splash') and c[2] == 'stop')
         del_index = next(i for i, c in enumerate(calls)
@@ -107,6 +120,14 @@ class LxqtSetupTests(unittest.TestCase):
                          if c[:2] == ('apk', 'add') and c[2] == '--no-progress')
         self.assertLess(stop_index, add_index)
         self.assertLess(del_index, add_index)
+        xs_add = next(i for i, c in enumerate(calls)
+                      if c[:3] == ('rc-update', 'add', 'j4-x-sysfs'))
+        xs_start = next(i for i, c in enumerate(calls)
+                        if c[:2] == ('rc-service', 'j4-x-sysfs') and c[2] == 'start')
+        restart = next(i for i, c in enumerate(calls)
+                       if c[:2] == ('rc-service', 'tinydm') and c[2] == 'restart')
+        self.assertLess(xs_add, restart)
+        self.assertLess(xs_start, restart)
 
     def test_install_refuses_when_fb_splash_will_not_stop(self):
         def fake_run(*args, **kwargs):
@@ -124,6 +145,7 @@ class LxqtSetupTests(unittest.TestCase):
             fb_started = root / 'started'
             fb_started.write_text('')
             paths = dict(SCREEN_ON=root / 'a', AUTOSTART=root / 'b', BACKUP=root / 'c',
+                         X_SYSFS_INIT=root / 'd',
                          FB_INIT=fb_init, FB_STARTED=fb_started)
             with patch.multiple(setup, **paths), \
                     patch.object(setup, 'preflight', return_value=('/dev/input/event10', 'plan')), \
