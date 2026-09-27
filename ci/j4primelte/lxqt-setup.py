@@ -56,7 +56,8 @@ xset s noblank 2>/dev/null || true
 xset -dpms 2>/dev/null || true
 '''
 
-AUTOSTART_TEXT = '''[Desktop Entry]
+AUTOSTART_TEXT = '''# J4_LXQT_SETUP_V1
+[Desktop Entry]
 Type=Application
 Name=J4 screen always on
 Comment=Disable X blanking/DPMS on the J4+ debug build
@@ -221,6 +222,17 @@ def display_service():
     return None
 
 
+def owned_by_helper(path):
+    """True when we may replace this file.
+
+    Files we write carry the J4_LXQT_SETUP_V1 marker; the first release's
+    autostart file had no marker line, so accept anything that launches
+    our own j4-screen-on script as ours too.
+    """
+    text = path.read_text(errors='replace')
+    return MARKER in text[:256] or ('Exec=' + str(SCREEN_ON)) in text
+
+
 def install():
     touch, plan = preflight()
     print(f'Touch input: {touch}')
@@ -230,7 +242,7 @@ def install():
     for path in (SCREEN_ON, AUTOSTART, X_SYSFS_INIT):
         if path.is_symlink():
             raise SetupError(f'Refusing to replace a symlink: {path}')
-        if path.exists() and MARKER not in path.read_text(errors='replace')[:256]:
+        if path.exists() and not owned_by_helper(path):
             raise SetupError(f'Existing file is not owned by this helper: {path}')
     BACKUP.mkdir(mode=0o700, parents=True, exist_ok=True)
     BACKUP.chmod(0o700)

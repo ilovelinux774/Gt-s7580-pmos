@@ -39,9 +39,23 @@ class LxqtSetupTests(unittest.TestCase):
     def test_desktop_and_helper_files(self):
         self.assertIn('Type=Application', setup.AUTOSTART_TEXT)
         self.assertIn('Exec=/usr/local/sbin/j4-screen-on', setup.AUTOSTART_TEXT)
+        self.assertIn(setup.MARKER, setup.AUTOSTART_TEXT[:64])
         self.assertIn('xset -dpms', setup.SCREEN_ON_TEXT)
         self.assertIn('lcd-backlight/brightness', setup.SCREEN_ON_TEXT)
         self.assertTrue(setup.SCREEN_ON_TEXT.startswith('#!/bin/sh'))
+
+    def test_owned_by_helper_accepts_legacy_autostart(self):
+        with tempfile.TemporaryDirectory() as temp:
+            legacy = Path(temp) / 'j4-screen-on.desktop'
+            legacy.write_text('[Desktop Entry]\nType=Application\n'
+                              'Exec=/usr/local/sbin/j4-screen-on\n')
+            self.assertTrue(setup.owned_by_helper(legacy))
+            marked = Path(temp) / 'marked'
+            marked.write_text('#!/bin/sh\n# J4_LXQT_SETUP_V1 - ours\n')
+            self.assertTrue(setup.owned_by_helper(marked))
+            foreign = Path(temp) / 'foreign'
+            foreign.write_text('[Desktop Entry]\nExec=/usr/bin/something-else\n')
+            self.assertFalse(setup.owned_by_helper(foreign))
 
     def test_x_sysfs_service_fakes_parent_link(self):
         self.assertTrue(setup.X_SYSFS_INIT_TEXT.startswith('#!/sbin/openrc-run'))
