@@ -130,6 +130,21 @@ With `boot-debug.img`, connect by telnet to inspect the initramfs. Use
 `cat /pmOS_init.log`, `dmesg`, and `ip address`. Run `pmos_continue_boot` if you want
 to continue booting. That image is specifically for failures before OpenRC starts.
 
+## Replace the aboot splash on a running phone (no reflash)
+
+The kernel hands the bootloader splash over through continuous splash, has no
+framebuffer console, and **powers the panel down when the last `/dev/fb0` handle
+closes**. With no boot-time fb consumer, the aboot image simply stays on screen.
+`ci/j4primelte/fb-splash.py` is the opt-in live-device fix: it keeps fb0 open,
+draws a white-on-dark `POSTMARKETOS` splash (channel-order-safe), drives the real
+`/sys/class/leds/lcd-backlight/brightness` LED, commits with `FBIOPAN_DISPLAY`,
+and heartbeats an uptime line every 5 s. Run `--test 30` on the phone first, then
+`--install` to add a supervised OpenRC service in the **boot** runlevel.
+
+The service intentionally owns fb0. **Stop/disable `j4-fb-splash` before installing
+a desktop compositor or framebuffer console later.** Stopping it blanks the screen
+by driver design. It changes no partitions, firmware, network or SSH settings.
+
 ## Persist the live-tested Wi-Fi setup (no reflash)
 
 `ci/j4primelte/wifi-setup.py` is an **opt-in live-device helper**, not a flashable
