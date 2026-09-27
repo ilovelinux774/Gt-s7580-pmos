@@ -72,6 +72,22 @@ class LxqtSetupTests(unittest.TestCase):
         self.assertNotIn('dropbear', joined)
         self.assertNotIn('j4-usb-debug', joined)
 
+    def test_plan_guard_allows_reinstall_when_present(self):
+        self.assertFalse(setup.plan_needs_review('', installed=True))
+        self.assertFalse(setup.plan_needs_review('OK: 600 MiB in 172 packages\n', installed=True))
+        self.assertTrue(setup.plan_needs_review('', installed=False))
+        self.assertTrue(setup.plan_needs_review('OK: 1 package in 0 dirs\n', installed=False))
+        self.assertFalse(setup.plan_needs_review(
+            'Installing postmarketos-ui-lxqt (0.4-r2)\n', installed=False))
+
+    def test_package_installed_uses_apk_info(self):
+        with patch.object(setup.subprocess, 'run', return_value=Mock(returncode=0)) as mocked:
+            self.assertTrue(setup.package_installed('postmarketos-ui-lxqt'))
+        mocked.assert_called_once_with(['apk', 'info', '-e', 'postmarketos-ui-lxqt'],
+                                       capture_output=True, text=True)
+        with patch.object(setup.subprocess, 'run', return_value=Mock(returncode=1)):
+            self.assertFalse(setup.package_installed('not-there'))
+
     def test_install_stops_fb_splash_before_apk(self):
         calls = []
 

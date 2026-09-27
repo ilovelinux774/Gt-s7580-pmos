@@ -168,6 +168,20 @@ def planned_packages():
     return output
 
 
+def package_installed(name):
+    """True when apk reports the package as installed."""
+    result = subprocess.run(['apk', 'info', '-e', name], capture_output=True, text=True)
+    return result.returncode == 0
+
+
+def plan_needs_review(plan, installed):
+    """A blank apk plan is fine on re-runs: everything is already installed."""
+    if installed:
+        return False
+    return not any(line.strip().startswith(('Installing', 'Adding')) or 'postmarketos-ui-lxqt' in line
+                   for line in plan.splitlines())
+
+
 def preflight():
     check_device()
     free = free_bytes()
@@ -178,9 +192,10 @@ def preflight():
     if not touch:
         raise SetupError('sec_touchscreen input device not found; fix touch before installing.')
     plan = planned_packages()
-    if not any(line.strip().startswith(('Installing', 'Adding')) or 'postmarketos-ui-lxqt' in line
-               for line in plan.splitlines()):
+    if plan_needs_review(plan, package_installed('postmarketos-ui-lxqt')):
         raise SetupError('apk simulation did not mention postmarketos-ui-lxqt; inspect the plan.')
+    if not plan.strip():
+        plan = 'all listed packages already installed; nothing to download'
     return touch, plan
 
 
