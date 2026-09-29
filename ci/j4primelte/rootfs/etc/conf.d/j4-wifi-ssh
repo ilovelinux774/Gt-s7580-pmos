@@ -1,0 +1,5 @@
+# J4_WIFI_SSH_V1 - optional source restriction for LAN SSH (TCP/22 on wlan0).
+# Leave WIFI_SSH_SRC empty to allow any device on the local network.
+# Set it to your computer's LAN IP to allow only that machine, e.g.:
+#   WIFI_SSH_SRC="192.168.1.5"
+WIFI_SSH_SRC=""

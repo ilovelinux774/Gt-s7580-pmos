@@ -1,0 +1,47 @@
+#!/bin/sh
+# J4_WIFI_SSH_V1 - keep Dropbear listening on the Wi-Fi (LAN) address.
+# The USB debug link (j4-usb-debug) stays untouched and telnet stays USB-only:
+# this service only ever opens TCP/22 on wlan0, and only while wlan0 has IPv4.
+set -eu
+mkdir -p /var/log/j4
+exec >>/var/log/j4/wifi-ssh.log 2>&1
+echo "=== j4-wifi-ssh start: $(date -u) ==="
+WIFI_SSH_SRC=''
+[ -r /etc/conf.d/j4-wifi-ssh ] && . /etc/conf.d/j4-wifi-ssh
+fw=$(command -v iptables-legacy || command -v iptables) || { echo 'no iptables found'; exit 1; }
+pid=''
+last_ip=''
+cleanup() {
+    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 0' INT TERM
+allow_rule() {
+    # Placed above j4-usb-debug's non-USB DROP for TCP/22; everything else
+    # stays fail-closed. Telnet (23) is deliberately never allowed here.
+    if [ -n "$WIFI_SSH_SRC" ]; then
+        "$fw" -w 5 -C INPUT -i wlan0 -s "$WIFI_SSH_SRC" -p tcp --dport 22 -j ACCEPT 2>/dev/null ||
+            "$fw" -w 5 -I INPUT 1 -i wlan0 -s "$WIFI_SSH_SRC" -p tcp --dport 22 -j ACCEPT
+    else
+        "$fw" -w 5 -C INPUT -i wlan0 -p tcp --dport 22 -j ACCEPT 2>/dev/null ||
+            "$fw" -w 5 -I INPUT 1 -i wlan0 -p tcp --dport 22 -j ACCEPT
+    fi
+}
+while true; do
+    ipaddr=$(ip -4 addr show wlan0 2>/dev/null | sed -n 's|.*inet \([0-9.]*\)/.*|\1|p' | head -n1)
+    if [ -n "$ipaddr" ]; then
+        allow_rule
+        if [ "$ipaddr" != "$last_ip" ]; then
+            cleanup
+            /usr/sbin/dropbear -F -E -B -R -p "$ipaddr:22" >>/var/log/j4/wifi-ssh-dropbear.log 2>&1 &
+            pid=$!
+            last_ip=$ipaddr
+            echo "LAN dropbear on $ipaddr:22 (allowed source: ${WIFI_SSH_SRC:-any})"
+        elif ! kill -0 "$pid" 2>/dev/null; then
+            echo "dropbear exited; restarting on $ipaddr:22"
+            /usr/sbin/dropbear -F -E -B -R -p "$ipaddr:22" >>/var/log/j4/wifi-ssh-dropbear.log 2>&1 &
+            pid=$!
+        fi
+    fi
+    sleep 20
+done

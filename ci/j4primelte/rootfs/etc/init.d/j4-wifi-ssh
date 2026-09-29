@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+# J4_WIFI_SSH_V1 - Dropbear SSH on the Wi-Fi (LAN) address.
+name="j4-wifi-ssh"
+description="Dropbear SSH on the Wi-Fi IP so LAN clients can connect"
+supervisor="supervise-daemon"
+command="/usr/local/sbin/j4-wifi-ssh"
+respawn_delay=10
+respawn_max=0
+
+depend() {
+    need localmount
+    after j4-usb-debug j4-wifi
+}
