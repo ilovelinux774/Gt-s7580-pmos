@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+# J4_AUDIO_V1 - J4+ ADSP boot and msm8952 sound card registration.
+name="j4-audio"
+description="Boot ADSP and register the J4+ sound card (speaker/headphone/mic)"
+
+depend() {
+    need localmount
+    after j4-usb-debug
+}
+
+start() {
+    ebegin "Bringing up J4+ audio"
+    /usr/local/sbin/j4-audio --boot
+    eend $?
+}
+
+stop() {
+    # Bring-up only; leave the card and ADSP running.
+    return 0
+}

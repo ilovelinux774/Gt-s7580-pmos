@@ -1,0 +1,126 @@
+#!/bin/sh
+# J4_AUDIO_V1 - Boot the ADSP and register the J4+ msm8952 ASoC sound card.
+#
+# Why this exists: the sound card's voice/voip platform devices defer forever
+# (voc_alloc_cal_shared_memory -> msm_audio_ion_alloc returns -EPROBE_DEFER)
+# while the audio ION device is unprobed, and msm-audio-ion itself defers until
+# the ADSP is loaded (apr q6 state != DOWN). Nothing loads the ADSP on pmOS, so
+# the card probe fails with -517 and no ALSA device appears. This script writes
+# 1 to the stock adsp-loader sysfs (subsystem_get("adsp") -> q6v5 PIL loads
+# adsp.mdt from /lib/firmware), then retries the deferred platform probes via
+# /sys/bus/platform/drivers_probe until the card registers.
+#
+# Firmware policy: no firmware is copied, staged or redistributed here. Real
+# adsp.mdt + adsp.b* files must already be in /lib/firmware (copied from this
+# phone's own APNHLOS partition). Logs only under /var/log/j4; safe to re-run.
+
+LOG=/var/log/j4/audio.log
+TIMEOUT=${J4_AUDIO_TIMEOUT:-45}
+BOOT_ADSP=/sys/kernel/boot_adsp/boot
+ION_DEV=soc:qcom,msm-audio-ion
+VOICE_DEV=soc:qcom,msm-pcm-voice
+VOIP_DEV=soc:qcom,msm-voip-dsp
+CARD_DEV=c051000.sound
+JACK_DEV=soc:earjack
+
+log() {
+    mkdir -p /var/log/j4
+    echo "$(date '+%Y-%m-%dT%H:%M:%S') $*" >> "$LOG"
+}
+
+firmware_ok() {
+    [ -s /lib/firmware/adsp.mdt ] || return 1
+    [ ! -L /lib/firmware/adsp.mdt ] || return 1
+    for f in /lib/firmware/adsp.b*; do
+        if [ -s "$f" ] && [ ! -L "$f" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+bound() {
+    [ -e "/sys/bus/platform/devices/$1/driver" ]
+}
+
+reprobe() {
+    for d in "$ION_DEV" "$VOICE_DEV" "$VOIP_DEV" "$CARD_DEV" "$JACK_DEV"; do
+        echo "$d" > /sys/bus/platform/drivers_probe 2>/dev/null
+    done
+}
+
+do_check() {
+    echo "== J4 audio check (J4_AUDIO_V1) =="
+    if [ -w "$BOOT_ADSP" ]; then
+        echo "adsp-loader sysfs: OK ($BOOT_ADSP)"
+    else
+        echo "adsp-loader sysfs: MISSING ($BOOT_ADSP)"
+    fi
+    if firmware_ok; then
+        echo "adsp firmware in /lib/firmware: OK (adsp.mdt + segments)"
+    else
+        echo "adsp firmware in /lib/firmware: MISSING (need real adsp.mdt + adsp.b*)"
+    fi
+    for d in "$ION_DEV" "$VOICE_DEV" "$VOIP_DEV" "$CARD_DEV" "$JACK_DEV"; do
+        if bound "$d"; then
+            echo "bound: $d"
+        else
+            echo "unbound: $d"
+        fi
+    done
+    echo "-- /proc/asound/cards --"
+    cat /proc/asound/cards 2>/dev/null
+}
+
+do_boot() {
+    log "start: ADSP boot + sound card registration"
+    if ! firmware_ok; then
+        log "FAIL: adsp firmware missing in /lib/firmware"
+        echo "j4-audio: adsp firmware missing in /lib/firmware (copy adsp.mdt + adsp.b* from APNHLOS first)" >&2
+        return 1
+    fi
+    if [ ! -w "$BOOT_ADSP" ]; then
+        log "FAIL: $BOOT_ADSP missing"
+        echo "j4-audio: $BOOT_ADSP missing (adsp-loader did not probe)" >&2
+        return 1
+    fi
+    if [ ! -d /proc/asound/card0 ]; then
+        # subsystem_get("adsp") loads/authenticates the ADSP image via the
+        # q6v5 PIL and the loader then marks the APR q6 state LOADED.
+        echo 1 > "$BOOT_ADSP" 2>> "$LOG"
+        log "adsp boot requested"
+        n=$TIMEOUT
+        while [ "$n" -gt 0 ]; do
+            reprobe
+            if [ -d /proc/asound/card0 ]; then
+                break
+            fi
+            sleep 1
+            n=$((n - 1))
+        done
+    fi
+    reprobe
+    if [ -d /proc/asound/card0 ]; then
+        log "OK: sound card registered"
+        cat /proc/asound/cards >> "$LOG" 2>/dev/null
+        echo "j4-audio: sound card is up"
+        return 0
+    fi
+    log "FAIL: no sound card after ${TIMEOUT}s"
+    dmesg 2>/dev/null | tail -n 25 >> "$LOG"
+    echo "j4-audio: no sound card after ${TIMEOUT}s (see $LOG)" >&2
+    return 1
+}
+
+case "$1" in
+    --check)
+        do_check
+        ;;
+    --boot)
+        do_boot
+        ;;
+    *)
+        echo "usage: j4-audio --check | --boot" >&2
+        exit 2
+        ;;
+esac

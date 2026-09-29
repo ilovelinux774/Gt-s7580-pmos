@@ -48,6 +48,7 @@ jobs:
           python3 -m compileall -q ci/j4primelte
           python3 ci/j4primelte/test-kernel-cache.py
           python3 ci/j4primelte/test-wifi-setup.py
+          python3 ci/j4primelte/test-j4-audio.py
 
       - name: Preflight pmbootstrap before the long kernel compile
         run: bash ci/j4primelte/prepare-pmos.sh 2>&1 | tee artifacts/logs/preflight.log

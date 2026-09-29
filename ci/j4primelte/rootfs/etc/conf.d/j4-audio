@@ -1,0 +1,3 @@
+# J4_AUDIO_V1 - J4+ audio bring-up tuning.
+# Seconds to wait for the ADSP load and sound card registration at boot.
+J4_AUDIO_TIMEOUT="45"
