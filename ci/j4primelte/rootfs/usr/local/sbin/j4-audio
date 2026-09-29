@@ -1,5 +1,5 @@
 #!/bin/sh
-# J4_AUDIO_V1 - Boot the ADSP and register the J4+ msm8952 ASoC sound card.
+# J4_AUDIO_V2 - Boot the ADSP and register the J4+ msm8952 ASoC sound card.
 #
 # Why this exists: the sound card's voice/voip platform devices defer forever
 # (voc_alloc_cal_shared_memory -> msm_audio_ion_alloc returns -EPROBE_DEFER)
@@ -49,8 +49,22 @@ reprobe() {
     done
 }
 
+apply_mixers() {
+    if [ -x /usr/local/sbin/j4-mixer ]; then
+        /usr/local/sbin/j4-mixer reset >> "$LOG" 2>&1
+        out=${J4_AUDIO_OUTPUT:-speaker}
+        if /usr/local/sbin/j4-mixer "$out" >> "$LOG" 2>&1; then
+            log "mixers applied: $out"
+        else
+            log "WARN: mixer path $out incomplete (run j4-mixer probe)"
+        fi
+    else
+        log "j4-mixer missing, skipping mixer setup"
+    fi
+}
+
 do_check() {
-    echo "== J4 audio check (J4_AUDIO_V1) =="
+    echo "== J4 audio check (J4_AUDIO_V2) =="
     if [ -w "$BOOT_ADSP" ]; then
         echo "adsp-loader sysfs: OK ($BOOT_ADSP)"
     else
@@ -103,6 +117,7 @@ do_boot() {
     if [ -d /proc/asound/card0 ]; then
         log "OK: sound card registered"
         cat /proc/asound/cards >> "$LOG" 2>/dev/null
+        apply_mixers
         echo "j4-audio: sound card is up"
         return 0
     fi

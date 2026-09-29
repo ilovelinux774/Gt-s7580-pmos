@@ -1,3 +1,6 @@
-# J4_AUDIO_V1 - J4+ audio bring-up tuning.
+# J4_AUDIO_V2 - J4+ audio bring-up tuning.
 # Seconds to wait for the ADSP load and sound card registration at boot.
 J4_AUDIO_TIMEOUT="45"
+# Output mixer path applied after the card registers:
+# speaker | headphones | handset
+J4_AUDIO_OUTPUT="speaker"

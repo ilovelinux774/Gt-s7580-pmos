@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Synthetic tests only: never boot an ADSP, probe drivers or touch /lib/firmware."""
+import ctypes
+import importlib.machinery
 import importlib.util
 import io
 import contextlib
 from pathlib import Path
 import stat
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -64,6 +67,7 @@ class J4AudioInstallTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.paths = dict(
             HELPER=self.root / 'usr/local/sbin/j4-audio',
+            MIXER=self.root / 'usr/local/sbin/j4-mixer',
             INIT=self.root / 'etc/init.d/j4-audio',
             CONF=self.root / 'etc/conf.d/j4-audio',
             RUNLEVEL_LINK=self.root / 'etc/runlevels/boot/j4-audio',
@@ -96,9 +100,11 @@ class J4AudioInstallTests(unittest.TestCase):
         self.assertIn('INSTALL_OK', text)
         self.assertIn('BRINGUP_OK', text)
         self.assertEqual(self.paths['HELPER'].read_text(), inst.SCRIPT_TEXT)
+        self.assertEqual(self.paths['MIXER'].read_text(), inst.MIXER_TEXT)
         self.assertEqual(self.paths['INIT'].read_text(), inst.INIT_TEXT)
         self.assertEqual(self.paths['CONF'].read_text(), inst.CONF_TEXT)
         self.assertEqual(stat.S_IMODE(self.paths['HELPER'].stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(self.paths['MIXER'].stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE(self.paths['INIT'].stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE(self.paths['CONF'].stat().st_mode), 0o644)
         self.assertTrue(self.paths['RUNLEVEL_LINK'].is_symlink())
@@ -137,6 +143,7 @@ class J4AudioInstallTests(unittest.TestCase):
                 self.assertRaises(inst.SetupError):
             inst.install()
         self.assertFalse(self.paths['HELPER'].exists())
+        self.assertFalse(self.paths['MIXER'].exists())
         self.assertFalse(self.paths['INIT'].exists())
         self.assertFalse(self.paths['CONF'].exists())
 
@@ -171,18 +178,22 @@ class J4AudioRepoConsistencyTests(unittest.TestCase):
         here = Path(__file__).parent
         self.assertEqual(inst.SCRIPT_TEXT,
                          (here / 'rootfs/usr/local/sbin/j4-audio').read_text())
+        self.assertEqual(inst.MIXER_TEXT,
+                         (here / 'rootfs/usr/local/sbin/j4-mixer').read_text())
         self.assertEqual(inst.INIT_TEXT,
                          (here / 'rootfs/etc/init.d/j4-audio').read_text())
         self.assertEqual(inst.CONF_TEXT,
                          (here / 'rootfs/etc/conf.d/j4-audio').read_text())
 
     def test_payloads_carry_version_marker(self):
-        self.assertIn('J4_AUDIO_V1', inst.SCRIPT_TEXT)
-        self.assertIn('J4_AUDIO_V1', inst.INIT_TEXT)
-        self.assertIn('J4_AUDIO_V1', inst.CONF_TEXT)
+        self.assertIn('J4_AUDIO_V2', inst.SCRIPT_TEXT)
+        self.assertIn('J4_AUDIO_V2', inst.INIT_TEXT)
+        self.assertIn('J4_AUDIO_V2', inst.CONF_TEXT)
+        self.assertIn('J4_MIXER_V2', inst.MIXER_TEXT)
 
     def test_payloads_never_stage_firmware(self):
-        for text in (inst.SCRIPT_TEXT, inst.INIT_TEXT, inst.CONF_TEXT):
+        for text in (inst.SCRIPT_TEXT, inst.INIT_TEXT, inst.CONF_TEXT,
+                     inst.MIXER_TEXT):
             self.assertNotIn('/mmcblk', text)
             self.assertNotIn('mount ', text)
 
@@ -195,6 +206,47 @@ class J4AudioRepoConsistencyTests(unittest.TestCase):
         self.assertIn('drivers_probe', inst.SCRIPT_TEXT)
         self.assertIn('/sys/kernel/boot_adsp/boot', inst.SCRIPT_TEXT)
 
+    def test_runtime_script_applies_mixers_after_card(self):
+        self.assertIn('apply_mixers', inst.SCRIPT_TEXT)
+        self.assertIn('j4-mixer "$out"', inst.SCRIPT_TEXT)
+        self.assertIn('J4_AUDIO_OUTPUT', inst.CONF_TEXT)
+
+
+class J4MixerToolTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        here = Path(__file__).parent
+        sys.dont_write_bytecode = True
+        loader = importlib.machinery.SourceFileLoader(
+            'j4_mixer', str(here / 'rootfs/usr/local/sbin/j4-mixer'))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        cls.mix = importlib.util.module_from_spec(spec)
+        loader.exec_module(cls.mix)
+
+    def test_elem_id_layout(self):
+        self.assertEqual(ctypes.sizeof(self.mix.ElemId), 64)
+
+    def test_ioctl_numbers_look_sane(self):
+        for req in (self.mix.ELEM_LIST, self.mix.ELEM_INFO,
+                    self.mix.ELEM_READ, self.mix.ELEM_WRITE):
+            self.assertEqual(req >> 30, 3)
+            self.assertEqual((req >> 8) & 0xff, ord('U'))
+
+    def test_paths_cover_acceptance_devices(self):
+        for name in ('speaker', 'headphones', 'handset', 'mic'):
+            self.assertIn(name, self.mix.PATHS)
+
+    def test_speaker_path_has_backend_routing(self):
+        names = [n for n, _ in self.mix.PATHS['speaker']]
+        self.assertIn('SLIMBUS_0_RX Audio Mixer MultiMedia1', names)
+        self.assertIn('SPK DAC Switch', names)
+
+    def test_mic_path_has_record_routing(self):
+        names = [n for n, _ in self.mix.PATHS['mic']]
+        self.assertIn('MultiMedia1 Mixer SLIM_0_TX', names)
+        self.assertIn('DEC1 MUX', names)
+
 
 if __name__ == '__main__':
+
     unittest.main()

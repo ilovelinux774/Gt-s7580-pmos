@@ -1,5 +1,5 @@
 #!/sbin/openrc-run
-# J4_AUDIO_V1 - J4+ ADSP boot and msm8952 sound card registration.
+# J4_AUDIO_V2 - J4+ ADSP boot and msm8952 sound card registration.
 name="j4-audio"
 description="Boot ADSP and register the J4+ sound card (speaker/headphone/mic)"
 
