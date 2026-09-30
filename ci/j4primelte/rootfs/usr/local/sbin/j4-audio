@@ -86,8 +86,18 @@ do_check() {
     cat /proc/asound/cards 2>/dev/null
 }
 
+snapshot_dmesg() {
+    # Preserve the kernel ring buffer while it still holds the boot messages.
+    # Once the battery/fuelgauge spam starts (a few minutes after boot) the
+    # ASoC probe messages are gone forever, and those messages are the only
+    # place snd_soc_dapm_add_routes() reports a missing DAPM route.
+    mkdir -p /var/log/j4
+    dmesg > "/var/log/j4/$1" 2>/dev/null
+}
+
 do_boot() {
     log "start: ADSP boot + sound card registration"
+    snapshot_dmesg dmesg-boot.log
     if ! firmware_ok; then
         log "FAIL: adsp firmware missing in /lib/firmware"
         echo "j4-audio: adsp firmware missing in /lib/firmware (copy adsp.mdt + adsp.b* from APNHLOS first)" >&2
@@ -117,6 +127,7 @@ do_boot() {
     if [ -d /proc/asound/card0 ]; then
         log "OK: sound card registered"
         cat /proc/asound/cards >> "$LOG" 2>/dev/null
+        snapshot_dmesg dmesg-audio.log
         apply_mixers
         echo "j4-audio: sound card is up"
         return 0
