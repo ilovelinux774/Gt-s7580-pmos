@@ -174,15 +174,6 @@ jobs:
           grep create_initfs_extra "$DEVICE_INFO" && { echo "ERROR: initfs-extra still enabled"; exit 1; } || echo "initramfs-extra disabled"
           python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-kylepro
 
-      - name: Generate root SSH keypair (no-password login)
-        run: |
-          mkdir -p ~/sshkey
-          rm -f ~/sshkey/kylepro-root ~/sshkey/kylepro-root.pub
-          ssh-keygen -t ed25519 -N '' -C 'kylepro-root' -f ~/sshkey/kylepro-root
-          ssh-keygen -l -f ~/sshkey/kylepro-root.pub
-          echo "public key that will be baked into /root/.ssh/authorized_keys:"
-          cat ~/sshkey/kylepro-root.pub
-
       - name: Enable initramfs debug shell (boots to debug shell)
         run: |
           # Boots into the debug shell instead of straight into the rootfs:
@@ -199,24 +190,42 @@ jobs:
           DEVICE_DIR="$PMAPORTS/device/testing/device-samsung-kylepro"
           test -d "$DEVICE_DIR" || { echo "ERROR: device dir not found"; exit 1; }
 
-          cp ~/sshkey/kylepro-root.pub "$DEVICE_DIR/authorized_keys"
-
           cat > "$DEVICE_DIR/sshd-access.start" << 'SSHSTART'
           #!/bin/sh
           # Runs at boot from OpenRC local.d (same mechanism as telnetd.start).
+          #
+          # Goal: ssh root@172.16.42.1 with no prompt whatsoever.
+          #   primary : PAM pam_permit.so -> keyboard-interactive succeeds with
+          #             zero conversation, so the client never prompts.
+          #   fallback: no usable PAM -> empty password (prompt, press Enter).
           ssh-keygen -A 2>/dev/null || true
           passwd -d root 2>/dev/null || true
 
           mkdir -p /etc/ssh/sshd_config.d
           cat > /etc/ssh/sshd_config.d/99-noauth.conf << 'CONF'
           PermitRootLogin yes
-          PermitEmptyPasswords yes
+          PubkeyAuthentication no
           PasswordAuthentication yes
-          PubkeyAuthentication yes
-          AuthorizedKeysFile .ssh/authorized_keys
-          UsePAM no
+          PermitEmptyPasswords yes
+          KbdInteractiveAuthentication yes
+          UsePAM yes
           UseDNS no
           CONF
+
+          HAVE=
+          if [ -f /etc/pam.d/sshd ]; then
+            for so in /lib/security/pam_permit.so /usr/lib/security/pam_permit.so /usr/lib/*/security/pam_permit.so; do
+              [ -f "$so" ] && HAVE=1 && break
+            done
+          fi
+          if [ -n "$HAVE" ]; then
+            grep -q pam_permit /etc/pam.d/sshd || sed -i '1i auth sufficient pam_permit.so' /etc/pam.d/sshd
+            echo "sshd-access: PAM auto-permit on (login with zero prompts)"
+          else
+            sed -i 's/^UsePAM yes/UsePAM no/' /etc/ssh/sshd_config.d/99-noauth.conf
+            echo "sshd-access: no pam_permit, falling back to empty password"
+          fi
+
           grep -q sshd_config.d /etc/ssh/sshd_config 2>/dev/null || printf '\nInclude /etc/ssh/sshd_config.d/*.conf\n' >> /etc/ssh/sshd_config
 
           for i in rndis0 usb0 eth0; do
@@ -230,7 +239,6 @@ jobs:
           SSHSTART
 
           chmod 755 "$DEVICE_DIR/sshd-access.start"
-          chmod 644 "$DEVICE_DIR/authorized_keys"
 
           python3 - "$DEVICE_DIR/APKBUILD" << 'PATCH'
           import re, sys
@@ -242,19 +250,18 @@ jobs:
               m = re.search(r'source="(.*?)"', src, re.S)
               if not m:
                   raise SystemExit("ERROR: no source= block found in APKBUILD")
-              new = m.group(1).rstrip() + '\n\tsshd-access.start\n\tauthorized_keys\n'
+              new = m.group(1).rstrip() + '\n\tsshd-access.start\n'
               src = src[:m.start()] + 'source="' + new + '"' + src[m.end():]
 
           anchor = "devicepkg_package $startdir $pkgname"
           if anchor not in src:
               raise SystemExit("ERROR: devicepkg_package anchor not found in APKBUILD")
           if 'sshd-access.start' not in src.split(anchor, 1)[1]:
-              add = ('\n\tinstall -Dm755 "$srcdir"/sshd-access.start -t "$pkgdir"/etc/local.d\n'
-                     '\tinstall -Dm600 "$srcdir"/authorized_keys "$pkgdir"/root/.ssh/authorized_keys\n')
+              add = '\n\tinstall -Dm755 "$srcdir"/sshd-access.start -t "$pkgdir"/etc/local.d\n'
               src = src.replace(anchor, anchor + add, 1)
 
           p.write_text(src)
-          print("APKBUILD patched: sshd-access.start + authorized_keys added")
+          print("APKBUILD patched: sshd-access.start added")
           PATCH
 
           python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-kylepro
@@ -358,11 +365,3 @@ jobs:
           path: /home/runner/pmos-export/
           retention-days: 14
 
-      - name: Upload root SSH private key
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kylepro-root-ssh-key-${{ github.run_number }}
-          path: /home/runner/sshkey/kylepro-root
-          if-no-files-found: warn
-          retention-days: 14
