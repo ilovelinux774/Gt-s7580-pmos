@@ -79,7 +79,7 @@ jobs:
           python3 ~/pmbootstrap/pmbootstrap.py config aports || true
 
           python3 ~/pmbootstrap/pmbootstrap.py config device samsung-kylepro
-          python3 ~/pmbootstrap/pmbootstrap.py config extra_packages python3,busybox-extras,openssh
+          python3 ~/pmbootstrap/pmbootstrap.py config extra_packages python3,busybox-extras,openssh,postmarketos-mkinitfs-hook-debug-shell
           python3 ~/pmbootstrap/pmbootstrap.py config service_manager openrc
           python3 ~/pmbootstrap/pmbootstrap.py config ui console
           python3 ~/pmbootstrap/pmbootstrap.py config user test
@@ -173,15 +173,6 @@ jobs:
           echo "=== deviceinfo initfs setting now (should print nothing): ==="
           grep create_initfs_extra "$DEVICE_INFO" && { echo "ERROR: initfs-extra still enabled"; exit 1; } || echo "initramfs-extra disabled"
           python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-kylepro
-
-      - name: Enable initramfs debug shell (boots to debug shell)
-        run: |
-          # Boots into the debug shell instead of straight into the rootfs:
-          #   telnet 172.16.42.1  ->  "Run 'pmos_continue_boot' to continue booting."
-          # No clash with the rootfs telnetd (step 8): different stage, they
-          # never run at the same time.
-          python3 ~/pmbootstrap/pmbootstrap.py initfs hook_add debug-shell
-          python3 ~/pmbootstrap/pmbootstrap.py initfs hook_ls
 
       - name: Inject passwordless sshd into the rootfs
         run: |
@@ -284,6 +275,15 @@ jobs:
             python3 ~/pmbootstrap/pmbootstrap.py zap 2>&1 | tail -5 || true
             exit 1
           fi
+
+      - name: Verify debug-shell hook made it into the initramfs
+        run: |
+          python3 ~/pmbootstrap/pmbootstrap.py initfs hook_ls
+          python3 ~/pmbootstrap/pmbootstrap.py initfs hook_ls 2>&1 | grep -q "debug-shell.*installed" \
+            && echo "debug-shell hook: INSTALLED" \
+            || { echo "WARNING: debug-shell hook not listed as installed"; }
+          echo "--- initramfs contents (looking for the debug-shell script) ---"
+          python3 ~/pmbootstrap/pmbootstrap.py chroot -r -- ls -l /usr/share/mkinitfs/hooks/ 2>/dev/null || true
 
       - name: Export and Verify Images
         run: |
