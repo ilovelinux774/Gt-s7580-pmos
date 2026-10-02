@@ -79,7 +79,7 @@ jobs:
           python3 ~/pmbootstrap/pmbootstrap.py config aports || true
 
           python3 ~/pmbootstrap/pmbootstrap.py config device samsung-kylepro
-          python3 ~/pmbootstrap/pmbootstrap.py config extra_packages python3,busybox-extras
+          python3 ~/pmbootstrap/pmbootstrap.py config extra_packages python3,busybox-extras,openssh
           python3 ~/pmbootstrap/pmbootstrap.py config service_manager openrc
           python3 ~/pmbootstrap/pmbootstrap.py config ui console
           python3 ~/pmbootstrap/pmbootstrap.py config user test
@@ -173,6 +173,93 @@ jobs:
           echo "=== deviceinfo initfs setting now (should print nothing): ==="
           grep create_initfs_extra "$DEVICE_INFO" && { echo "ERROR: initfs-extra still enabled"; exit 1; } || echo "initramfs-extra disabled"
           python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-kylepro
+
+      - name: Generate root SSH keypair (no-password login)
+        run: |
+          mkdir -p ~/sshkey
+          rm -f ~/sshkey/kylepro-root ~/sshkey/kylepro-root.pub
+          ssh-keygen -t ed25519 -N '' -C 'kylepro-root' -f ~/sshkey/kylepro-root
+          ssh-keygen -l -f ~/sshkey/kylepro-root.pub
+          echo "public key that will be baked into /root/.ssh/authorized_keys:"
+          cat ~/sshkey/kylepro-root.pub
+
+      - name: Enable initramfs debug shell (boots to debug shell)
+        run: |
+          # Boots into the debug shell instead of straight into the rootfs:
+          #   telnet 172.16.42.1  ->  "Run 'pmos_continue_boot' to continue booting."
+          # No clash with the rootfs telnetd (step 8): different stage, they
+          # never run at the same time.
+          python3 ~/pmbootstrap/pmbootstrap.py initfs hook_add debug-shell
+          python3 ~/pmbootstrap/pmbootstrap.py initfs hook_ls
+
+      - name: Inject passwordless sshd into the rootfs
+        run: |
+          set -euo pipefail
+          PMAPORTS=$(python3 ~/pmbootstrap/pmbootstrap.py config aports)
+          DEVICE_DIR="$PMAPORTS/device/testing/device-samsung-kylepro"
+          test -d "$DEVICE_DIR" || { echo "ERROR: device dir not found"; exit 1; }
+
+          cp ~/sshkey/kylepro-root.pub "$DEVICE_DIR/authorized_keys"
+
+          cat > "$DEVICE_DIR/sshd-access.start" << 'SSHSTART'
+          #!/bin/sh
+          # Runs at boot from OpenRC local.d (same mechanism as telnetd.start).
+          ssh-keygen -A 2>/dev/null || true
+          passwd -d root 2>/dev/null || true
+
+          mkdir -p /etc/ssh/sshd_config.d
+          cat > /etc/ssh/sshd_config.d/99-noauth.conf << 'CONF'
+          PermitRootLogin yes
+          PermitEmptyPasswords yes
+          PasswordAuthentication yes
+          PubkeyAuthentication yes
+          AuthorizedKeysFile .ssh/authorized_keys
+          UsePAM no
+          UseDNS no
+          CONF
+          grep -q sshd_config.d /etc/ssh/sshd_config 2>/dev/null || printf '\nInclude /etc/ssh/sshd_config.d/*.conf\n' >> /etc/ssh/sshd_config
+
+          for i in rndis0 usb0 eth0; do
+            ip link show "$i" >/dev/null 2>&1 || continue
+            ip addr add 172.16.42.1/24 dev "$i" 2>/dev/null
+            ip link set "$i" up 2>/dev/null
+          done
+
+          rc-service sshd restart 2>/dev/null || /usr/sbin/sshd
+          exit 0
+          SSHSTART
+
+          chmod 755 "$DEVICE_DIR/sshd-access.start"
+          chmod 644 "$DEVICE_DIR/authorized_keys"
+
+          python3 - "$DEVICE_DIR/APKBUILD" << 'PATCH'
+          import re, sys
+          from pathlib import Path
+
+          p = Path(sys.argv[1]); src = p.read_text()
+
+          if 'sshd-access.start' not in src:
+              m = re.search(r'source="(.*?)"', src, re.S)
+              if not m:
+                  raise SystemExit("ERROR: no source= block found in APKBUILD")
+              new = m.group(1).rstrip() + '\n\tsshd-access.start\n\tauthorized_keys\n'
+              src = src[:m.start()] + 'source="' + new + '"' + src[m.end():]
+
+          anchor = "devicepkg_package $startdir $pkgname"
+          if anchor not in src:
+              raise SystemExit("ERROR: devicepkg_package anchor not found in APKBUILD")
+          if 'sshd-access.start' not in src.split(anchor, 1)[1]:
+              add = ('\n\tinstall -Dm755 "$srcdir"/sshd-access.start -t "$pkgdir"/etc/local.d\n'
+                     '\tinstall -Dm600 "$srcdir"/authorized_keys "$pkgdir"/root/.ssh/authorized_keys\n')
+              src = src.replace(anchor, anchor + add, 1)
+
+          p.write_text(src)
+          print("APKBUILD patched: sshd-access.start + authorized_keys added")
+          PATCH
+
+          python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-kylepro
+          echo "=== Patched APKBUILD ==="
+          cat "$DEVICE_DIR/APKBUILD"
 
       - name: Build postmarketOS (Single Partition)
         run: |
@@ -269,4 +356,13 @@ jobs:
         with:
           name: postmarketOS-samsung-kylepro
           path: /home/runner/pmos-export/
+          retention-days: 14
+
+      - name: Upload root SSH private key
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kylepro-root-ssh-key-${{ github.run_number }}
+          path: /home/runner/sshkey/kylepro-root
+          if-no-files-found: warn
           retention-days: 14
