@@ -2,6 +2,7 @@ name: Build postmarketOS for GT-S7580 (samsung-kylepro)
 
 on:
   push:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -37,9 +38,6 @@ jobs:
 
       - name: Patch pmbootstrap for kernel 3.4 ext4 rootfs compatibility
         run: |
-          # GT-S7580 runs an extremely old kernel (3.4). Modern e2fsprogs enables
-          # metadata_csum, metadata_csum_seed, and meta_bg by default. These cause
-          # kernel panics or mount failures on downstream. We must disable them.
           python3 - << 'PATCH'
           from pathlib import Path
           p = Path.home() / "pmbootstrap/pmb/install/format.py"
@@ -62,11 +60,6 @@ jobs:
 
       - name: Patch pmbootstrap chroot env (GOGC=off for qemu Go binaries)
         run: |
-          # mkinitfs is a Go binary that runs for armv7 under qemu-user.
-          # Go's concurrent garbage collector crashes under qemu emulation
-          # ("fatal error: found pointer to free object"). pmbootstrap runs
-          # chroot commands with 'sudo env -i' (host env stripped), so inject
-          # GOGC=off into the default chroot environment.
           python3 - << 'PATCH'
           from pathlib import Path
           p = Path.home() / "pmbootstrap/pmb/chroot/run.py"
@@ -85,11 +78,8 @@ jobs:
           python3 ~/pmbootstrap/pmbootstrap.py config device || true
           python3 ~/pmbootstrap/pmbootstrap.py config aports || true
 
-          # Use samsung-kylepro which is already in pmOS testing!
-          # Add python3 and busybox-extras (for telnetd).
           python3 ~/pmbootstrap/pmbootstrap.py config device samsung-kylepro
           python3 ~/pmbootstrap/pmbootstrap.py config extra_packages python3,busybox-extras
-          # kernel 3.4 is NOT compatible with systemd (dies at init). Use OpenRC.
           python3 ~/pmbootstrap/pmbootstrap.py config service_manager openrc
           python3 ~/pmbootstrap/pmbootstrap.py config ui console
           python3 ~/pmbootstrap/pmbootstrap.py config user test
@@ -104,14 +94,11 @@ jobs:
           DEVICE_DIR="$PMAPORTS/device/testing/device-samsung-kylepro"
           test -d "$DEVICE_DIR" || { echo "ERROR: device dir not found: $DEVICE_DIR"; exit 1; }
 
-          # OpenRC service script (runs at boot via /etc/local.d if OpenRC is used)
           cat > "$DEVICE_DIR/telnetd.start" << 'TELNET'
           #!/bin/sh
-          # Drop directly to root shell on port 23
           /usr/sbin/telnetd -l /bin/sh -p 23
           TELNET
 
-          # systemd unit (pmOS edge defaults to systemd; enable via multi-user.target.wants)
           cat > "$DEVICE_DIR/telnetd.service" << 'UNIT'
           [Unit]
           Description=Root telnet shell on port 23 (debug access)
@@ -129,9 +116,6 @@ jobs:
           chmod 755 "$DEVICE_DIR/telnetd.start"
           chmod 644 "$DEVICE_DIR/telnetd.service"
 
-          # Patch the APKBUILD with a robust python editor (the old sed-based
-          # patch produced `telnetd.startdeviceinfo"` — two source files glued
-          # together — which made `abuild checksum` fail).
           python3 - "$DEVICE_DIR/APKBUILD" << 'PATCH'
           import sys
           from pathlib import Path
@@ -176,7 +160,6 @@ jobs:
           echo "=== Patched APKBUILD ==="
           cat "$DEVICE_DIR/APKBUILD"
 
-          # Regenerate sha512sums for the new source files
           python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-kylepro
           echo "checksums updated OK"
 
@@ -186,14 +169,9 @@ jobs:
           PMAPORTS=$(python3 ~/pmbootstrap/pmbootstrap.py config aports)
           DEVICE_INFO="$PMAPORTS/device/testing/device-samsung-kylepro/deviceinfo"
           test -f "$DEVICE_INFO" || { echo "ERROR: deviceinfo not found"; exit 1; }
-          # pmbootstrap refuses --single-partition when initramfs-extra is enabled.
-          # NOTE: pmbootstrap parses deviceinfo values as raw strings, so setting
-          # ="false" is still truthy — the variable must be UNSET to disable it
-          # (it then falls back to the default of False).
           sed -i '/^deviceinfo_create_initfs_extra=/d' "$DEVICE_INFO"
           echo "=== deviceinfo initfs setting now (should print nothing): ==="
           grep create_initfs_extra "$DEVICE_INFO" && { echo "ERROR: initfs-extra still enabled"; exit 1; } || echo "initramfs-extra disabled"
-          # deviceinfo is a source file of the package -> refresh its checksum
           python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-kylepro
 
       - name: Build postmarketOS (Single Partition)
@@ -201,13 +179,6 @@ jobs:
           echo "Starting build at $(date)"
           set -o pipefail
 
-          # --single-partition: generate a single flat ext4 image with no GPT/
-          #   partition table (easy to flash via TWRP -> Flash image to system).
-          # --no-sparse: do NOT wrap it in Android sparse format (that is only
-          #   for Odin/heimdall; TWRP wants the raw ext4 image).
-          # pipefail ensures a pmbootstrap failure fails the step even through tee.
-          # (GOGC=off for the qemu-emulated mkinitfs is injected via the
-          # "Patch pmbootstrap chroot env" step above.)
           set -o pipefail
           if ! echo -e "test\ntest" | python3 ~/pmbootstrap/pmbootstrap.py install --single-partition --no-sparse 2>&1 | tee build.log; then
             echo "=== BUILD FAILED ==="
@@ -216,8 +187,6 @@ jobs:
               echo "=== raw pmbootstrap log file (last 300 lines) ==="
               tail -300 "$LOGFILE"
             fi
-            # The rootfs image may still exist from a previous/failed run;
-            # clean stale chroots so a retry starts from a consistent state.
             python3 ~/pmbootstrap/pmbootstrap.py zap 2>&1 | tail -5 || true
             exit 1
           fi
@@ -226,15 +195,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ~/pmos-export
-          # --no-install: skip rebuilding the initramfs at export time.
-          # mkinitfs already ran inside 'pmbootstrap install' with the
-          # final UUIDs; the post-install remount in export's autoinstall
-          # path fails under CI ("chroot not initialized" -> mkinitfs exit 1).
           python3 ~/pmbootstrap/pmbootstrap.py export --no-install ~/pmos-export
 
-          # export() creates convenience symlinks pointing into the chroots.
-          # Dereference them into real files so the artifact upload gets the
-          # actual binaries.
           cd ~/pmos-export
           for l in *; do
             if [ -L "$l" ]; then
@@ -245,8 +207,6 @@ jobs:
           done
           [ -d dtbs ] && find dtbs -type l -exec sh -c 't=$(readlink -f "$1"); rm "$1"; cp "$t" "$1"' _ {} \; || true
 
-          # Give the rootfs a TWRP-friendly name (it is a raw ext4 filesystem,
-          # no partition table) and drop a flashing guide next to it.
           mv samsung-kylepro.img rootfs.img
           cat > FLASHING.txt << 'EOF'
           postmarketOS for Samsung GT-S7580 (samsung-kylepro) — TWRP flashing
@@ -276,7 +236,6 @@ jobs:
           partition. It has NO GPT/partition table and is NOT sparse, so TWRP
           can write it directly with "dd"-style image flashing.
           EOF
-          # strip the leading indentation added by the heredoc in YAML
           sed -i 's/^          //' FLASHING.txt
 
           echo "=== Exported files ==="
@@ -286,10 +245,8 @@ jobs:
           file -b rootfs.img
 
           echo "Verifying there is NO partition table (must be bare ext4)..."
-          # ext4 magic must be at offset 0x438...
           od -An -tx1 -j 1080 -N 2 rootfs.img | grep -qi "53 ef" \
             || { echo "ERROR: ext4 magic not found"; exit 1; }
-          # ...and the GPT signature at sector 1 must be absent (no 'EFI PART').
           if od -An -tx1 -j 512 -N 8 rootfs.img | grep -qi "45 46 49 20"; then
             echo "ERROR: GPT signature present — image has a partition table!"
             exit 1
