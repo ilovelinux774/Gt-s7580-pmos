@@ -49,6 +49,7 @@ jobs:
           python3 ci/j4primelte/test-kernel-cache.py
           python3 ci/j4primelte/test-kernel-bt.py
           python3 ci/j4primelte/test-bluetooth-setup.py
+          python3 ci/j4primelte/test-j4-recover.py
           python3 ci/j4primelte/test-wifi-setup.py
           python3 ci/j4primelte/test-j4-audio.py
 

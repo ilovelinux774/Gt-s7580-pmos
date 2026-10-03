@@ -64,6 +64,10 @@ link = level / 'j4-bluetooth'
 if link.exists() or link.is_symlink():
     link.unlink()
 link.symlink_to('../../init.d/j4-bluetooth')
+link = level / 'j4-firstboot'
+if link.exists() or link.is_symlink():
+    link.unlink()
+link.symlink_to('../../init.d/j4-firstboot')
 with (root / 'etc/rc.conf').open('a') as f:
     f.write('\n# J4+ bring-up: persist OpenRC boot output.\nrc_logger="YES"\n')
 (root / 'var/log/j4').mkdir(parents=True, exist_ok=True)

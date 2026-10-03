@@ -1,0 +1,10 @@
+# J4_FIRSTBOOT_V1 - tuning for the first-boot recovery service.
+#
+# Restore the WCNSS firmware into /lib/firmware from the stock partitions
+# (APNHLOS mmcblk0p45 and VENDOR mmcblk0p48). Mounts are read-only and no
+# existing file is ever overwritten.
+J4_FIRSTBOOT_FIRMWARE="yes"
+#
+# Reinstall the LXQt tablet desktop when it is missing. It needs a working
+# network, so the download runs detached after boot instead of blocking it.
+J4_FIRSTBOOT_DESKTOP="yes"

@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+# J4_FIRSTBOOT_V1 - restore the pieces that are installed live on this phone.
+#
+# The CI rootfs image cannot contain the WCNSS firmware (it lives on the stock
+# APNHLOS/VENDOR partitions) or the LXQt desktop (downloaded with apk). Both
+# used to be installed by hand after flashing, which means they were lost on
+# every rootfs flash. This service restores them at boot instead.
+name="j4-firstboot"
+description="Restore J4+ Wi-Fi firmware, radio and the LXQt desktop"
+
+depend() {
+    need localmount
+    after j4-usb-debug
+}
+
+start() {
+    ebegin "J4+ first-boot recovery"
+    /usr/local/sbin/j4-recover --boot
+    eend $?
+}
+
+stop() {
+    # Bring-up only; nothing to shut down.
+    return 0
+}
