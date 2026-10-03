@@ -18,8 +18,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Stable across every build, so any boot.img matches any rootfs.img.
-FIXED_UUID = '4a34706d-6f73-4a34-8f31-3530465f4a34'
+# Stable across every build, so any boot.img matches any rootfs.img. This is
+# the UUID already carried by the SYSTEM partition of the reference phone, so a
+# boot image from any run also boots the rootfs that is on that phone today.
+FIXED_UUID = '86e7262b-b628-4b89-8a6e-e96ef9b1aab6'
 
 UUID_RE = re.compile(rb'pmos_root_uuid=([0-9a-fA-F-]{36})')
 CMDLINE_SLOTS = ((64, 576), (608, 1632))

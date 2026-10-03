@@ -59,6 +59,16 @@ for unsupported in metadata_csum metadata_csum_seed orphan_file 64bit meta_bg; d
     fi
 done
 python3 "$ROOT/ci/j4primelte/verify-images.py" "$IMAGES" | tee "$LOGS/image-validation.txt"
+
+# Flashing only the kernel is the common case; ship it separately so it does
+# not require downloading the whole rootfs archive.
+BOOT_ONLY="$ROOT/artifacts/boot-only"
+mkdir -p "$BOOT_ONLY"
+cp "$IMAGES/boot.img" "$IMAGES/boot-debug.img" "$IMAGES/image-info.json" "$BOOT_ONLY/"
+(
+    cd "$BOOT_ONLY"
+    sha256sum boot.img boot-debug.img > SHA256SUMS
+)
 cp "$ROOT/README-j4primelte.md" "$IMAGES/README.md"
 cp "$LOGS/sources.env" "$LOGS/kernel.config" "$LOGS/installed-packages.txt" "$IMAGES/"
 cp "$LOGS/kernel-source.patch" "$LOGS/pmbootstrap.patch" "$LOGS/kernel-build-provenance.json" "$IMAGES/"

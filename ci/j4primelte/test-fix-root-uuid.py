@@ -34,7 +34,7 @@ def boot_image(cmdline):
 
 class UuidTests(unittest.TestCase):
     def test_fixed_uuid_is_stable_and_well_formed(self):
-        self.assertEqual(fix.FIXED_UUID, '4a34706d-6f73-4a34-8f31-3530465f4a34')
+        self.assertEqual(fix.FIXED_UUID, '86e7262b-b628-4b89-8a6e-e96ef9b1aab6')
         self.assertEqual(len(fix.FIXED_UUID), 36)
         self.assertRegex(fix.FIXED_UUID,
                          r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}'

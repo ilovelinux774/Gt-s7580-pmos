@@ -124,6 +124,15 @@ jobs:
           compression-level: 0
           retention-days: 14
 
+      - name: Upload boot images only (small artifact)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-boot-only-${{ github.run_number }}
+          path: artifacts/boot-only/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Upload build logs and source manifest
         if: always()
         uses: actions/upload-artifact@v4

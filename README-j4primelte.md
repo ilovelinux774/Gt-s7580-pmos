@@ -77,7 +77,7 @@ initramfs debug shell with `ERROR: failed to mount subpartitions!`, which looks
 like a bricked phone but is only a mismatch.
 
 `ci/j4primelte/fix-root-uuid.py` pins one UUID for every build
-(`4a34706d-6f73-4a34-8f31-3530465f4a34`) and patches the boot header cmdline to
+(`86e7262b-b628-4b89-8a6e-e96ef9b1aab6`) and patches the boot header cmdline to
 match, so images from different runs can be mixed safely. Only cmdline bytes in
 the boot header change; the kernel and ramdisk payloads stay byte-identical.
 
