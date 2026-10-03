@@ -34,6 +34,9 @@ PM=(python3 "$PMB/pmbootstrap.py" -c "$CFG" --details-to-stdout --assume-yes)
 "${PM[@]}" export --no-install "$HOME/j4-export"
 cp -L "$HOME/j4-export/boot.img" "$IMAGES/boot.img"
 cp -L --sparse=always "$HOME/j4-export/samsung-j4primelte.img" "$IMAGES/rootfs.img"
+# Every build creates a fresh ext4 with a new UUID. Pin one UUID for all builds
+# so a boot.img and a rootfs.img from different runs can still be mixed.
+sudo "$(command -v python3)" "$ROOT/ci/j4primelte/fix-root-uuid.py" "$IMAGES"
 
 MOUNT="$HOME/j4-image-mount"
 mkdir -p "$MOUNT"

@@ -68,6 +68,19 @@ Three artifacts are expected as their respective stages succeed:
    packages; **NOT boot.img or a recovery-flashable ZIP**. Saved even if the later
    rootfs stage fails.
 
+## Root filesystem UUID
+
+Every build of the rootfs is a fresh ext4 filesystem, which would normally get a
+new UUID, while `boot.img` looks for its root by `pmos_root_uuid`. Mixing a
+`boot.img` and a `rootfs.img` from different runs would then stop in the
+initramfs debug shell with `ERROR: failed to mount subpartitions!`, which looks
+like a bricked phone but is only a mismatch.
+
+`ci/j4primelte/fix-root-uuid.py` pins one UUID for every build
+(`4a34706d-6f73-4a34-8f31-3530465f4a34`) and patches the boot header cmdline to
+match, so images from different runs can be mixed safely. Only cmdline bytes in
+the boot header change; the kernel and ramdisk payloads stay byte-identical.
+
 ## Image files
 
 - `boot.img`: normal boot; attempts to start the installed OpenRC rootfs.
