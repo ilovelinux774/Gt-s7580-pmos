@@ -51,6 +51,7 @@ jobs:
           python3 ci/j4primelte/test-bluetooth-setup.py
           python3 ci/j4primelte/test-j4-recover.py
           python3 ci/j4primelte/test-fix-root-uuid.py
+          python3 ci/j4primelte/test-patch-boot-uuid.py
           python3 ci/j4primelte/test-wifi-setup.py
           python3 ci/j4primelte/test-j4-audio.py
 
