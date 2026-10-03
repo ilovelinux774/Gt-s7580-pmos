@@ -25,10 +25,25 @@ def source_pins(root):
             ('KERNEL_URL', 'KERNEL_COMMIT', 'TOOLCHAIN_URL', 'TOOLCHAIN_COMMIT')}
 
 
+def staged_kernel_files(root):
+    """Kernel sources this repository stages into the pinned tree.
+
+    A driver-only change must invalidate the cached kernel, so these files are
+    hashed into the recipe key just like build-kernel.sh.
+    """
+    directory = root / 'ci/j4primelte/kernel'
+    if not directory.is_dir():
+        return []
+    return sorted(directory.glob('*.c')) + sorted(directory.glob('*.h'))
+
+
 def recipe_key(root):
     h = hashlib.sha256(b'j4-kernel-cache-v1\n')
     h.update(json.dumps(source_pins(root), sort_keys=True).encode())
     h.update((root / 'ci/j4primelte/build-kernel.sh').read_bytes())
+    for path in staged_kernel_files(root):
+        h.update(path.name.encode())
+        h.update(path.read_bytes())
     return h.hexdigest()
 
 

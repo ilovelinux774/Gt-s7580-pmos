@@ -23,6 +23,11 @@ CROSS="$TC/bin/arm-linux-androideabi-"
 "${CROSS}gcc" --version
 cd "$KERNEL"
 
+# Bluetooth: this kernel enables CONFIG_BT but no HCI transport at all, so the
+# WCNSS (WCN3620) Bluetooth core has no device. Stage drivers/bluetooth/hci_smd.c,
+# which carries HCI over the APPS_RIVA_BT_CMD / APPS_RIVA_BT_ACL SMD channels.
+python3 "$ROOT/ci/j4primelte/kernel-bt.py" "$KERNEL"
+
 # This pinned source already removed DTC's duplicate lexer yylloc definition.
 # Do not attempt to reapply an obsolete compiler-compatibility patch.
 
@@ -35,7 +40,7 @@ for flag in DEVTMPFS DEVTMPFS_MOUNT SYSVIPC DEVPTS_MULTIPLE_INSTANCES \
     VT VT_CONSOLE DUMMY_CONSOLE UNIX98_PTYS IKCONFIG IKCONFIG_PROC \
     SECCOMP SECCOMP_FILTER DEBUG_FS PROC_FS SYSFS \
     NETFILTER NETFILTER_XTABLES IP_NF_IPTABLES IP_NF_FILTER \
-    USB_GADGET USB_G_ANDROID USB_MSM_OTG; do
+    BT_HCI_SMD USB_GADGET USB_G_ANDROID USB_MSM_OTG; do
     scripts/config --file out/.config --enable "$flag"
 done
 # Keep Samsung's MDSS panel driver, but avoid attaching fbcon during initial
@@ -51,13 +56,16 @@ scripts/config --file out/.config --disable LOCALVERSION_AUTO
 
 for flag in SEC_J4PRIMELTE_PROJECT MACH_J4PRIMELTE_SEA_OPEN BUILD_ARM_APPENDED_DTB_IMAGE \
     DEVTMPFS SYSVIPC DEVPTS_MULTIPLE_INSTANCES BLK_DEV_INITRD RD_GZIP \
-    USB_G_ANDROID USB_MSM_OTG EXT4_FS IP_NF_IPTABLES IP_NF_FILTER; do
+    USB_G_ANDROID USB_MSM_OTG EXT4_FS IP_NF_IPTABLES IP_NF_FILTER \
+    BT_HCI_SMD; do
     grep -qx "CONFIG_${flag}=y" out/.config || { echo "Required option missing: $flag"; exit 1; }
 done
 if grep -qx 'CONFIG_ANDROID_PARANOID_NETWORK=y' out/.config; then
     echo 'Android network permission checks still enabled'; exit 1
 fi
 cp out/.config "$LOGS/kernel.config"
+# Keep the staged Bluetooth driver with the other build provenance.
+cp "$ROOT/ci/j4primelte/kernel/hci_smd.c" "$LOGS/hci_smd.c"
 git diff > "$LOGS/kernel-source.patch"
 export KBUILD_BUILD_USER=pmos-ci KBUILD_BUILD_HOST=github-actions
 export KBUILD_BUILD_TIMESTAMP="$(git show -s --format=%cD HEAD)"
