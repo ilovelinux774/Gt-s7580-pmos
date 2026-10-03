@@ -1,0 +1,259 @@
+#!/bin/sh
+# J4_BT_V1 - bring up the J4+ WCNSS (WCN3620) Bluetooth controller and pair
+# input devices with BlueZ.
+#
+# Why this exists: the j4primelte kernel has Bluetooth core support but no HCI
+# transport, so the hci_smd driver (drivers/bluetooth/hci_smd.c) is needed to
+# expose the controller. The SMD channels only appear once the WCNSS firmware
+# boots, which j4-wifi does, so this helper waits for the driver to report a
+# device, gives the controller a stable public address if it has none, powers
+# it on, and starts the BlueZ stack so keyboards can be paired.
+#
+# Logs only under /var/log/j4; safe to re-run. The address is generated once
+# and stored in /var/lib/j4-bluetooth so it survives reboots.
+
+LOG=/var/log/j4/bluetooth.log
+PARAM_DIR=/sys/module/hci_smd/parameters
+STATE_FILE="$PARAM_DIR/state"
+ENABLE_FILE="$PARAM_DIR/enable"
+BDADDR_FILE="$PARAM_DIR/bdaddr"
+ADDR_FILE=/var/lib/j4-bluetooth/address
+TIMEOUT=${J4_BT_TIMEOUT:-90}
+ADDRESS=${J4_BT_ADDRESS:-}
+START_BLUETOOTHD=${J4_BT_START_BLUETOOTHD:-yes}
+
+log() {
+    mkdir -p /var/log/j4
+    echo "$(date '+%Y-%m-%dT%H:%M:%S') $*" >> "$LOG"
+}
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+driver_state() {
+    if [ -r "$STATE_FILE" ]; then
+        cat "$STATE_FILE" 2>/dev/null
+    else
+        echo "no-driver"
+    fi
+}
+
+hci_addr() {
+    cat /sys/class/bluetooth/hci0/address 2>/dev/null
+}
+
+addr_is_valid() {
+    case "$1" in
+        00:00:00:00:00:00|"") return 1 ;;
+        ??:??:??:??:??:??) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+random_address() {
+    # Locally administered, unicast: 0x02 in the most significant byte.
+    tail="";
+    while : ; do
+        byte=$(head -c 1 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')
+        [ -n "$byte" ] || return 1
+        tail="$tail:$byte"
+        n=$(echo "$tail" | tr -cd ':' | wc -c)
+        [ "$n" -ge 5 ] && break
+    done
+    echo "02$tail"
+}
+
+stored_address() {
+    if [ -s "$ADDR_FILE" ]; then
+        head -n 1 "$ADDR_FILE" | tr -d '\r\n'
+    fi
+}
+
+remember_address() {
+    mkdir -p "$(dirname "$ADDR_FILE")"
+    chmod 700 "$(dirname "$ADDR_FILE")" 2>/dev/null
+    echo "$1" > "$ADDR_FILE"
+}
+
+# Power the controller on. bluetoothctl runs the BlueZ power-up path (which is
+# what triggers the driver's setup, where the public address is programmed);
+# btmgmt and hciconfig are kernel-only fallbacks.
+power_on() {
+    if have bluetoothctl; then
+        echo "power on" | bluetoothctl >/dev/null 2>&1 && return 0
+    fi
+    if have btmgmt; then
+        btmgmt --index 0 power on >/dev/null 2>&1 && return 0
+    fi
+    if have hciconfig; then
+        hciconfig hci0 up >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+power_off() {
+    if have bluetoothctl; then
+        echo "power off" | bluetoothctl >/dev/null 2>&1 && return 0
+    fi
+    if have btmgmt; then
+        btmgmt --index 0 power off >/dev/null 2>&1 && return 0
+    fi
+    if have hciconfig; then
+        hciconfig hci0 down >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+ensure_stack() {
+    if ! have bluetoothd; then
+        echo "bluez is not installed: apk add bluez bluez-openrc bluez-btmgmt bluez-deprecated"
+        log "bluez missing"
+        return 1
+    fi
+    if have rc-service; then
+        rc-service dbus status >/dev/null 2>&1 || rc-service dbus start >/dev/null 2>&1
+        rc-update add dbus default >/dev/null 2>&1
+        if ! rc-service bluetooth status >/dev/null 2>&1; then
+            rc-update add bluetooth default >/dev/null 2>&1
+            rc-service bluetooth start >/dev/null 2>&1
+        fi
+    fi
+    return 0
+}
+
+wait_for_device() {
+    n=$TIMEOUT
+    while [ "$n" -gt 0 ]; do
+        if [ -d /sys/class/bluetooth/hci0 ]; then
+            return 0
+        fi
+        state=$(driver_state)
+        if [ "$state" = "0" ] || [ "$state" = "1" ]; then
+            # Re-arm the scan; the driver gives up after its own timeout when
+            # the WCNSS was not up yet.
+            [ -w "$ENABLE_FILE" ] && echo 1 > "$ENABLE_FILE"
+        fi
+        sleep 2
+        n=$((n - 2))
+    done
+    return 1
+}
+
+do_boot() {
+    log "boot: waiting for hci0 (timeout ${TIMEOUT}s)"
+    if ! wait_for_device; then
+        log "FAIL: no hci device; driver state $(driver_state)"
+        echo "j4-bt: no Bluetooth device. Is the hci_smd driver in this kernel?" >&2
+        echo "j4-bt: driver state: $(driver_state) (0 idle, 1 waiting, 2 up)" >&2
+        return 1
+    fi
+    log "hci0 present"
+
+    addr=$(hci_addr)
+    if addr_is_valid "$addr"; then
+        log "controller address $addr"
+    else
+        addr="$ADDRESS"
+        [ -n "$addr" ] || addr=$(stored_address)
+        addr_is_valid "$addr" || addr=$(random_address)
+        if [ -z "$addr" ]; then
+            log "FAIL: could not obtain an address"
+            return 1
+        fi
+        remember_address "$addr"
+        if [ -w "$BDADDR_FILE" ]; then
+            echo "$addr" > "$BDADDR_FILE"
+            log "programming public address $addr"
+            power_off
+            sleep 1
+        else
+            log "WARN: $BDADDR_FILE not writable; address left to the controller"
+        fi
+    fi
+
+    # BlueZ first: bluetoothd drives its own power-up sequence, and pairing
+    # needs it running anyway.
+    if [ "$START_BLUETOOTHD" = "yes" ]; then
+        ensure_stack
+    fi
+
+    if ! power_on; then
+        log "WARN: power on did not report success (see bluetoothctl)"
+    else
+        log "controller powered on: $(hci_addr)"
+    fi
+    return 0
+}
+
+do_status() {
+    echo "hci_smd driver: $(driver_state) (0 idle, 1 waiting, 2 up)"
+    if [ -d /sys/class/bluetooth/hci0 ]; then
+        echo "hci0 address: $(hci_addr)"
+        if have btmgmt; then
+            echo "-- btmgmt info --"
+            btmgmt --index 0 info 2>&1 | head -n 12
+        fi
+    else
+        echo "hci0: absent"
+    fi
+    echo "bluez: $(have bluetoothd && echo installed || echo MISSING)"
+    if have rc-service; then
+        echo "dbus: $(rc-service dbus status >/dev/null 2>&1 && echo running || echo stopped)"
+        echo "bluetooth: $(rc-service bluetooth status >/dev/null 2>&1 && echo running || echo stopped)"
+    fi
+    if [ -r /proc/bus/input/devices ]; then
+        echo "-- input devices --"
+        grep -iE '^[NHS]:|bluetooth|keyboard' /proc/bus/input/devices | head -n 30
+    fi
+}
+
+do_scan() {
+    ensure_stack
+    echo "Scanning for 60 seconds. Note the MAC address of your device."
+    ( echo "power on"; echo "agent on"; echo "default-agent"; echo "scan on"; sleep 60 ) | bluetoothctl 2>&1 | grep -viE '^(agent|bluetooth)' | tail -n 40
+}
+
+do_pair() {
+    mac=$1
+    pin=${2:-0000}
+    if [ -z "$mac" ]; then
+        do_scan
+        return $?
+    fi
+    ensure_stack
+    echo "Pairing $mac. If the controller asks for a PIN, this tries $pin."
+    ( echo "power on"
+      echo "agent on"
+      echo "default-agent"
+      sleep 1
+      echo "pair $mac"
+      sleep 12
+      echo "$pin"
+      sleep 3
+      echo "trust $mac"
+      sleep 2
+      echo "connect $mac"
+      sleep 6
+      echo "info $mac"
+    ) | bluetoothctl 2>&1 | tail -n 40
+}
+
+case "$1" in
+    --boot)
+        do_boot
+        ;;
+    --status|status)
+        do_status
+        ;;
+    --scan|scan)
+        do_scan
+        ;;
+    --pair|pair)
+        do_pair "$2" "$3"
+        ;;
+    *)
+        echo "usage: j4-bt --boot | --status | --scan | --pair [MAC] [PIN]" >&2
+        exit 2
+        ;;
+esac

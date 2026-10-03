@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+# J4_BLUETOOTH_V1 - bring up the J4+ WCNSS Bluetooth controller at boot.
+name="j4-bluetooth"
+description="Bring up the J4+ WCNSS Bluetooth controller and the BlueZ stack"
+
+depend() {
+    need localmount
+    after j4-wifi
+}
+
+start() {
+    ebegin "Bringing up J4+ Bluetooth"
+    /usr/local/sbin/j4-bt --boot
+    eend $?
+}
+
+stop() {
+    # Bring-up only; leave the controller and bluetoothd running.
+    return 0
+}

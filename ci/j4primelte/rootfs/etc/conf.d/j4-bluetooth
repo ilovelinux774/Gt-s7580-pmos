@@ -1,0 +1,11 @@
+# J4_BLUETOOTH_V1 - J4+ Bluetooth bring-up tuning.
+# Seconds to wait for the hci_smd driver to expose hci0. The WCNSS firmware
+# (and with it the APPS_RIVA_BT_* channels) only exists once j4-wifi boots it.
+J4_BT_TIMEOUT="90"
+# Public address for the controller. Leave empty to generate one once and keep
+# it in /var/lib/j4-bluetooth/address. The WCNSS controller has no address of
+# its own, and BlueZ ignores a controller without a valid public address.
+J4_BT_ADDRESS=""
+# Start dbus and bluetoothd (BlueZ) after the controller is up. Needed to pair
+# keyboards. Set to "no" if you only want the HCI device.
+J4_BT_START_BLUETOOTHD="yes"

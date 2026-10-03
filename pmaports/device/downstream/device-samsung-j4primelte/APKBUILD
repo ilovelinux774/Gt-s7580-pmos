@@ -19,6 +19,10 @@ depends="
 	iproute2
 	iptables
 	iptables-legacy
+	bluez
+	bluez-openrc
+	bluez-btmgmt
+	bluez-deprecated
 "
 makedepends="devicepkg-dev"
 source="deviceinfo kernel-cmdline.conf initfs-hook.sh cleanup-hook.sh initfs.files"
