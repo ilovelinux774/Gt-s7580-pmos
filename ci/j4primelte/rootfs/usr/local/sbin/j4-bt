@@ -31,6 +31,16 @@ have() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# alpine ships bluetoothd in /usr/libexec/bluetooth, which is not in PATH,
+# so a bare "command -v bluetoothd" wrongly reports that bluez is missing.
+have_bluez() {
+    have bluetoothctl && return 0
+    have bluetoothd && return 0
+    [ -x /usr/libexec/bluetooth/bluetoothd ] && return 0
+    [ -x /usr/lib/bluetooth/bluetoothd ] && return 0
+    return 1
+}
+
 driver_state() {
     if [ -r "$STATE_FILE" ]; then
         cat "$STATE_FILE" 2>/dev/null
@@ -45,10 +55,15 @@ hci_addr() {
 
 addr_is_valid() {
     case "$1" in
-        00:00:00:00:00:00|"") return 1 ;;
-        ??:??:??:??:??:??) return 0 ;;
+        ??:??:??:??:??:??) ;;
         *) return 1 ;;
     esac
+    # 00:00:00:* is what the WCNSS reports when no address is stored in NVM,
+    # and ff:ff:ff:* is the broadcast-style default. Neither is usable.
+    case "$1" in
+        00:00:00:*|ff:ff:ff:*|00:00:00:00:00:00) return 1 ;;
+    esac
+    return 0
 }
 
 random_address() {
@@ -106,7 +121,7 @@ power_off() {
 }
 
 ensure_stack() {
-    if ! have bluetoothd; then
+    if ! have_bluez; then
         echo "bluez is not installed: apk add bluez bluez-openrc bluez-btmgmt bluez-deprecated"
         log "bluez missing"
         return 1
@@ -189,7 +204,12 @@ do_boot() {
 do_status() {
     echo "hci_smd driver: $(driver_state) (0 idle, 1 waiting, 2 up)"
     if [ -d /sys/class/bluetooth/hci0 ]; then
-        echo "hci0 address: $(hci_addr)"
+        addr=$(hci_addr)
+        if addr_is_valid "$addr"; then
+            echo "hci0 address: $addr"
+        else
+            echo "hci0 address: $addr (UNUSABLE: no public address; run j4-bt --boot)"
+        fi
         if have btmgmt; then
             echo "-- btmgmt info --"
             btmgmt --index 0 info 2>&1 | head -n 12
@@ -197,7 +217,7 @@ do_status() {
     else
         echo "hci0: absent"
     fi
-    echo "bluez: $(have bluetoothd && echo installed || echo MISSING)"
+    echo "bluez: $(have_bluez && echo installed || echo MISSING)"
     if have rc-service; then
         echo "dbus: $(rc-service dbus status >/dev/null 2>&1 && echo running || echo stopped)"
         echo "bluetooth: $(rc-service bluetooth status >/dev/null 2>&1 && echo running || echo stopped)"
@@ -222,6 +242,10 @@ do_pair() {
         return $?
     fi
     ensure_stack
+    # bluetoothctl can only pair a device it has seen, so look for it first.
+    echo "Looking for $mac for 20 seconds; put the device in pairing mode now."
+    ( echo "power on"; echo "agent on"; echo "default-agent"
+      echo "scan on"; sleep 20; echo "scan off" ) | bluetoothctl >/dev/null 2>&1
     echo "Pairing $mac. If the controller asks for a PIN, this tries $pin."
     ( echo "power on"
       echo "agent on"

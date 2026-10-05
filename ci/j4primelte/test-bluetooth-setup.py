@@ -67,6 +67,18 @@ class PayloadTests(unittest.TestCase):
         self.assertNotIn('psk', bt.CONF_TEXT.lower())
 
 
+class BluezDetectionTests(unittest.TestCase):
+    def test_looks_for_the_libexec_daemon(self):
+        # alpine installs bluetoothd outside PATH; a bare lookup is not enough.
+        for path in ('/usr/libexec/bluetooth/bluetoothd',
+                     '/usr/lib/bluetooth/bluetoothd'):
+            self.assertIn(path, bt.SCRIPT_TEXT)
+        self.assertIn('have_bluez', bt.SCRIPT_TEXT)
+
+    def test_stack_helper_uses_the_detection(self):
+        self.assertIn('if ! have_bluez; then', bt.SCRIPT_TEXT)
+
+
 class AddressTests(unittest.TestCase):
     def setUp(self):
         self.maxDiff = 2000
@@ -83,6 +95,19 @@ class AddressTests(unittest.TestCase):
     def test_address_is_persisted(self):
         self.assertIn('/var/lib/j4-bluetooth', self.text)
         self.assertIn('remember_address', self.text)
+
+    def test_wcnss_default_address_is_rejected(self):
+        # 00:00:00:* is what the controller reports with no NVM address, and it
+        # was accepted before, so no public address was ever programmed.
+        self.assertIn('00:00:00:*|ff:ff:ff:*|00:00:00:00:00:00) return 1',
+                      self.text)
+
+    def test_status_flags_an_unusable_address(self):
+        self.assertIn('UNUSABLE: no public address', self.text)
+
+    def test_pairing_scans_first(self):
+        self.assertIn('Looking for $mac for 20 seconds', self.text)
+        self.assertIn('echo "scan on"; sleep 20', self.text)
 
     def test_address_goes_through_the_driver_parameter(self):
         self.assertIn('BDADDR_FILE="$PARAM_DIR/bdaddr"', self.text,
