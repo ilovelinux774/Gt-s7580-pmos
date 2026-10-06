@@ -56,6 +56,32 @@ GPUS_NEW = '''\tadd_components(&pdev->dev, &match, "connectors");
 \t\t\tcomponent_match_add(&pdev->dev, &match, compare_of, gpu);
 \t}'''
 
+MAKEFILE = DRM_DIR / 'Makefile'
+ADRENO = DRM_DIR / 'adreno' / 'adreno_device.c'
+
+# The Adreno 308 of the MSM8917. adreno_device.c only lists A530, so without
+# this entry adreno_info() returns NULL for our chipid (0x03000620) and the
+# DRM driver would come up without a GPU.
+ADRENO_GPULIST_ANCHOR = 'static const struct adreno_info gpulist[] = {\n'
+
+ADRENO_A306_ENTRY = """	{
+		.rev   = ADRENO_REV(3, 0, 6, ANY_ID),
+		.revn  = 306,
+		.name  = "A306",
+		.pm4fw = "a300_pm4.fw",
+		.pfpfw = "a300_pfp.fw",
+		.gmem  = SZ_128K,
+		.init  = a3xx_gpu_init,
+	},
+"""
+
+# The SDE code does not compile in this tree: sde_plane.c uses
+# sde_drm_scaler_v1.lr/.tb, which include/uapi/drm/sde_drm.h never had, so SDE
+# has never been buildable here. This SoC is MDP5 anyway.
+SDE_KMS_OLD = '\tkms = sde_kms_init(dev);\n'
+SDE_KMS_NEW = ('\tkms = ERR_PTR(-ENODEV);'
+               '  /* j4primelte: SDE is not built; this SoC is MDP5 */\n')
+
 # Symbols build-kernel.sh must set for a working, boot-safe configuration.
 ENABLE = [
     'DRM',
@@ -87,28 +113,87 @@ def patch(text, old, new, marker, what):
     return text.replace(old, new, 1), True
 
 
+def drop_sde_from_makefile(text):
+    """Remove every SDE object and add the a3xx/a4xx GPU objects."""
+    lines = text.splitlines(keepends=True)
+    out = []
+    dropped = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        block_start = stripped.startswith(('obj-$(CONFIG_DRM_MSM) += sde/',
+                                           'obj-$(CONFIG_DRM_SDE_WB)'))
+        if block_start:
+            while i < len(lines):
+                dropped.append(lines[i].strip())
+                i += 1
+                if not lines[i - 1].rstrip('\n').rstrip().endswith('\\'):
+                    break
+            continue
+        if stripped.startswith('sde/sde_') or \
+                stripped == 'msm-$(CONFIG_SYNC) += sde/sde_fence.o' or \
+                stripped.startswith('obj-$(CONFIG_DRM_MSM) += display-manager/'):
+            dropped.append(stripped)
+            i += 1
+            continue
+        out.append(lines[i])
+        if stripped.startswith('adreno/adreno_gpu.o'):
+            out.append('\tadreno/a3xx_gpu.o \\\n')
+            out.append('\tadreno/a4xx_gpu.o \\\n')
+        i += 1
+    return ''.join(out), dropped
+
+
 def apply(tree):
     tree = Path(tree)
     if not (tree / DRM_DIR).is_dir():
         raise SystemExit('not a kernel tree with drivers/gpu/drm/msm: %s' % tree)
-    path = tree / DRV
-    text = path.read_text()
+    drv = tree / DRV
+    text = drv.read_text()
     text, changed_dt = patch(text, DT_MATCH_OLD, DT_MATCH_NEW,
                              'qcom,mdss_mdp" }, /* mdp5', 'dt_match')
     text, changed_gpus = patch(text, GPUS_OLD, GPUS_NEW,
                                'j4primelte: Samsung\'s device tree has no "gpus"',
                                'gpus fallback')
-    if changed_dt or changed_gpus:
-        path.write_text(text)
-    print('patched %s (dt_match=%s gpus=%s)'
-          % (path.name, changed_dt, changed_gpus))
-    return path
+    text, changed_sde = patch(text, SDE_KMS_OLD, SDE_KMS_NEW,
+                              'j4primelte: SDE is not built', 'SDE KMS call')
+    if changed_dt or changed_gpus or changed_sde:
+        drv.write_text(text)
+
+    makefile = tree / MAKEFILE
+    made, dropped = drop_sde_from_makefile(makefile.read_text())
+    changed_make = bool(dropped) and 'adreno/a3xx_gpu.o' not in makefile.read_text()
+    if changed_make:
+        makefile.write_text(made)
+
+    adreno = tree / ADRENO
+    gpu_text = adreno.read_text()
+    changed_gpu = 'A306' not in gpu_text
+    if changed_gpu:
+        if ADRENO_GPULIST_ANCHOR not in gpu_text:
+            raise SystemExit('gpulist anchor not found in %s' % adreno)
+        adreno.write_text(gpu_text.replace(ADRENO_GPULIST_ANCHOR,
+                                           ADRENO_GPULIST_ANCHOR
+                                           + ADRENO_A306_ENTRY, 1))
+
+    print('patched %s (dt_match=%s gpus=%s sde=%s makefile=%s dropped=%d '
+          'adreno=%s)'
+          % (drv.name, changed_dt, changed_gpus, changed_sde,
+             changed_make, len(dropped), changed_gpu))
+    return drv
 
 
 def check(tree):
-    text = (Path(tree) / DRV).read_text()
-    ok = ('qcom,mdss_mdp" }, /* mdp5' in text
-          and 'j4primelte: Samsung\'s device tree has no "gpus"' in text)
+    tree = Path(tree)
+    drv = (tree / DRV).read_text()
+    makefile = (tree / MAKEFILE).read_text()
+    adreno = (tree / ADRENO).read_text()
+    ok = ('qcom,mdss_mdp" }, /* mdp5' in drv
+          and 'j4primelte: Samsung\'s device tree has no "gpus"' in drv
+          and 'j4primelte: SDE is not built' in drv
+          and 'adreno/a3xx_gpu.o' in makefile
+          and 'sde/sde_plane.o' not in makefile
+          and 'A306' in adreno)
     print('patched' if ok else 'not patched')
     return 0 if ok else 1
 
