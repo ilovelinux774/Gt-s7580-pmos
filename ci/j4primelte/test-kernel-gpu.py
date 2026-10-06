@@ -81,6 +81,16 @@ obj-$(CONFIG_DRM_SDE_WB) += sde/sde_wb.o \\
 \tsde/sde_encoder_phys_wb.o
 """
 
+FAKE_REGS = """enum adreno_regs {
+\tREG_ADRENO_CP_TIMESTAMP,
+\tREG_ADRENO_CP_ME_RAM_RADDR,
+\tREG_ADRENO_CP_ROQ_ADDR,
+\tREG_ADRENO_PA_SC_AA_CONFIG,
+\tREG_ADRENO_SQ_GPR_MANAGEMENT,
+\tREG_ADRENO_REGISTER_MAX,
+};
+"""
+
 FAKE_ADRENO = """struct msm_gpu *a3xx_gpu_init(struct drm_device *dev);
 struct msm_gpu *a5xx_gpu_init(struct drm_device *dev);
 
@@ -104,6 +114,7 @@ class StagingTests(unittest.TestCase):
         (drm / 'msm_drv.c').write_text(FAKE_DRV)
         (drm / 'Makefile').write_text(FAKE_MAKEFILE)
         (drm / 'adreno' / 'adreno_device.c').write_text(FAKE_ADRENO)
+        (drm / 'adreno' / 'adreno_gpu.h').write_text(FAKE_REGS)
         self.drv = drm / 'msm_drv.c'
         self.makefile = drm / 'Makefile'
         self.adreno = drm / 'adreno' / 'adreno_device.c'
@@ -170,6 +181,27 @@ class StagingTests(unittest.TestCase):
         first = self.makefile.read_text()
         gpu.apply(self.tree)
         self.assertEqual(self.makefile.read_text(), first)
+
+
+    def test_register_enum_gains_the_missing_a3xx_registers(self):
+        gpu.apply(self.tree)
+        text = (self.tree / gpu.ADRENO_GPU_H).read_text()
+        # a3xx_register_offsets[] is initialised positionally, so the order
+        # has to match the order a3xx_gpu.c writes them in.
+        lines = [line.strip() for line in text.splitlines()]
+        self.assertEqual(lines.index('REG_ADRENO_SCRATCH_ADDR,') - 1,
+                         lines.index('REG_ADRENO_CP_ME_RAM_RADDR,'))
+        self.assertEqual(lines.index('REG_ADRENO_SCRATCH_UMSK,') - 1,
+                         lines.index('REG_ADRENO_SCRATCH_ADDR,'))
+        self.assertEqual(lines.index('REG_ADRENO_SCRATCH_REG2,') + 1,
+                         lines.index('REG_ADRENO_SQ_GPR_MANAGEMENT,'))
+        self.assertIn('REG_ADRENO_REGISTER_MAX,', lines)
+
+    def test_register_patch_is_idempotent(self):
+        gpu.apply(self.tree)
+        first = (self.tree / gpu.ADRENO_GPU_H).read_text()
+        gpu.apply(self.tree)
+        self.assertEqual((self.tree / gpu.ADRENO_GPU_H).read_text(), first)
 
 
 class ConfigTests(unittest.TestCase):

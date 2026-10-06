@@ -56,6 +56,7 @@ GPUS_NEW = '''\tadd_components(&pdev->dev, &match, "connectors");
 \t\t\tcomponent_match_add(&pdev->dev, &match, compare_of, gpu);
 \t}'''
 
+ADRENO_GPU_H = DRM_DIR / 'adreno' / 'adreno_gpu.h'
 MAKEFILE = DRM_DIR / 'Makefile'
 ADRENO = DRM_DIR / 'adreno' / 'adreno_device.c'
 
@@ -74,6 +75,17 @@ ADRENO_A306_ENTRY = """	{
 		.init  = a3xx_gpu_init,
 	},
 """
+
+# a3xx_gpu.c and a4xx_gpu.c index a3xx_register_offsets[] with three register
+# names this tree's enum never had, so neither file has ever compiled here. The
+# positions matter: the register table is initialised positionally.
+SCRATCH_OLD = '\tREG_ADRENO_CP_ME_RAM_RADDR,\n'
+SCRATCH_NEW = ('\tREG_ADRENO_CP_ME_RAM_RADDR,\n'
+               '\tREG_ADRENO_SCRATCH_ADDR,\n'
+               '\tREG_ADRENO_SCRATCH_UMSK,\n')
+SCRATCH2_OLD = '\tREG_ADRENO_SQ_GPR_MANAGEMENT,\n'
+SCRATCH2_NEW = ('\tREG_ADRENO_SCRATCH_REG2,\n'
+                '\tREG_ADRENO_SQ_GPR_MANAGEMENT,\n')
 
 # The SDE code does not compile in this tree: sde_plane.c uses
 # sde_drm_scaler_v1.lr/.tb, which include/uapi/drm/sde_drm.h never had, so SDE
@@ -166,6 +178,22 @@ def apply(tree):
     if changed_make:
         makefile.write_text(made)
 
+    regs = tree / ADRENO_GPU_H
+    regs_text = regs.read_text()
+    changed_regs = False
+    if 'REG_ADRENO_SCRATCH_ADDR,' not in regs_text:
+        if SCRATCH_OLD not in regs_text:
+            raise SystemExit('ME_RAM_RADDR anchor not found in %s' % regs)
+        regs_text = regs_text.replace(SCRATCH_OLD, SCRATCH_NEW, 1)
+        changed_regs = True
+    if 'REG_ADRENO_SCRATCH_REG2,' not in regs_text:
+        if SCRATCH2_OLD not in regs_text:
+            raise SystemExit('SQ_GPR_MANAGEMENT anchor not found in %s' % regs)
+        regs_text = regs_text.replace(SCRATCH2_OLD, SCRATCH2_NEW, 1)
+        changed_regs = True
+    if changed_regs:
+        regs.write_text(regs_text)
+
     adreno = tree / ADRENO
     gpu_text = adreno.read_text()
     changed_gpu = 'A306' not in gpu_text
@@ -177,9 +205,9 @@ def apply(tree):
                                            + ADRENO_A306_ENTRY, 1))
 
     print('patched %s (dt_match=%s gpus=%s sde=%s makefile=%s dropped=%d '
-          'adreno=%s)'
+          'adreno=%s regs=%s)'
           % (drv.name, changed_dt, changed_gpus, changed_sde,
-             changed_make, len(dropped), changed_gpu))
+             changed_make, len(dropped), changed_gpu, changed_regs))
     return drv
 
 
@@ -188,12 +216,15 @@ def check(tree):
     drv = (tree / DRV).read_text()
     makefile = (tree / MAKEFILE).read_text()
     adreno = (tree / ADRENO).read_text()
+    regs = (tree / ADRENO_GPU_H).read_text()
     ok = ('qcom,mdss_mdp" }, /* mdp5' in drv
           and 'j4primelte: Samsung\'s device tree has no "gpus"' in drv
           and 'j4primelte: SDE is not built' in drv
           and 'adreno/a3xx_gpu.o' in makefile
           and 'sde/sde_plane.o' not in makefile
-          and 'A306' in adreno)
+          and 'A306' in adreno
+          and 'REG_ADRENO_SCRATCH_ADDR,' in regs
+          and 'REG_ADRENO_SCRATCH_REG2,' in regs)
     print('patched' if ok else 'not patched')
     return 0 if ok else 1
 
