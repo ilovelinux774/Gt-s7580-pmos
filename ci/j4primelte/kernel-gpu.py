@@ -120,10 +120,12 @@ ENABLE = [
 ]
 
 # MSM_KGSL turns adreno_register() into an empty stub; FB_MSM_MDSS owns the
-# mdss_mdp node the KMS driver needs.
+# mdss_mdp node the KMS driver needs; KLAPSE calls the MDSS KCAL colour
+# functions, so it cannot be linked once the framebuffer driver is gone.
 DISABLE = [
     'MSM_KGSL',
     'FB_MSM_MDSS',
+    'KLAPSE',
 ]
 
 

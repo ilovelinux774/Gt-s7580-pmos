@@ -67,7 +67,7 @@ scripts/config --file out/.config --disable LOCALVERSION_AUTO
 if [ "${J4_GPU_EXPERIMENT:-0}" = "1" ]; then
     # KGSL turns the DRM adreno registration into an empty stub, and the MDSS
     # framebuffer driver owns the mdss_mdp node that MDP5 KMS needs.
-    for flag in MSM_KGSL FB_MSM_MDSS; do
+    for flag in MSM_KGSL FB_MSM_MDSS KLAPSE; do
         scripts/config --file out/.config --disable "$flag"
     done
     for flag in DRM DRM_KMS_HELPER DRM_PANEL DRM_MIPI_DSI DRM_FBDEV_EMULATION \

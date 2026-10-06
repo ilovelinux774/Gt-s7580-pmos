@@ -245,6 +245,8 @@ class ConfigTests(unittest.TestCase):
         # KGSL makes adreno_register() a stub; the fb driver owns mdss_mdp.
         self.assertIn('MSM_KGSL', gpu.DISABLE)
         self.assertIn('FB_MSM_MDSS', gpu.DISABLE)
+        self.assertIn('KLAPSE', gpu.DISABLE,
+                      'klapse.c links against the MDSS KCAL colour functions')
 
 
 class WiringTests(unittest.TestCase):
