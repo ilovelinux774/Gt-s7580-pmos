@@ -307,6 +307,14 @@ class StagingTests(unittest.TestCase):
         self.assertIn('DRM_MIPI_DSI', gpu.ENABLE,
                       'the DSI helper library itself is fine')
 
+    def test_the_dsi_stack_is_explicitly_disabled(self):
+        # Leaving them out of ENABLE is not enough: this defconfig turns them
+        # on by default, and dsi-staging pulls in the SDE code that does not
+        # build.
+        for symbol in ('DRM_MSM_DSI_STAGING', 'DRM_MSM_DSI_PLL',
+                       'DRM_MSM_DSI_28NM_PHY'):
+            self.assertIn(symbol, gpu.DISABLE)
+
 
 class ConfigTests(unittest.TestCase):
     def test_enables_the_drm_stack(self):

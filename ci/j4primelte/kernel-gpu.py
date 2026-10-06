@@ -128,6 +128,13 @@ DISABLE = [
     'MSM_KGSL',
     'FB_MSM_MDSS',
     'KLAPSE',
+    # On by default in this defconfig, so they have to be turned off, not just
+    # left out of ENABLE: dsi-staging is the only user of the SDE code that
+    # cannot be compiled here, and it does the 64 bit maths that modpost cannot
+    # resolve for a module. The panel has no DRM device tree node yet either.
+    'DRM_MSM_DSI_STAGING',
+    'DRM_MSM_DSI_PLL',
+    'DRM_MSM_DSI_28NM_PHY',
 ]
 
 
