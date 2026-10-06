@@ -150,8 +150,9 @@ def drop_sde_from_makefile(text):
             continue
         out.append(lines[i])
         if stripped.startswith('adreno/adreno_gpu.o'):
+            # a3xx only: the Adreno 308. a4xx is left out on purpose, it calls
+            # adreno_is_a4xx(), which this tree does not define either.
             out.append('\tadreno/a3xx_gpu.o \\\n')
-            out.append('\tadreno/a4xx_gpu.o \\\n')
         i += 1
     return ''.join(out), dropped
 

@@ -1,0 +1,161 @@
+#!/bin/sh
+# Move the running J4+ system onto the large userdata partition.
+#
+# SYSTEM (mmcblk0p47) is small; userdata (mmcblk0p53) is the biggest partition
+# on the phone. This copies the running rootfs onto userdata so the phone has
+# room to install things.
+#
+# The current root is never touched: it stays on SYSTEM as a fallback, with its
+# own UUID. Nothing is written to the boot partition either, so falling back is
+# just "flash the previous boot.img" (or point it back at the old UUID).
+#
+#   j4-rootfs-move --check              report sizes, UUIDs and what is on userdata
+#   j4-rootfs-move --backup DEST        tar up whatever is on userdata first
+#   j4-rootfs-move --move --yes         format userdata and copy this system onto it
+#
+# --move ERASES userdata. Run --check first, and --backup if there is anything
+# on internal storage worth keeping (photos, downloads, ...).
+set -eu
+
+TARGET=/dev/mmcblk0p53
+MOUNT=/mnt/j4-newroot
+LOG=/var/log/j4/rootfs-move.log
+MARKER=J4_ROOTFS_MOVE_V1
+# Pseudo filesystems and mount points are created empty, never copied.
+SKIP="proc sys dev run tmp mnt media"
+
+log() {
+	mkdir -p "$(dirname "$LOG")"
+	printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG"
+	echo "$*"
+}
+
+die() {
+	echo "ERROR: $*" >&2
+	log "aborted: $*"
+	exit 1
+}
+
+have() {
+	command -v "$1" >/dev/null 2>&1
+}
+
+current_root() {
+	sed -n 's|^\(/dev/[^ ]*\) / .*|\1|p' /proc/mounts | head -n 1
+}
+
+check() {
+	echo "marker: $MARKER"
+	echo "running root: $(current_root)"
+	echo "target: $TARGET"
+	for tool in blkid mkfs.ext4 tune2fs; do
+		have "$tool" || echo "MISSING TOOL: $tool (apk add e2fsprogs)"
+	done
+	if [ -b "$TARGET" ]; then
+		echo "target info: $(blkid "$TARGET" 2>/dev/null || echo 'unreadable')"
+		echo "target size: $(awk -v t="${TARGET##*/}" '$4==t {printf "%.1f GiB\n", $3*1024/1048576}' /proc/partitions)"
+	else
+		echo "target: $TARGET not found"
+	fi
+	echo "root size: $(df -h / | awk 'NR==2 {print $2" total, "$4" free"}')"
+	if mountpoint -q "$TARGET" 2>/dev/null || grep -q "^$TARGET " /proc/mounts; then
+		mount_dir=$(sed -n "s|^$TARGET \([^ ]*\).*|\1|p" /proc/mounts | head -n 1)
+		echo "userdata is mounted on $mount_dir"
+		echo "contents: $(du -sh "$mount_dir" 2>/dev/null | cut -f1) in $(ls -A "$mount_dir" | wc -l) entries"
+		ls -A "$mount_dir" | head -n 10 | sed 's/^/   /'
+	else
+		echo "userdata is not mounted (nothing will be removed by --move)"
+	fi
+}
+
+backup() {
+	dest=$1
+	[ -d "$dest" ] || die "backup destination is not a directory: $dest"
+	[ -w "$dest" ] || die "backup destination is not writable: $dest"
+	grep -q "^$TARGET " /proc/mounts || \
+		die "mount userdata first, or there is nothing to back up"
+	src=$(sed -n "s|^$TARGET \([^ ]*\).*|\1|p" /proc/mounts | head -n 1)
+	out=$dest/j4-userdata-$(date +%F-%H%M).tar
+	log "backing up $src to $out"
+	tar -cf "$out" -C "$src" . || die "backup failed"
+	log "backup written: $out ($(du -h "$out" | cut -f1))"
+	echo "BACKUP_OK: $out"
+}
+
+copy_root() {
+	# Called with the new root mounted at $1. The running system is the source.
+	dest=$1
+	for entry in $(ls -A /); do
+		skip=0
+		for name in $SKIP; do
+			[ "$entry" = "$name" ] && skip=1
+		done
+		[ "$skip" = 1 ] && continue
+		[ -e "/$entry" ] || continue
+		log "copying /$entry"
+		cp -a "/$entry" "$dest/"
+	done
+	for name in $SKIP; do
+		mkdir -p "$dest/$name"
+	done
+	chmod 1777 "$dest/tmp"
+	chmod 755 "$dest/mnt" "$dest/media"
+}
+
+fix_fstab() {
+	dest=$1
+	[ -f "$dest/etc/fstab" ] || return 0
+	if awk '{ if ($2=="/" && $1 ~ /^(\/dev|UUID|LABEL)/) found=1 } END { exit !found }' \
+		"$dest/etc/fstab"; then
+		old=$(awk '$2=="/" && $1 ~ /^(\/dev|UUID|LABEL)/ {print $1; exit}' "$dest/etc/fstab")
+		log "fstab root entry: $old -> $TARGET"
+		sed -i "s|^$old[ \t]*/[ \t]|$TARGET / |" "$dest/etc/fstab"
+	else
+		log "fstab has no root entry; leaving it alone"
+	fi
+}
+
+move() {
+	[ "$(id -u)" = 0 ] || die "run as root"
+	[ -b "$TARGET" ] || die "no such partition: $TARGET"
+	[ "$(current_root)" = "$TARGET" ] && die "already running from $TARGET"
+	for tool in mkfs.ext4 blkid; do
+		have "$tool" || die "$tool is missing (apk add e2fsprogs)"
+	done
+	if grep -q "^$TARGET " /proc/mounts; then
+		die "$TARGET is mounted; unmount it first (and --backup if you need it)"
+	fi
+	log "formatting $TARGET"
+	mkfs.ext4 -F -L pmOS_root "$TARGET" >/dev/null 2>&1 || die "mkfs.ext4 failed"
+	mkdir -p "$MOUNT"
+	mount -t ext4 "$TARGET" "$MOUNT" || die "could not mount the new root"
+	copy_root "$MOUNT"
+	fix_fstab "$MOUNT"
+	uuid=$(blkid -s UUID -o value "$TARGET")
+	sync
+	umount "$MOUNT"
+	log "new rootfs ready on $TARGET"
+	echo "MOVE_OK: copied to $TARGET"
+	echo "NEW_UUID: $uuid"
+	echo "NEXT: point the boot image at it, on the PC:"
+	echo "  python3 patch-boot-uuid.py boot.img $uuid"
+	echo "  then flash that boot.img to BOOT (/dev/mmcblk0p23)"
+	echo "FALLBACK: the old system is untouched on $(current_root);"
+	echo "  flash the previous boot.img to boot it again."
+}
+
+usage() {
+	echo "usage: j4-rootfs-move --check | --backup DEST | --move --yes"
+	exit 2
+}
+
+[ $# -ge 1 ] || usage
+case "$1" in
+--check) check ;;
+--backup) [ $# -ge 2 ] || usage; backup "$2" ;;
+--move)
+	[ "${2:-}" = "--yes" ] || die "--move ERASES userdata; add --yes after --check and --backup"
+	move
+	;;
+*) usage ;;
+esac

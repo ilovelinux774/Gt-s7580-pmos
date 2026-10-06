@@ -159,7 +159,10 @@ class StagingTests(unittest.TestCase):
         self.assertNotIn('display-manager/display_manager.o', text)
         self.assertNotIn('sde/sde_fence.o', text)
         self.assertIn('adreno/a3xx_gpu.o', text)
-        self.assertIn('adreno/a4xx_gpu.o', text)
+        self.assertNotIn('adreno/a4xx_gpu.o', text,
+                         'a4xx calls adreno_is_a4xx(), which is not defined')
+        self.assertIn('adreno/a5xx_gpu.o', text,
+                      'a5xx must stay: gpulist references a5xx_gpu_init')
         self.assertIn('hdmi/hdmi.o', text, 'unrelated objects must survive')
 
     def test_adreno_gpulist_gains_the_adreno_308(self):
