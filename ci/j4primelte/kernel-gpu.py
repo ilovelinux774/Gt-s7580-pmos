@@ -56,6 +56,7 @@ GPUS_NEW = '''\tadd_components(&pdev->dev, &match, "connectors");
 \t\t\tcomponent_match_add(&pdev->dev, &match, compare_of, gpu);
 \t}'''
 
+SMMU = DRM_DIR / 'msm_smmu.c'
 ADRENO_GPU_H = DRM_DIR / 'adreno' / 'adreno_gpu.h'
 MAKEFILE = DRM_DIR / 'Makefile'
 ADRENO = DRM_DIR / 'adreno' / 'adreno_device.c'
@@ -75,6 +76,15 @@ ADRENO_A306_ENTRY = """	{
 		.init  = a3xx_gpu_init,
 	},
 """
+
+# msm_smmu.c carries its own module_init(), so linking it into msm.ko gives two
+# init_module symbols. Build it as a module of its own and export the symbol
+# msm_gpu.c and mdp5_kms.c call.
+SMMU_OBJ = 'obj-$(CONFIG_DRM_MSM) += msm_smmu.o\n'
+SMMU_MSM_ANCHOR = 'obj-$(CONFIG_DRM_MSM)\t+= msm.o\n'
+SMMU_EXPORT = ('\n/* j4primelte: msm_smmu is a module of its own now, so msm.ko\n'
+               ' * can call msm_smmu_new() through the module symbol table. */\n'
+               'EXPORT_SYMBOL(msm_smmu_new);\n')
 
 # a3xx_gpu.c and a4xx_gpu.c index a3xx_register_offsets[] with three register
 # names this tree's enum never had, so neither file has ever compiled here. The
@@ -142,6 +152,11 @@ def drop_sde_from_makefile(text):
                 if not lines[i - 1].rstrip('\n').rstrip().endswith('\\'):
                     break
             continue
+        if stripped.endswith('\\') and stripped.rstrip('\\').strip() == 'msm_smmu.o':
+
+            dropped.append(stripped)
+            i += 1
+            continue
         if stripped.startswith('sde/sde_') or \
                 stripped == 'msm-$(CONFIG_SYNC) += sde/sde_fence.o' or \
                 stripped.startswith('obj-$(CONFIG_DRM_MSM) += display-manager/'):
@@ -149,6 +164,8 @@ def drop_sde_from_makefile(text):
             i += 1
             continue
         out.append(lines[i])
+        if lines[i] == SMMU_MSM_ANCHOR and SMMU_OBJ not in text:
+            out.append(SMMU_OBJ)
         if stripped.startswith('adreno/adreno_gpu.o'):
             # a3xx only: the Adreno 308. a4xx is left out on purpose, it calls
             # adreno_is_a4xx(), which this tree does not define either.
@@ -178,6 +195,11 @@ def apply(tree):
     changed_make = bool(dropped) and 'adreno/a3xx_gpu.o' not in makefile.read_text()
     if changed_make:
         makefile.write_text(made)
+
+    smmu = tree / SMMU
+    smmu_text = smmu.read_text()
+    if 'EXPORT_SYMBOL(msm_smmu_new)' not in smmu_text:
+        smmu.write_text(smmu_text.rstrip('\n') + '\n' + SMMU_EXPORT)
 
     regs = tree / ADRENO_GPU_H
     regs_text = regs.read_text()
@@ -225,7 +247,9 @@ def check(tree):
           and 'sde/sde_plane.o' not in makefile
           and 'A306' in adreno
           and 'REG_ADRENO_SCRATCH_ADDR,' in regs
-          and 'REG_ADRENO_SCRATCH_REG2,' in regs)
+          and 'REG_ADRENO_SCRATCH_REG2,' in regs
+          and SMMU_OBJ in makefile
+          and 'EXPORT_SYMBOL(msm_smmu_new)' in (tree / SMMU).read_text())
     print('patched' if ok else 'not patched')
     return 0 if ok else 1
 

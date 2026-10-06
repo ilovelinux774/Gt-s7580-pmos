@@ -59,6 +59,7 @@ FAKE_MAKEFILE = """msm-y := \\
 \tsde/sde_kms.o \\
 \tsde/sde_plane.o \\
 \tsde/sde_connector.o \\
+\tmsm_smmu.o \\
 \tmsm_drv.o
 
 ifneq ($(CONFIG_QCOM_KGSL),y)
@@ -79,6 +80,15 @@ obj-$(CONFIG_DRM_MSM) += display-manager/display_manager.o
 
 obj-$(CONFIG_DRM_SDE_WB) += sde/sde_wb.o \\
 \tsde/sde_encoder_phys_wb.o
+"""
+
+FAKE_SMMU = """struct msm_mmu *msm_smmu_new(struct drm_device *dev,
+\tstruct device *d, enum msm_mmu_domain_type domain)
+{
+\treturn NULL;
+}
+
+MODULE_LICENSE("GPL v2");
 """
 
 FAKE_REGS = """enum adreno_regs {
@@ -115,6 +125,7 @@ class StagingTests(unittest.TestCase):
         (drm / 'Makefile').write_text(FAKE_MAKEFILE)
         (drm / 'adreno' / 'adreno_device.c').write_text(FAKE_ADRENO)
         (drm / 'adreno' / 'adreno_gpu.h').write_text(FAKE_REGS)
+        (drm / 'msm_smmu.c').write_text(FAKE_SMMU)
         self.drv = drm / 'msm_drv.c'
         self.makefile = drm / 'Makefile'
         self.adreno = drm / 'adreno' / 'adreno_device.c'
@@ -205,6 +216,23 @@ class StagingTests(unittest.TestCase):
         first = (self.tree / gpu.ADRENO_GPU_H).read_text()
         gpu.apply(self.tree)
         self.assertEqual((self.tree / gpu.ADRENO_GPU_H).read_text(), first)
+
+
+    def test_msm_smmu_becomes_its_own_module(self):
+        gpu.apply(self.tree)
+        text = self.makefile.read_text()
+        # It carries its own module_init(), so linking it into msm.ko would
+        # produce a second init_module.
+        self.assertIn(gpu.SMMU_OBJ, text)
+        objects = text.split('msm-y :=', 1)[1].split('ifneq', 1)[0]
+        self.assertNotIn('msm_smmu.o', objects)
+        self.assertEqual(text.count('msm_smmu.o'), 1)
+
+    def test_msm_smmu_exports_the_symbol_msm_needs(self):
+        gpu.apply(self.tree)
+        text = (self.tree / gpu.SMMU).read_text()
+        self.assertIn('EXPORT_SYMBOL(msm_smmu_new)', text)
+        self.assertIn('msm_smmu_new', text)
 
 
 class ConfigTests(unittest.TestCase):
