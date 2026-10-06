@@ -28,6 +28,17 @@ cd "$KERNEL"
 # which carries HCI over the APPS_RIVA_BT_CMD / APPS_RIVA_BT_ACL SMD channels.
 python3 "$ROOT/ci/j4primelte/kernel-bt.py" "$KERNEL"
 
+# GPU experiment (opt-in, J4_GPU_EXPERIMENT=1): this kernel carries the MSM DRM
+# driver with MDP5 KMS and the a3xx (Adreno 308) GPU, but it can never bind:
+# dt_match[] excludes qcom,mdss_mdp because the framebuffer driver owns that
+# node, and Samsung's device tree has no "gpus" phandle list, so the GPU never
+# becomes a component. Enabling this hands mdss_mdp to DRM, which turns the
+# framebuffer display off until the panel works under DRM, so it stays opt-in
+# and the driver is built as a blacklisted module.
+if [ "${J4_GPU_EXPERIMENT:-0}" = "1" ]; then
+    python3 "$ROOT/ci/j4primelte/kernel-gpu.py" "$KERNEL"
+fi
+
 # This pinned source already removed DTC's duplicate lexer yylloc definition.
 # Do not attempt to reapply an obsolete compiler-compatibility patch.
 
@@ -52,6 +63,21 @@ for flag in ANDROID_PARANOID_NETWORK SEC_RESTRICT_ROOTING SECURITY_DEFEX \
 done
 scripts/config --file out/.config --set-str LOCALVERSION '-pmos-j4-debug'
 scripts/config --file out/.config --disable LOCALVERSION_AUTO
+
+if [ "${J4_GPU_EXPERIMENT:-0}" = "1" ]; then
+    # KGSL turns the DRM adreno registration into an empty stub, and the MDSS
+    # framebuffer driver owns the mdss_mdp node that MDP5 KMS needs.
+    for flag in MSM_KGSL FB_MSM_MDSS; do
+        scripts/config --file out/.config --disable "$flag"
+    done
+    for flag in DRM DRM_KMS_HELPER DRM_PANEL DRM_MIPI_DSI DRM_FBDEV_EMULATION \
+        DRM_MSM_DSI_STAGING DRM_MSM_DSI_PLL DRM_MSM_DSI_28NM_PHY CMA DMA_CMA; do
+        scripts/config --file out/.config --enable "$flag"
+    done
+    # A module, and blacklisted from autoloading: a failed probe must never be
+    # able to stop the boot. Load it by hand with "modprobe msm".
+    scripts/config --file out/.config --module DRM_MSM
+fi
 "${MAKE[@]}" olddefconfig
 
 for flag in SEC_J4PRIMELTE_PROJECT MACH_J4PRIMELTE_SEA_OPEN BUILD_ARM_APPENDED_DTB_IMAGE \
@@ -62,6 +88,16 @@ for flag in SEC_J4PRIMELTE_PROJECT MACH_J4PRIMELTE_SEA_OPEN BUILD_ARM_APPENDED_D
 done
 if grep -qx 'CONFIG_ANDROID_PARANOID_NETWORK=y' out/.config; then
     echo 'Android network permission checks still enabled'; exit 1
+fi
+
+if [ "${J4_GPU_EXPERIMENT:-0}" = "1" ]; then
+    grep -qx 'CONFIG_DRM=y' out/.config || { echo 'DRM core missing'; exit 1; }
+    grep -qx 'CONFIG_DRM_MSM=m' out/.config || { echo 'MSM DRM is not a module'; exit 1; }
+    if grep -qE '^CONFIG_(MSM_KGSL|FB_MSM_MDSS)=' out/.config; then
+        echo 'KGSL or the MDSS framebuffer driver is still enabled'; exit 1
+    fi
+    echo 'GPU experiment: CONFIG_DRM_MSM=m; KGSL and the MDSS fb driver are off'
+    cp "$KERNEL/drivers/gpu/drm/msm/msm_drv.c" "$LOGS/msm_drv.c"
 fi
 cp out/.config "$LOGS/kernel.config"
 # Keep the staged Bluetooth driver with the other build provenance.

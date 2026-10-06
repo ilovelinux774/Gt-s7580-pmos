@@ -37,10 +37,20 @@ def staged_kernel_files(root):
     return sorted(directory.glob('*.c')) + sorted(directory.glob('*.h'))
 
 
+# Helpers that patch the checked-out tree. Their content changes the kernel, so
+# it belongs in the key just like build-kernel.sh does.
+STAGING_HELPERS = ('kernel-bt.py', 'kernel-gpu.py')
+
+
 def recipe_key(root):
     h = hashlib.sha256(b'j4-kernel-cache-v1\n')
     h.update(json.dumps(source_pins(root), sort_keys=True).encode())
     h.update((root / 'ci/j4primelte/build-kernel.sh').read_bytes())
+    for name in STAGING_HELPERS:
+        helper = root / 'ci/j4primelte' / name
+        if helper.is_file():
+            h.update(name.encode())
+            h.update(helper.read_bytes())
     for path in staged_kernel_files(root):
         h.update(path.name.encode())
         h.update(path.read_bytes())

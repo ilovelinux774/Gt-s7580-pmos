@@ -2,6 +2,11 @@ name: Build postmarketOS J4+ SM-J415F (USB debug)
 
 on:
   workflow_dispatch:
+    inputs:
+      gpu_experiment:
+        description: 'MSM DRM driver: hands MDP5 to DRM (framebuffer display off)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -48,6 +53,7 @@ jobs:
           python3 -m compileall -q ci/j4primelte
           python3 ci/j4primelte/test-kernel-cache.py
           python3 ci/j4primelte/test-kernel-bt.py
+          python3 ci/j4primelte/test-kernel-gpu.py
           python3 ci/j4primelte/test-bluetooth-setup.py
           python3 ci/j4primelte/test-j4-recover.py
           python3 ci/j4primelte/test-fix-root-uuid.py
@@ -72,6 +78,8 @@ jobs:
 
       - name: Build the pinned J4+ kernel with the pmOS configuration
         if: steps.kernel_cache.outputs.cache-hit != 'true'
+        env:
+          J4_GPU_EXPERIMENT: ${{ inputs.gpu_experiment && '1' || '0' }}
         run: bash ci/j4primelte/build-kernel.sh 2>&1 | tee artifacts/logs/kernel-build.log
 
       - name: Record compiler outputs and provenance

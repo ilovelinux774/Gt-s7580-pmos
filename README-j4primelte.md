@@ -68,6 +68,25 @@ Three artifacts are expected as their respective stages succeed:
    packages; **NOT boot.img or a recovery-flashable ZIP**. Saved even if the later
    rootfs stage fails.
 
+## GPU experiment (opt-in)
+
+This kernel carries drivers/gpu/drm/msm with MDP5 KMS and the a3xx (Adreno 308)
+GPU, but it can never bind as shipped: msm_drv.c's dt_match[] excludes
+"qcom,mdss_mdp" because the framebuffer driver owns that node, and Samsung's
+device tree has no "gpus" phandle list, so the GPU never becomes a component of
+the DRM device. Freedreno is already installed in userspace (mesa-dri-gallium);
+what it needs is /dev/dri/card0.
+
+Run the workflow with **gpu_experiment** enabled to build that configuration.
+kernel-gpu.py adds the dt_match entry and a fallback that registers the
+qcom,kgsl-3d0 node as the GPU component. Trade-offs, deliberately:
+
+- CONFIG_MSM_KGSL and CONFIG_FB_MSM_MDSS are disabled, so the framebuffer
+  display is off until the panel works under DRM. Plan for a headless test.
+- CONFIG_DRM_MSM=m and the module is blacklisted, so a failed probe cannot
+  stop the boot. Load it by hand: `modprobe msm`, then read dmesg.
+- Leaving the input off produces exactly the previous, display-working image.
+
 ## Root filesystem UUID
 
 Every build of the rootfs is a fresh ext4 filesystem, which would normally get a
