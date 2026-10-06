@@ -135,6 +135,9 @@ DISABLE = [
     'DRM_MSM_DSI_STAGING',
     'DRM_MSM_DSI_PLL',
     'DRM_MSM_DSI_28NM_PHY',
+    # The SDE era HDMI stack: on by default, calls into sde_kms_info. The
+    # plain hdmi/ driver stays, msm_drv.c calls hdmi_register() either way.
+    'DRM_SDE_HDMI',
 ]
 
 
@@ -166,8 +169,10 @@ def drop_objects(text):
                     break
             continue
         if (stripped.startswith('sde/sde_')
+                or stripped.startswith('hdmi-staging/')
                 or stripped == 'msm-$(CONFIG_SYNC) += sde/sde_fence.o'
-                or stripped.startswith('obj-$(CONFIG_DRM_MSM) += display-manager/')):
+                or stripped.startswith('obj-$(CONFIG_DRM_MSM) += display-manager/')
+                or stripped.startswith('msm-$(CONFIG_DRM_SDE_HDMI)')):
             dropped.append(stripped)
             i += 1
             continue
@@ -259,6 +264,7 @@ def check(tree):
           and 'msm_dsi_register();' not in drv
           and 'adreno/a3xx_gpu.o' in makefile
           and 'sde/sde_plane.o' not in makefile
+          and 'hdmi-staging/' not in makefile
           and SMMU_OBJ in makefile
           and 'A306' in adreno
           and 'REG_ADRENO_SCRATCH_ADDR,' in regs

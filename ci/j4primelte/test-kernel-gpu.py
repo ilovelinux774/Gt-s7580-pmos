@@ -312,8 +312,12 @@ class StagingTests(unittest.TestCase):
         # on by default, and dsi-staging pulls in the SDE code that does not
         # build.
         for symbol in ('DRM_MSM_DSI_STAGING', 'DRM_MSM_DSI_PLL',
-                       'DRM_MSM_DSI_28NM_PHY'):
+                       'DRM_MSM_DSI_28NM_PHY', 'DRM_SDE_HDMI'):
             self.assertIn(symbol, gpu.DISABLE)
+
+    def test_the_sde_hdmi_stack_is_dropped(self):
+        gpu.apply(self.tree)
+        self.assertNotIn('hdmi-staging/', self.makefile.read_text())
 
 
 class ConfigTests(unittest.TestCase):
