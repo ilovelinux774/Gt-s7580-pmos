@@ -70,8 +70,11 @@ if [ "${J4_GPU_EXPERIMENT:-0}" = "1" ]; then
     for flag in MSM_KGSL FB_MSM_MDSS KLAPSE; do
         scripts/config --file out/.config --disable "$flag"
     done
+    # No DSI symbols: dsi-staging depends on the SDE code that cannot be
+    # compiled here, and the panel has no DRM device tree node yet, so the
+    # module comes up headless, which is enough to prove the GPU works.
     for flag in DRM DRM_KMS_HELPER DRM_PANEL DRM_MIPI_DSI DRM_FBDEV_EMULATION \
-        DRM_MSM_DSI_STAGING DRM_MSM_DSI_PLL DRM_MSM_DSI_28NM_PHY CMA DMA_CMA; do
+        CMA DMA_CMA; do
         scripts/config --file out/.config --enable "$flag"
     done
     # A module, and blacklisted from autoloading: a failed probe must never be
