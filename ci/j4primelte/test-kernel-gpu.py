@@ -32,6 +32,30 @@ static int msm_pdev_probe(struct platform_device *pdev)
 \treturn component_master_add_with_match(&pdev->dev, &msm_drm_ops, match);
 }
 
+static const struct drm_ioctl_desc msm_ioctls[] = {
+	DRM_IOCTL_DEF_DRV(MSM_GET_PARAM,    msm_ioctl_get_param, DRM_AUTH),
+	DRM_IOCTL_DEF_DRV(SDE_WB_CONFIG, sde_wb_config, DRM_UNLOCKED|DRM_AUTH),
+};
+
+static int __init msm_drm_register(void)
+{
+	display_manager_register();
+	msm_dsi_register();
+	msm_edp_register();
+	hdmi_register();
+	adreno_register();
+	return platform_driver_register(&msm_platform_driver);
+}
+
+static void __exit msm_drm_unregister(void)
+{
+	hdmi_unregister();
+	adreno_unregister();
+	msm_edp_unregister();
+	msm_dsi_unregister();
+	display_manager_unregister();
+}
+
 	switch (get_mdp_ver(pdev)) {
 	case KMS_MDP5:
 		kms = mdp5_kms_init(dev);
@@ -82,6 +106,19 @@ obj-$(CONFIG_DRM_SDE_WB) += sde/sde_wb.o \\
 \tsde/sde_encoder_phys_wb.o
 """
 
+FAKE_IOMMU = """int msm_dma_map_sg_attrs(struct device *dev, struct scatterlist *sg,
+\tint nents, enum dma_data_direction dir, struct dma_buf *buf,
+\tstruct dma_attrs *attrs)
+{
+\treturn 0;
+}
+
+void msm_dma_unmap_sg(struct device *dev, struct scatterlist *sgl, int nents,
+\t     enum dma_data_direction dir, struct dma_buf *buf)
+{
+}
+"""
+
 FAKE_SMMU = """struct msm_mmu *msm_smmu_new(struct drm_device *dev,
 \tstruct device *d, enum msm_mmu_domain_type domain)
 {
@@ -126,6 +163,9 @@ class StagingTests(unittest.TestCase):
         (drm / 'adreno' / 'adreno_device.c').write_text(FAKE_ADRENO)
         (drm / 'adreno' / 'adreno_gpu.h').write_text(FAKE_REGS)
         (drm / 'msm_smmu.c').write_text(FAKE_SMMU)
+        iommu = self.tree / 'drivers' / 'iommu'
+        iommu.mkdir(parents=True)
+        (iommu / 'msm_dma_iommu_mapping.c').write_text(FAKE_IOMMU)
         self.drv = drm / 'msm_drv.c'
         self.makefile = drm / 'Makefile'
         self.adreno = drm / 'adreno' / 'adreno_device.c'
@@ -233,6 +273,39 @@ class StagingTests(unittest.TestCase):
         text = (self.tree / gpu.SMMU).read_text()
         self.assertIn('EXPORT_SYMBOL(msm_smmu_new)', text)
         self.assertIn('msm_smmu_new', text)
+
+
+    def test_it_drops_the_calls_into_the_missing_code(self):
+        gpu.apply(self.tree)
+        text = self.drv.read_text()
+        # display-manager and the DSI stack are not built, so msm_drv.c must
+        # not call into them, or modpost reports undefined symbols.
+        self.assertNotIn('display_manager_register();', text)
+        self.assertNotIn('display_manager_unregister();', text)
+        self.assertNotIn('msm_dsi_register();', text)
+        self.assertNotIn('msm_dsi_unregister();', text)
+
+    def test_the_sde_writeback_ioctl_becomes_a_noop(self):
+        gpu.apply(self.tree)
+        text = self.drv.read_text()
+        self.assertIn('DRM_IOCTL_DEF_DRV(SDE_WB_CONFIG, drm_noop', text)
+        self.assertNotIn('sde_wb_config,', text)
+
+    def test_the_iommu_helpers_are_exported(self):
+        gpu.apply(self.tree)
+        text = (self.tree / gpu.IOMMU_MAP).read_text()
+        self.assertIn('EXPORT_SYMBOL(msm_dma_map_sg_attrs)', text)
+        self.assertIn('EXPORT_SYMBOL(msm_dma_unmap_sg)', text)
+
+    def test_no_dsi_symbols_are_enabled(self):
+        # dsi-staging only pulls in the SDE code that cannot be compiled, and
+        # the panel has no DRM device tree node yet.
+        unwanted = ('DRM_MSM_DSI', 'DRM_MSM_DSI_STAGING', 'DRM_MSM_DSI_PLL',
+                    'DRM_MSM_DSI_28NM_PHY')
+        for symbol in gpu.ENABLE:
+            self.assertNotIn(symbol, unwanted)
+        self.assertIn('DRM_MIPI_DSI', gpu.ENABLE,
+                      'the DSI helper library itself is fine')
 
 
 class ConfigTests(unittest.TestCase):
