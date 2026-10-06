@@ -142,6 +142,23 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Stage the GPU modules on their own
+        if: success() && inputs.gpu_experiment
+        run: |
+          set -eu
+          mkdir -p artifacts/gpu-modules
+          cp /home/runner/j4-kernel/drivers/gpu/drm/msm/msm.ko artifacts/gpu-modules/
+          cp /home/runner/j4-kernel/drivers/gpu/drm/msm/msm_smmu.ko artifacts/gpu-modules/
+
+      - name: Upload GPU modules
+        if: success() && inputs.gpu_experiment
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-gpu-modules-${{ github.run_number }}
+          path: artifacts/gpu-modules/
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload build logs and source manifest
         if: always()
         uses: actions/upload-artifact@v4
