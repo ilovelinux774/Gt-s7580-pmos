@@ -56,8 +56,12 @@ class CacheTests(unittest.TestCase):
             self.assertNotEqual(cache.recipe_key(self.root), plain)
 
     def test_a_kernel_built_with_the_other_gpu_setting_is_rejected(self):
+        # The key already differs; this is the second line of defence, for a
+        # cache entry that somehow carries the same key.
         self.save()
-        with patch.dict(cache.os.environ, {'J4_GPU_EXPERIMENT': '1'}):
+        saved = cache.recipe_key(self.root)
+        with patch.dict(cache.os.environ, {'J4_GPU_EXPERIMENT': '1'}), \
+                patch.object(cache, 'recipe_key', return_value=saved):
             with self.assertRaisesRegex(RuntimeError, 'other GPU setting'):
                 cache.restore(self.root)
 
