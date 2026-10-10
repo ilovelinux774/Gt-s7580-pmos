@@ -23,6 +23,9 @@ depends="
 	bluez-openrc
 	bluez-btmgmt
 	bluez-deprecated
+	onboard
+	unclutter-xfixes
+	network-manager-applet
 "
 makedepends="devicepkg-dev"
 source="deviceinfo kernel-cmdline.conf initfs-hook.sh cleanup-hook.sh initfs.files"

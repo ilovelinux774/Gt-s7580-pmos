@@ -1,0 +1,11 @@
+#!/bin/sh
+# J4_LXQT_SETUP_V1 - keep the panel lit on this MDSS driver.
+# The MDSS backlight register only takes effect when written: it can read
+# 256 while the panel stays dark. Wake it at session start and once more
+# after the X session settles.
+echo 255 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null
+sleep 2
+echo 255 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null
+xset s off 2>/dev/null || true
+xset s noblank 2>/dev/null || true
+xset -dpms 2>/dev/null || true

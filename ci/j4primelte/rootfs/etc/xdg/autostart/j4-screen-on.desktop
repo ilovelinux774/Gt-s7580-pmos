@@ -1,0 +1,8 @@
+# J4_LXQT_SETUP_V1
+[Desktop Entry]
+Type=Application
+Name=J4 screen always on
+Comment=Disable X blanking/DPMS on the J4+ debug build
+Exec=/usr/local/sbin/j4-screen-on
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

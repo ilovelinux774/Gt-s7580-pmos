@@ -55,6 +55,7 @@ jobs:
           python3 ci/j4primelte/test-kernel-bt.py
           python3 ci/j4primelte/test-kernel-gpu.py
           python3 ci/j4primelte/test-rootfs-move.py
+          python3 ci/j4primelte/test-lxqt-image.py
           python3 ci/j4primelte/test-bluetooth-setup.py
           python3 ci/j4primelte/test-j4-recover.py
           python3 ci/j4primelte/test-fix-root-uuid.py

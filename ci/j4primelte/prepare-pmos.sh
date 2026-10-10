@@ -38,7 +38,7 @@ cat > "$CFG" <<EOF
 aports = $PORTS
 work = $WORK
 device = samsung-j4primelte
-ui = console
+ui = lxqt
 user = user
 hostname = j4-debug
 service_manager = openrc

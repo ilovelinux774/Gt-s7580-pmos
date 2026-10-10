@@ -1,0 +1,30 @@
+#!/sbin/openrc-run
+# J4_LXQT_SETUP_V1 - make Xorg fbdev accept the MDSS framebuffer.
+# This kernel registers fb0 without a parent device, so the sysfs link
+# /sys/class/graphics/fb0/device/subsystem does not exist and xorg-server
+# 21.1.23 fbdevhw silently rejects the frame buffer. Fake the link via a
+# bind mount before tinydm starts X, and wake the panel backlight after.
+name="j4-x-sysfs"
+description="Fake fb0 sysfs parent for Xorg fbdev and wake the backlight"
+
+depend() {
+    need localmount
+    before tinydm lightdm display-manager
+}
+
+start() {
+    ebegin "Preparing fb0 sysfs for Xorg fbdev"
+    mkdir -p /tmp/x-fb-sysfs/device
+    ln -sf /sys/bus/platform /tmp/x-fb-sysfs/device/subsystem
+    target="$(readlink -f /sys/class/graphics/fb0)"
+    umount "$target" 2>/dev/null
+    mount --bind /tmp/x-fb-sysfs "$target"
+    ( sleep 8; echo 255 > /sys/class/leds/lcd-backlight/brightness 2>/dev/null ) >/dev/null 2>&1 &
+    eend $?
+}
+
+stop() {
+    ebegin "Removing fb0 sysfs bind mount"
+    umount "$(readlink -f /sys/class/graphics/fb0)" 2>/dev/null
+    eend 0
+}

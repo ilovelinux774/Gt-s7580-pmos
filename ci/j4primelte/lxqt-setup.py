@@ -101,7 +101,7 @@ description="Fake fb0 sysfs parent for Xorg fbdev and wake the backlight"
 
 depend() {
     need localmount
-    before tinydm
+    before tinydm lightdm display-manager
 }
 
 start() {

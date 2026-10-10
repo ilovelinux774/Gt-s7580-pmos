@@ -68,6 +68,28 @@ link = level / 'j4-firstboot'
 if link.exists() or link.is_symlink():
     link.unlink()
 link.symlink_to('../../init.d/j4-firstboot')
+# Desktop in the image: the LXQt UI ships its own display manager. Xorg fbdev
+# needs the fake fb0 sysfs parent from j4-x-sysfs, and the framebuffer splash
+# has to give up fb0 before any X server claims it.
+default_level = levels / 'default'
+default_level.mkdir(parents=True, exist_ok=True)
+display_manager = next(
+    (name for name in ('tinydm', 'lightdm', 'display-manager')
+     if (root / 'etc/init.d' / name).is_file()), None)
+if (root / 'etc/init.d/j4-x-sysfs').is_file():
+    link = default_level / 'j4-x-sysfs'
+    if link.exists() or link.is_symlink():
+        link.unlink()
+    link.symlink_to('../../init.d/j4-x-sysfs')
+if display_manager:
+    link = default_level / display_manager
+    if link.exists() or link.is_symlink():
+        link.unlink()
+    link.symlink_to('../../init.d/' + display_manager)
+    splash = (levels / 'boot') / 'j4-fb-splash'
+    if splash.exists() or splash.is_symlink():
+        splash.unlink()
+
 with (root / 'etc/rc.conf').open('a') as f:
     f.write('\n# J4+ bring-up: persist OpenRC boot output.\nrc_logger="YES"\n')
 (root / 'var/log/j4').mkdir(parents=True, exist_ok=True)
