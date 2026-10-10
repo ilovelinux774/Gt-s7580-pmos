@@ -2,6 +2,7 @@
 """Cache compiler outputs independently of userspace packaging; verify on reuse."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -44,6 +45,11 @@ STAGING_HELPERS = ('kernel-bt.py', 'kernel-gpu.py')
 
 def recipe_key(root):
     h = hashlib.sha256(b'j4-kernel-cache-v1\n')
+    # The GPU experiment rebuilds the kernel around DRM instead of the MDSS
+    # framebuffer driver, so a cache entry from the other setting must never
+    # be reused, even though no checked-in file changed.
+    h.update(('gpu_experiment=%s\n'
+              % os.environ.get('J4_GPU_EXPERIMENT', '0')).encode())
     h.update(json.dumps(source_pins(root), sort_keys=True).encode())
     h.update((root / 'ci/j4primelte/build-kernel.sh').read_bytes())
     for name in STAGING_HELPERS:
@@ -95,6 +101,12 @@ def restore(root):
         raise RuntimeError('Cached kernel does not match this build recipe')
     if set(manifest['files']) != set(FILES):
         raise RuntimeError('Cached kernel has an unexpected file list')
+    # Belt and braces: the key already carries the flag, but never let a kernel
+    # built with the other GPU setting reach an image.
+    config = (cache / 'package/kernel.config').read_text(errors='replace')
+    if (os.environ.get('J4_GPU_EXPERIMENT', '0') == '1') != \
+            ('CONFIG_DRM_MSM=m' in config):
+        raise RuntimeError('Cached kernel was built with the other GPU setting')
     # Verify every file before copying any of them into package inputs.
     for relative, expected in manifest['files'].items():
         path = cache / relative

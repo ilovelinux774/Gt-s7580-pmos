@@ -50,6 +50,17 @@ class CacheTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'does not match'):
             cache.restore(self.root)
 
+    def test_the_gpu_flag_is_part_of_the_key(self):
+        plain = cache.recipe_key(self.root)
+        with patch.dict(cache.os.environ, {'J4_GPU_EXPERIMENT': '1'}):
+            self.assertNotEqual(cache.recipe_key(self.root), plain)
+
+    def test_a_kernel_built_with_the_other_gpu_setting_is_rejected(self):
+        self.save()
+        with patch.dict(cache.os.environ, {'J4_GPU_EXPERIMENT': '1'}):
+            with self.assertRaisesRegex(RuntimeError, 'other GPU setting'):
+                cache.restore(self.root)
+
     def test_userspace_change_keeps_kernel_cache(self):
         self.save()
         path = self.root / 'ci/j4primelte/sources.env'

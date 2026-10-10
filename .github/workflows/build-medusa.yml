@@ -67,6 +67,8 @@ jobs:
 
       - name: Calculate kernel-only cache key
         id: kernel_key
+        env:
+          J4_GPU_EXPERIMENT: ${{ inputs.gpu_experiment && '1' || '0' }}
         run: echo "value=$(python3 ci/j4primelte/kernel-cache.py key)" >> "$GITHUB_OUTPUT"
 
       - name: Restore successful kernel inputs
