@@ -102,6 +102,37 @@ def node_status(text: str, node_pattern: str):
     return status.group(1) if status else 'okay'
 
 
+def status_of_compatible(text: str, compatible: str):
+    """status of the node that carries this compatible, found from the inside out.
+
+    Matching the node by name is how this check failed to check anything for a
+    while: upstream calls the display controller `display-subsystem@1a00000` and
+    only keeps `mdss:` as a label, which dtc throws away. A regex on `mdss@` then
+    returned None, and None satisfied "must not be okay" for M1 while the panel
+    build was accused of not being okay. The compatible is what a driver binds
+    to, so it is what identifies the node.
+    """
+    at = text.find(compatible)
+    if at < 0:
+        return None
+    depth, index = 0, at
+    while index:
+        if text[index] == '}':
+            depth += 1
+        elif text[index] == '{':
+            depth -= 1
+            if depth < 0:
+                break
+        index -= 1
+    start = text.rfind('\n', 0, index) + 1
+    header = text[start:index + 1]
+    body = node_body(text[start:], r'[^{]*')
+    if body is None:
+        return None
+    status = re.search(r'status\s*=\s*"([a-z]+)"', body)
+    return status.group(1) if status else 'okay'
+
+
 def check_console(text: str):
     """Return a problem string unless /chosen points at an enabled uart.
 
@@ -191,7 +222,10 @@ def check_dtb(mainline: Path, name: str, panel: bool, failures: list):
         'panel extra power rail': 'lcd_extra_power' in text,
         'touchscreen': 'samsung,s6sy761' in text,
     }
-    mdss = node_status(text, r'mdss@1a00000') or node_status(text, r'mdss@\w+')
+    mdss = status_of_compatible(text, '"qcom,mdss"')
+    if mdss is None:
+        failures.append(f'{name}: no qcom,mdss node in the built tree, so the '
+                        'display gate cannot be checked at all')
     for what, got in present.items():
         if got != panel:
             failures.append(f'{name}: {what} in the device tree (panel build: '

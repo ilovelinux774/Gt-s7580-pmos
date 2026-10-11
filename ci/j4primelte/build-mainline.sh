@@ -113,6 +113,13 @@ CROSS=aarch64-linux-gnu-
 if ! command -v "${CROSS}gcc" >/dev/null 2>&1; then
     if [ "$(uname -m)" = "aarch64" ]; then
         CROSS=
+    elif [ "$DTBS_ONLY" = 1 ]; then
+        # Reusing a previous run's Image.gz means the only compile left is dtc,
+        # which is a host tool. Requiring the cross compiler here would refuse a
+        # run that can succeed - and re-packing the boot images is exactly the
+        # thing this mode exists for.
+        CROSS=
+        echo "note: no cross compiler, but only device trees are being built" >&2
     else
         echo "no ${CROSS}gcc and not on arm64: cannot build this kernel" >&2
         exit 1

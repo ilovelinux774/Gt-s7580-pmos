@@ -685,6 +685,12 @@ class DeviceTree(unittest.TestCase):
         self.assertIn('ti,lm3632', panel)
         self.assertIn('simple-framebuffer', m1)
         self.assertNotIn('simple-framebuffer', panel)
+        # The display controller gate, read off the node a driver actually binds
+        # to. Upstream names it display-subsystem@1a00000 and dtc drops the label,
+        # so a check keyed on "mdss@" silently examined nothing.
+        self.assertEqual(verify.status_of_compatible(m1, '"qcom,mdss"'), 'disabled')
+        self.assertEqual(verify.status_of_compatible(panel, '"qcom,mdss"'), 'okay')
+        self.assertIsNone(verify.status_of_compatible(m1, '"qcom,no-such-driver"'))
 
     def test_console_uart_is_enabled_and_first(self):
         text = self.decompile(self.compile(staging.DTS))
