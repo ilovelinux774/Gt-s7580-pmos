@@ -292,6 +292,10 @@
 - 9P_FS
 - SQUASHFS
 - CRAMFS
+# arm64 reads CONFIG_CMDLINE only when the bootloader handed over nothing, and
+# that is exactly what we want; forcing it would hide Samsung's androidboot.*,
+# lcd_id and vmalloc= arguments, and the modem and display would be blind.
+- CMDLINE_FORCE
 # Modules cannot be loaded here at all: the donor initramfs and the armv7 rootfs
 # carry no arm64 modules for this kernel, so =m means "absent at boot".
 - MODULES
