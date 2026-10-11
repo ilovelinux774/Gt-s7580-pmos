@@ -1,0 +1,593 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Samsung Galaxy J4+ (SM-J415F, "j4primelte") - mainline arm64 device tree
+ *
+ * Değerlerin hepsi telefondaki canlı downstream DTB'den (Rev06) okundu,
+ * ayrıntılar: j4-m0-hardware.md. Şablon: msm8917-motorola-nora.dts ve
+ * msm8917-xiaomi-wingtech.dtsi (msm89x7-mainline/linux, msm89x7/7.1.3).
+ *
+ * Milestone'lar tek dosyada, `J4_PANEL` sembolüyle ayrılıyor:
+ *
+ *   tanımsız (M1): bootloader logosu üzerine simple-framebuffer, USB gadget,
+ *                  eMMC/SD, ses tuşları, regülatörler, ramoops, seri konsol.
+ *                  Panel, ışık, dokunmatik ve MDSS düğümleri DTB'ye HİÇ
+ *                  girmez - "disabled" olmak yetmez, bootloader'ın yaktığı
+ *                  paneli bir sürücünün sökmesini de engellemek gerekir.
+ *   J4_PANEL (M2/M3): MDSS + DSI + S6D7AT0B01 panel + LM3632A bias/ışık ve
+ *                  sec_ts (s6sy761 adayı).
+ *
+ * The symbol is defined by msm8917-samsung-j4primelte-panel.dts, which includes
+ * this file: kbuild runs `cpp` before `dtc`, and this `dtc` has no -D option at
+ * all, so a build-time define cannot be injected into a single .dts any other
+ * way (see mainline-kernel.py for how both .dtb files get registered).
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/arm/qcom,ids.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/linux-event-codes.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include "msm8917.dtsi"
+#include "pm8937.dtsi"
+
+/* J4+'ta TZ uygulama alanı 0x95000000'da (dtsi'deki 0x85b00000 değil) */
+/delete-node/ &qseecom_mem;
+
+/ {
+	model = "Samsung Galaxy J4+ (SM-J415F)";
+	compatible = "samsung,j4primelte", "qcom,msm8917";
+	chassis-type = "handset";
+
+	/* Samsung aboot DTB'yi bunlarla seçer (downstream: <303 0>, <8 6>) */
+	qcom,msm-id = <QCOM_ID_MSM8917 0>;
+	qcom,board-id = <8 6>;
+
+	aliases {
+		/*
+		 * serial0 must exist and point at an *enabled* uart: the boot
+		 * loader passes no console= argument of its own on this board and
+		 * `earlycon` without a binding in /chosen/serial0 is a silent hang.
+		 * msm8917.dtsi labels the debug uart blsp1_uart1 and leaves it
+		 * disabled; verify-mainline.py fails the build if either half of
+		 * that is wrong, because a DTB whose console node is disabled looks
+		 * perfectly fine in source and is useless on the wire.
+		 */
+		serial0 = &blsp1_uart1;
+
+		mmc0 = &sdhc_1;
+		mmc1 = &sdhc_2;
+	};
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		stdout-path = "serial0:115200n8";
+
+#ifndef J4_PANEL
+		/*
+		 * Bootloader paneli açıp Samsung logosunu 0xa8000000'a çiziyor
+		 * (downstream splash_region, 0x30e000 = 720x1480 RGB888).
+		 * MDSS sürücüsü kapalıyken bu yüzeye yazmak ekranda görünür.
+		 */
+		framebuffer0: framebuffer@a8000000 {
+			compatible = "simple-framebuffer";
+			reg = <0x0 0xa8000000 0x0 (720 * 1480 * 3)>;
+			width = <720>;
+			height = <1480>;
+			stride = <(720 * 3)>;
+			format = "r8g8b8";
+
+			clocks = <&gcc GCC_MDSS_AHB_CLK>,
+				 <&gcc GCC_MDSS_AXI_CLK>,
+				 <&gcc GCC_MDSS_VSYNC_CLK>,
+				 <&gcc GCC_MDSS_MDP_CLK>,
+				 <&gcc GCC_MDSS_BYTE0_CLK>,
+				 <&gcc GCC_MDSS_PCLK0_CLK>,
+				 <&gcc GCC_MDSS_ESC0_CLK>;
+			power-domains = <&gcc MDSS_GDSC>;
+
+			/* Panel beslemeleri açık kalsın (downstream: vdd L17, vddio L6) */
+			vci-supply = <&pm8937_l17>;
+			vddio-supply = <&pm8937_l6>;
+			vdda-supply = <&pm8937_l2>;
+		};
+#endif
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		pinctrl-0 = <&gpio_keys_default>;
+		pinctrl-names = "default";
+
+		key-volup {
+			label = "Volume Up";
+			linux,code = <KEY_VOLUMEUP>;
+			gpios = <&tlmm 127 GPIO_ACTIVE_LOW>;
+			debounce-interval = <15>;
+		};
+	};
+
+	reserved-memory {
+		/* Samsung sec_debug günlükleri (downstream no-map) */
+		sec_klog@851ff000 {
+			reg = <0x0 0x851ff000 0x0 0x201000>;
+			no-map;
+		};
+
+		ss_plog@85c00000 {
+			reg = <0x0 0x85c00000 0x0 0x400000>;
+			no-map;
+		};
+
+		/*
+		 * Downstream çekirdek de ramoops'u burada tutuyor: başarısız bir
+		 * mainline açılışından sonra #31'e dönünce /sys/fs/pstore'dan
+		 * çökme günlüğü okunabilir (bootloader belleği silmezse).
+		 */
+		ramoops@86000000 {
+			compatible = "ramoops";
+			reg = <0x0 0x86000000 0x0 0x100000>;
+			console-size = <0x40000>;
+			record-size = <0x40000>;
+			pmsg-size = <0x40000>;
+		};
+
+		/* other_ext_region 0x86100000-0x86800000; geri kalanı dtsi'de */
+		other_ext@86100000 {
+			reg = <0x0 0x86100000 0x0 0x200000>;
+			no-map;
+		};
+
+		qseecom_mem: qseecom@95000000 {
+			reg = <0x0 0x95000000 0x0 0x2800000>;
+			no-map;
+		};
+
+		framebuffer_mem: memory@a8000000 {
+			reg = <0x0 0xa8000000 0x0 0x30e000>;
+			no-map;
+		};
+	};
+
+	vph_pwr: vph-pwr-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vph_pwr";
+		regulator-min-microvolt = <3700000>;
+		regulator-max-microvolt = <3700000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	/*
+	 * VBUS'u S2MU005 MUIC algılıyor ve mainline'da sürücüsü yok.
+	 * M1 için wingtech'teki gibi "hep bağlı" sahte extcon.
+	 */
+	usb_vbus: extcon-usb-dummy {
+		compatible = "linux,extcon-usb-dummy";
+	};
+
+#ifdef J4_PANEL
+	/* ---- M2: panel güç zinciri (downstream sırası: GPIO92 -> LM3632 -> L17/L6 -> reset) ---- */
+
+	/* samsung,panel-extra-power-gpio1 = GPIO 92 */
+	reg_lcd_extra: regulator-lcd-extra {
+		compatible = "regulator-fixed";
+		regulator-name = "lcd_extra_power";
+		gpio = <&tlmm 92 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1500>;
+
+		pinctrl-0 = <&lcd_extra_default>;
+		pinctrl-names = "default";
+	};
+
+	/* LM3632A, downstream'deki gibi GPIO 20/21 üzerinde bit-bang I2C */
+	i2c-blic {
+		compatible = "i2c-gpio";
+		sda-gpios = <&tlmm 20 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 21 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		pinctrl-0 = <&blic_i2c_default>;
+		pinctrl-names = "default";
+
+		lm3632: lmu@11 {
+			compatible = "ti,lm3632";
+			reg = <0x11>;
+			enable-gpios = <&tlmm 94 GPIO_ACTIVE_HIGH>;	/* lm3632a_en */
+
+			pinctrl-0 = <&blic_en_default>;
+			pinctrl-names = "default";
+
+			regulators {
+				compatible = "ti,lm363x-regulator";
+
+				/* VPOS = lm3632a_enp (89), VNEG = lm3632a_enn (90) */
+				enable-gpios = <&tlmm 89 GPIO_ACTIVE_HIGH>,
+					       <&tlmm 90 GPIO_ACTIVE_HIGH>;
+
+				/* blic_conf@2 (lcd_id 0x11fa00): 0x0d=0x1c, 0x0e=0x24, 0x0f=0x24 */
+				vboost {
+					regulator-name = "lcd_boost";
+					regulator-min-microvolt = <5900000>;
+					regulator-max-microvolt = <5900000>;
+					regulator-always-on;
+				};
+
+				lcd_vpos: vpos {
+					regulator-name = "lcd_vpos";
+					regulator-min-microvolt = <5800000>;
+					regulator-max-microvolt = <5800000>;
+				};
+
+				lcd_vneg: vneg {
+					regulator-name = "lcd_vneg";
+					regulator-min-microvolt = <5800000>;
+					regulator-max-microvolt = <5800000>;
+				};
+			};
+
+			/*
+			 * Işık yoğunluğunu panel DCS 0x51 ile PWM olarak veriyor;
+			 * LM3632 sadece PWM giriş modunda açılmalı (0x09=0x41,
+			 * 0x02=0x50, 0x03=0x8d, 0x04/0x05=0x7ff, 0x0a=0x19).
+			 * Mainline'da ti,lm3632-backlight sürücüsü YOK; parlaklık
+			 * panel sürücüsünün kendi backlight'ından veriliyor.
+			 */
+			backlight {
+				compatible = "ti,lm3632-backlight";
+			};
+		};
+	};
+
+	/* ---- M3: dokunmatik beslemesi (tsp_vdd = GPIO 91) ---- */
+	reg_tsp_vdd: regulator-tsp-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "tsp_vdd";
+		gpio = <&tlmm 91 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+
+		pinctrl-0 = <&tsp_vdd_default>;
+		pinctrl-names = "default";
+	};
+#endif
+};
+
+#ifdef J4_PANEL
+/* M3: sec_touchscreen, BLSP1 QUP2 (78b6000) @ 0x48, IRQ GPIO 65 */
+&blsp1_i2c2 {
+	status = "okay";
+
+	touchscreen@48 {
+		/*
+		 * Firmware "tsp_sec/s6d7at01a01_j4prime.fw" -> panel içi (in-cell)
+		 * Samsung LSI dokunmatik, downstream "sec,sec_ts". Mainline'daki
+		 * s6sy761 aynı sec_ts protokolünü ve 0x48 adresini kullanıyor:
+		 * ADAY, doğrulanmadı.
+		 */
+		compatible = "samsung,s6sy761";
+		reg = <0x48>;
+
+		interrupts-extended = <&tlmm 65 IRQ_TYPE_LEVEL_LOW>;
+
+		vdd-supply = <&reg_tsp_vdd>;
+		avdd-supply = <&pm8937_l17>;
+
+		pinctrl-0 = <&tsp_int_default>;
+		pinctrl-names = "default";
+	};
+};
+
+/*
+ * M1'de mdss kapalı kalmalı (simple-framebuffer o apelerture'ı kullanıyor);
+ * M2'de tam tersi, DRM sürücüsünün MDSS_GDSC'yi alabilmesi için açık olmalı.
+ */
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	status = "okay";
+
+	vdda-supply = <&pm8937_l2>;
+	vddio-supply = <&pm8937_l6>;
+
+	panel@0 {
+		compatible = "samsung,s6d7at0b01-pm6003xb1";
+		reg = <0>;
+
+		reset-gpios = <&tlmm 60 GPIO_ACTIVE_LOW>;
+
+		vdd-supply = <&reg_lcd_extra>;
+		vsp-supply = <&lcd_vpos>;
+		vsn-supply = <&lcd_vneg>;
+		vci-supply = <&pm8937_l17>;
+		vddio-supply = <&pm8937_l6>;
+
+		pinctrl-0 = <&panel_default>;
+		pinctrl-names = "default";
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&panel_in>;
+};
+
+&mdss_dsi0_phy {
+	status = "okay";
+
+	vddio-supply = <&pm8937_l6>;
+};
+#endif
+
+&pm8937_resin {
+	linux,code = <KEY_VOLUMEDOWN>;
+	status = "okay";
+};
+
+&pm8937_spmi_regulators {
+	/* PM8937 S5 = VDD_APC (CPU) */
+	pm8937_s5: s5 {
+		regulator-min-microvolt = <1050000>;
+		regulator-max-microvolt = <1350000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+};
+
+/* Gerilimler downstream rpm-regulator düğümlerinden (pm8917_*) */
+&rpm_requests {
+	regulators-0 {
+		compatible = "qcom,rpm-pm8937-regulators";
+
+		vdd_s1-supply = <&vph_pwr>;
+		vdd_s2-supply = <&vph_pwr>;
+		vdd_s3-supply = <&vph_pwr>;
+		vdd_s4-supply = <&vph_pwr>;
+
+		vdd_l1_l19-supply = <&pm8937_s3>;
+		vdd_l2_l23-supply = <&pm8937_s3>;
+		vdd_l3-supply = <&pm8937_s3>;
+		vdd_l4_l5_l6_l7_l16-supply = <&pm8937_s4>;
+		vdd_l8_l11_l12_l17_l22-supply = <&vph_pwr>;
+		vdd_l9_l10_l13_l14_l15_l18-supply = <&vph_pwr>;
+
+		pm8937_s1: s1 {
+			regulator-min-microvolt = <1000000>;
+			regulator-max-microvolt = <1225000>;
+		};
+
+		pm8937_s3: s3 {
+			regulator-min-microvolt = <1300000>;
+			regulator-max-microvolt = <1300000>;
+		};
+
+		pm8937_s4: s4 {
+			regulator-min-microvolt = <2050000>;
+			regulator-max-microvolt = <2050000>;
+		};
+
+		pm8937_l2: l2 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+		};
+
+		pm8937_l5: l5 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		pm8937_l6: l6 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		pm8937_l7: l7 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		pm8937_l8: l8 {
+			regulator-min-microvolt = <2850000>;
+			regulator-max-microvolt = <2900000>;
+		};
+
+		pm8937_l9: l9 {
+			regulator-min-microvolt = <3000000>;
+			regulator-max-microvolt = <3300000>;
+		};
+
+		pm8937_l10: l10 {
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <3000000>;
+		};
+
+		pm8937_l11: l11 {
+			regulator-min-microvolt = <2950000>;
+			regulator-max-microvolt = <2950000>;
+		};
+
+		pm8937_l12: l12 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <2950000>;
+		};
+
+		pm8937_l13: l13 {
+			regulator-min-microvolt = <3075000>;
+			regulator-max-microvolt = <3075000>;
+		};
+
+		pm8937_l14: l14 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <3300000>;
+		};
+
+		pm8937_l15: l15 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <3300000>;
+		};
+
+		pm8937_l16: l16 {
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		pm8937_l17: l17 {
+			regulator-min-microvolt = <3300000>;
+			regulator-max-microvolt = <3300000>;
+		};
+
+		pm8937_l19: l19 {
+			regulator-min-microvolt = <1225000>;
+			regulator-max-microvolt = <1350000>;
+		};
+
+		pm8937_l22: l22 {
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <2800000>;
+		};
+
+		pm8937_l23: l23 {
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+		};
+	};
+};
+
+/* eMMC: vdd L8, vdd-io L5 */
+&sdhc_1 {
+	vmmc-supply = <&pm8937_l8>;
+	vqmmc-supply = <&pm8937_l5>;
+	status = "okay";
+};
+
+/* microSD: vdd L11, vdd-io L12, kart algılama GPIO 67 (aktif düşük) */
+&sdhc_2 {
+	vmmc-supply = <&pm8937_l11>;
+	vqmmc-supply = <&pm8937_l12>;
+
+	pinctrl-0 = <&sdc2_default &sdc2_cd_default>;
+	pinctrl-1 = <&sdc2_sleep &sdc2_cd_default>;
+	pinctrl-names = "default", "sleep";
+
+	cd-gpios = <&tlmm 67 GPIO_ACTIVE_LOW>;
+
+	status = "okay";
+};
+
+&sleep_clk {
+	clock-frequency = <32768>;
+};
+
+&tlmm {
+	/* Pin ayarları downstream pinctrl düğümlerinden */
+	gpio_keys_default: gpio-keys-default-state {
+		pins = "gpio127";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	/* sdc2 kart algılama, M1'de de kullanılıyor -> kapının dışında kalmalı */
+	sdc2_cd_default: sdc2-cd-default-state {
+		pins = "gpio67";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+#ifdef J4_PANEL
+	blic_en_default: blic-en-default-state {
+		pins = "gpio89", "gpio90", "gpio94";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	blic_i2c_default: blic-i2c-default-state {
+		pins = "gpio20", "gpio21";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	lcd_extra_default: lcd-extra-default-state {
+		pins = "gpio92";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	panel_default: panel-default-state {
+		pins = "gpio60";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	tsp_int_default: tsp-int-default-state {
+		pins = "gpio65";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	tsp_vdd_default: tsp-vdd-default-state {
+		pins = "gpio91";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+#endif
+};
+
+/* USB: downstream qcom,hsusb-otg; PHY beslemeleri L2 / L7 / L13 */
+&usb {
+	dr_mode = "peripheral";
+	extcon = <&usb_vbus>;
+	status = "okay";
+};
+
+&usb_hs_phy {
+	vdd-supply = <&pm8937_l2>;
+	vdda1p8-supply = <&pm8937_l7>;
+	vdda3p3-supply = <&pm8937_l13>;
+	status = "okay";
+};
+
+/* Seri konsol: BLSP1 QUP1, 115200 8N1 (downstream console=ttynull değil) */
+&blsp1_uart1 {
+	pinctrl-0 = <&blsp1_uart1_default>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/*
+ * M4 (Wi-Fi/BT) için downstream beslemeleri nora ile aynı:
+ * vddpx L5, iris vddxo L7, vddrfa L19, vddpa L9, vdddig L5.
+ * WCN3620 olduğu varsayılıyor (yalnız 2.4 GHz); M4'te açılacak.
+ */
+&wcnss_iris {
+	compatible = "qcom,wcn3620";
+	vddxo-supply = <&pm8937_l7>;
+	vddrfa-supply = <&pm8937_l19>;
+	vddpa-supply = <&pm8937_l9>;
+	vdddig-supply = <&pm8937_l5>;
+};
+
+&xo_board {
+	clock-frequency = <19200000>;
+};

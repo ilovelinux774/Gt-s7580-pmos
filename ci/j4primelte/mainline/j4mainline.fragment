@@ -1,0 +1,338 @@
+# Kconfig fragment for the Galaxy J4+ mainline arm64 kernel (M1).
+#
+# Consumed by ci/j4primelte/mainline-config.py, which pipes it over
+# `make defconfig`, then turns these lines into scripts/config arguments and
+# finishes with olddefconfig. Syntax:
+#
+#   + SYMBOL          enable (y)
+#   - SYMBOL          disable (n)         - only for bool/tristate symbols
+#   @ SYMBOL value    set a string        (CONFIG SYMBOL="value")
+#   = CONFIG_X=v      passed through verbatim
+#   PANEL <line>      <line>, but only with --panel (the M2 build)
+#
+# Every name here is checked against the pinned tree before anything is written
+# (mainline-config.py::audit_symbols): scripts/config accepts an unknown symbol
+# happily and olddefconfig drops it again, so a typo does not fail the build -
+# it just quietly removes a driver.
+#
+# What is NOT here, on purpose: no modules (CONFIG_MODULES is off), no
+# bootloader-independent EFI stub, no remoteproc/modem ownership. The initramfs
+# and the rootfs on the phone are the downstream armv7 ones, so every driver this
+# kernel needs must be built in, and nothing is ever written outside the BOOT
+# partition.
+
+# --- platform: the tree must describe this SoC at all ---------------------------
++ ARCH_QCOM
+# Device tree support is def_bool y on arm64; naming it keeps the audit at the
+# end of the build honest (every REQUIRED symbol is enabled somewhere).
++ OF
++ MMU
++ SMP
++ CPU_IDLE
++ RELOCATABLE
+# CONFIG_CMDLINE is only consulted when the bootloader passed nothing at all
+# (arm64 has no CMDLINE_EXTEND); LK's vendor arguments must keep winning, so
+# CMDLINE_FORCE stays off and these are the fallback for a bare `fastboot boot`.
+@ CMDLINE console=ttyMSM0,115200n8 earlycon loglevel=8 ignore_loglevel
+@ LOCALVERSION -j4mainline
+= CONFIG_MMC_BLOCK_MINORS=32
+
+# --- clocks, pinctrl, power domains: without these nothing probes ---------------
++ COMMON_CLK
++ MSM_GCC_8917
++ QCOM_CLK_RPMH
++ QCOM_CLK_SMD_RPM
++ QCOM_CLK_APCS_MSM8916
++ RESET_CONTROLLER
++ PINCTRL
++ PINCTRL_MSM
++ PINCTRL_MSM8917
++ QCOM_PDC
++ QCOM_IPCC
++ QCOM_RPMPD
++ QCOM_GDSC
++ QCOM_SCM
++ QCOM_SMEM
++ QCOM_WDT
++ QCOM_BAM_DMA
++ QCOM_MDT_LOADER
+
+# --- PMIC bus, regulators, battery-visible bits --------------------------------
++ SPMI
++ SPMI_MSM_PMIC_ARB
++ MFD_SPMI_PMIC
++ REGULATOR
++ REGULATOR_FIXED_VOLTAGE
++ REGULATOR_GPIO
++ REGULATOR_QCOM_SPMI
++ REGULATOR_QCOM_SMD_RPM
++ REGULATOR_QCOM_RPMH
++ POWER_SUPPLY
++ QCOM_COINCELL
++ QCOM_SPMI_VADC
++ IIO
++ NVMEM
++ NVMEM_QCOM_QFPROM
++ QCOM_TSENS
++ HW_RANDOM
+
+# --- storage: rootfs is on eMMC, the SD card is a live upgrade path ------------
++ BLOCK
++ MMC
++ MMC_BLOCK
++ MMC_SDHCI
++ MMC_SDHCI_PLTFM
++ MMC_SDHCI_MSM
++ MMC_CQHCI
++ EXT4_FS
++ F2FS_FS
++ TMPFS
++ DEVTMPFS
++ DEVTMPFS_MOUNT
++ INOTIFY_USER
++ FANOTIFY
++ QUOTA
+
+# --- console: the only display in M1 is 115200 8N1 on the debug uart ----------
++ TTY
++ VT
++ VT_CONSOLE
++ UNIX
++ NET
++ SERIAL_EARLYCON
++ SERIAL_MSM
++ SERIAL_MSM_CONSOLE
++ SERIAL_OF_PLATFORM
++ PRINTK_TIME
++ DYNAMIC_DEBUG
++ DEBUG_KERNEL
++ FRAMEBUFFER_CONSOLE
++ FRAMEBUFFER_CONSOLE_DETECT_PRIMARY
+
+# --- display, so that there is something to look at even in M1 ------------------
++ DRM
++ DRM_KMS_HELPER
++ DRM_FBDEV_EMULATION
++ DRM_SIMPLEDRM
++ FB_CORE
++ BACKLIGHT_CLASS_DEVICE
++ LCD_CLASS_DEVICE
++ I2C
++ GPIOLIB
+
+# --- input: volume keys, pmic resin, and later the touchscreen -----------------
++ INPUT
++ INPUT_EVDEV
++ INPUT_KEYBOARD
++ INPUT_TOUCHSCREEN
++ INPUT_PM8941_PWRKEY
+
+# --- USB gadget: RNDIS is the network and the shell -----------------------------
++ USB_SUPPORT
++ USB
++ USB_GADGET
++ USB_LIBCOMPOSITE
++ USB_F_ACM
++ USB_F_RNDIS
++ USB_F_MASS_STORAGE
++ USB_F_FS
++ USB_CONFIGFS
++ USB_CONFIGFS_ACM
++ USB_CONFIGFS_RNDIS
++ USB_CONFIGFS_F_FS
++ USB_CONFIGFS_MASS_STORAGE
++ USB_NET_DRIVERS
++ USB_NET_CDCETHER
++ USB_NET_CDC_NCM
++ PHY_QCOM_QUSB2
++ TYPEC
++ EXTCON
++ EXTCON_USB_GPIO
+
+# --- networking the initramfs and NetworkManager need ---------------------------
++ NET_CORE
++ NETDEVICES
++ WIRELESS
++ CFG80211
++ MAC80211
++ WLAN
++ WCN36XX
++ BT
++ BT_RFCOMM
++ BT_BNEP
++ BT_HIDP
++ BT_LE
++ BT_LE_L2CAP_ECRED
++ BT_HCIUART
++ BT_HCIUART_SERDEV
++ BT_HCIUART_H4
++ BT_HCIUART_QCA
++ BT_QCOMSMD
++ SERIAL_DEV_BUS
++ SERIAL_DEV_CTRL_TTYPORT
++ INET
++ IPV6
++ PACKET
++ NAMESPACES
++ UTS_NS
++ PID_NS
++ NET_NS
++ CGROUPS
++ CGROUP_BPF
++ CGROUP_PIDS
++ MEMCG
++ SECURITY
++ SECCOMP
++ SECCOMP_FILTER
++ AUDIT
++ AUDITSYSCALL
++ FHANDLE
+
+# --- postmortem: a phone that dies before you can plug in a cable --------------
++ PSTORE
++ PSTORE_COMPRESS
++ PSTORE_CONSOLE
++ PSTORE_RAM
++ MISC_FILESYSTEMS
+
+# --- debug plumbing the CI job and j4-collect-logs use --------------------------
++ DEBUG_FS
++ CONFIGFS_FS
++ SYSFS
++ PROC_FS
++ KALLSYMS
++ KALLSYMS_ALL
++ MAGIC_SYSRQ
++ EARLY_PRINTK
++ LOCKUP_DETECTOR
++ BUG
++ SLUB_DEBUG
++ FTRACE
++ FUNCTION_TRACER
++ STACKTRACE
+
+# --- what this phone does not need at all --------------------------------------
+# None of these can bind (no matching node in the device tree), and because
+# CONFIG_MODULES=n turns every "=m" of the base defconfig into a built-in they
+# are pure kernel-image weight and build minutes.
+- DRM_VMWGFX
+- DRM_QXL
+- DRM_VIRTIO_GPU
+- DRM_VKMS
+- DRM_BOCHS
+- DRM_AST
+- DRM_GUD
+- DRM_UDL
+- DRM_IMX
+- DRM_MXSFB
+- DRM_MESON
+- DRM_MEDIATEK
+- DRM_ROCKCHIP
+- DRM_EXYNOS
+- DRM_TEGRA
+- DRM_SUN4I
+- DRM_SUN8I_DW_HDMI
+- DRM_VC4
+- DRM_V3D
+- DRM_PANFROST
+- DRM_LIMA
+- DRM_NOUVEAU
+- DRM_AMDGPU
+- DRM_RADEON
+- DRM_I915
+- DRM_PANTHOR
+- NET_DSA
+- ETHERNET
+- MEDIA_SUPPORT
+- DVB_CORE
+- INFINIBAND
+- FIREWIRE
+- PARPORT
+- ATM
+- HID_MULTITOUCH
+# Every vendor menu but Quantenna: they are `default y` inside `menu WLAN`, so a
+# bare + WLAN turns on atheros/ti/silabs/... drivers that can never bind on this
+# phone, and CONFIG_MODULES=n makes each of them a built-in. Quantenna stays
+# because wcn3620 (WCN36XX, M4) lives in that menu.
+- WLAN_VENDOR_INTEL
+- WLAN_VENDOR_BROADCOM
+- WLAN_VENDOR_MARVELL
+- WLAN_VENDOR_RALINK
+- WLAN_VENDOR_REALTEK
+- WLAN_VENDOR_MEDIATEK
+- WLAN_VENDOR_ATMEL
+- WLAN_VENDOR_ADMTEK
+- WLAN_VENDOR_ATH
+- WLAN_VENDOR_INTERSIL
+- WLAN_VENDOR_MICROCHIP
+- WLAN_VENDOR_PURELIFI
+- WLAN_VENDOR_RSI
+- WLAN_VENDOR_SILABS
+- WLAN_VENDOR_ST
+- WLAN_VENDOR_TI
+- WLAN_VENDOR_ZYDAS
+# Other SoC vendors' clock/pinctrl/PMIC drivers, which defconfig switches on for
+# all of arm64 at once.
+- PINCTRL_MSM8916
+- PINCTRL_MSM8953
+- PINCTRL_MSM8976
+- PINCTRL_MSM8994
+- PINCTRL_MSM8996
+- PINCTRL_MSM8998
+- MSM_GCC_8916
+- MSM_GCC_8953
+- MSM_GCC_8976
+- MSM_GCC_8994
+- MSM_GCC_8996
+- MSM_GCC_8998
+# Host-only or boot-critical-noise filesystems nobody uses on a phone rootfs.
+- NFS_FS
+- CIFS
+- AFS_FS
+- 9P_FS
+- SQUASHFS
+- CRAMFS
+# Modules cannot be loaded here at all: the donor initramfs and the armv7 rootfs
+# carry no arm64 modules for this kernel, so =m means "absent at boot".
+- MODULES
+- EFI
+- KVM
+- XEN
+- HYPERVISOR_GUEST
+# Sound is a separate milestone with its own QC8916/aw883x work; the ALSA core
+# alone would only add a silent /dev/snd and a slower build.
+- SOUND
+# Nothing talks to the modem, ADSP or WPSC cores from this kernel: keep the
+# remoteproc stack out so a missing modem image can never block boot.
+- REMOTEPROC
+- RPMSG
+- QRTR
+- QCOM_FASTRPC
+# Debug-info choices: naming only DEBUG_INFO_NONE is not enough, olddefconfig
+# restores whichever member the defconfig had picked. A DWARF-enabled Image.gz is
+# hundreds of MB and cannot fit the 32 MiB BOOT partition anyway.
++ DEBUG_INFO_NONE
+- DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+- DEBUG_INFO_DWARF4
+- DEBUG_INFO_DWARF5
+- GDB_SCRIPTS
+
+# --- M2: panel, DSI host, backlight, bias, touch -------------------------------
+# Only with --panel. The M1 build deliberately has none of this: MDSS is owned by
+# the bootloader's splash, and the first thing a mainline kernel has to do is
+# survive long enough to print a message.
+PANEL + DRM_MSM
+PANEL + DRM_MSM_MDP5
+PANEL + DRM_MSM_DPU
+PANEL + DRM_MSM_MDSS
+PANEL + DRM_MSM_KMS
+PANEL + DRM_MSM_DSI
+PANEL + DRM_MSM_DSI_28NM_PHY
+PANEL + DRM_PANEL
+PANEL + DRM_PANEL_SIMPLE
+PANEL + DRM_PANEL_SAMSUNG_S6D7AT0B01
+PANEL + MFD_TI_LMU
+PANEL + REGULATOR_LM363X
+PANEL + BACKLIGHT_CLASS_DEVICE
+PANEL + TOUCHSCREEN_S6SY761
+PANEL @ LOCALVERSION -j4mainline-panel

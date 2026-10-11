@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * M2/M3 variant of the Galaxy J4+ device tree.
+ *
+ * This file exists only to define the milestone symbol. `DTC_FLAGS=-DJ4_PANEL`
+ * is not an option here: kbuild runs `cpp` over the .dts *before* dtc sees it, and
+ * this dtc (1.7.2) has no -D at all, so passing it aborts every other qcom and
+ * actions dtb in the tree with "invalid option -- 'D'". A wrapper that defines the
+ * symbol and includes the real source costs one file and lets a single
+ * `make dtbs` produce both milestones.
+ *
+ * The panel build also needs a different .config (CONFIG_DRM_MSM, the panel driver
+ * itself, ...): see the PANEL block in j4mainline.fragment and
+ * `mainline-config.py apply --panel`.
+ */
+
+#define J4_PANEL 1
+
+#include "msm8917-samsung-j4primelte.dts"
