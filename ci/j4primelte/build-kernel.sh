@@ -51,13 +51,22 @@ for flag in DEVTMPFS DEVTMPFS_MOUNT SYSVIPC DEVPTS_MULTIPLE_INSTANCES \
     VT VT_CONSOLE DUMMY_CONSOLE UNIX98_PTYS IKCONFIG IKCONFIG_PROC \
     SECCOMP SECCOMP_FILTER DEBUG_FS PROC_FS SYSFS \
     NETFILTER NETFILTER_XTABLES IP_NF_IPTABLES IP_NF_FILTER \
-    BT_HCI_SMD USB_GADGET USB_G_ANDROID USB_MSM_OTG; do
+    BT_HCI_SMD USB_GADGET USB_G_ANDROID USB_MSM_OTG \
+    FRAMEBUFFER_CONSOLE VT_HW_CONSOLE_BINDING; do
     scripts/config --file out/.config --enable "$flag"
 done
-# Keep Samsung's MDSS panel driver, but avoid attaching fbcon during initial
-# headless bring-up. No unverified MDP3/MDP5 framebuffer patches are applied.
+# FRAMEBUFFER_CONSOLE is what puts boot text on the panel. Without it the only
+# console this phone has is the UART, so every kernel line and every OpenRC
+# " * Starting ..." message is invisible unless you are wired to the serial pad -
+# and there is no way to fix that from userspace, because the driver is the thing
+# that binds the VT layer to /dev/fb0. It is a tristate in this tree, so it has
+# to be =y: as a module it would load long after the boot messages it is supposed
+# to show. It is also the reason the panel stays powered without a userspace
+# helper holding /dev/fb0 open, which is what j4-fb-splash existed to work around.
+# FB_MSM_MDSS / FB_MSM_MDSS_SAMSUNG stay as the vendor defconfig has them; no
+# unverified MDP3/MDP5 framebuffer patches are applied.
 for flag in ANDROID_PARANOID_NETWORK SEC_RESTRICT_ROOTING SECURITY_DEFEX \
-    PFT KINETO_GAN USE_VFB SAMSUNG_TUI TZDEV FRAMEBUFFER_CONSOLE \
+    PFT KINETO_GAN USE_VFB SAMSUNG_TUI TZDEV \
     SECURITY_SELINUX MODULE_SIG DM_VERITY; do
     scripts/config --file out/.config --disable "$flag"
 done
@@ -86,7 +95,7 @@ fi
 for flag in SEC_J4PRIMELTE_PROJECT MACH_J4PRIMELTE_SEA_OPEN BUILD_ARM_APPENDED_DTB_IMAGE \
     DEVTMPFS SYSVIPC DEVPTS_MULTIPLE_INSTANCES BLK_DEV_INITRD RD_GZIP \
     USB_G_ANDROID USB_MSM_OTG EXT4_FS IP_NF_IPTABLES IP_NF_FILTER \
-    BT_HCI_SMD; do
+    BT_HCI_SMD FRAMEBUFFER_CONSOLE; do
     grep -qx "CONFIG_${flag}=y" out/.config || { echo "Required option missing: $flag"; exit 1; }
 done
 if grep -qx 'CONFIG_ANDROID_PARANOID_NETWORK=y' out/.config; then

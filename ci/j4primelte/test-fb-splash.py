@@ -5,6 +5,8 @@ from pathlib import Path
 import struct
 import unittest
 
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent.parent
 spec = importlib.util.spec_from_file_location('fb_splash', Path(__file__).with_name('fb-splash.py'))
 splash = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(splash)
@@ -86,7 +88,62 @@ class SplashTests(unittest.TestCase):
         with self.assertRaises(splash.SplashError):
             self.g()
 
-    def test_service_is_one_shot_and_never_touches_usb(self):
+    def test_install_refuses_to_overwrite_the_boot_text(self):
+        """fbcon drawing the boot text and this splash drawing a logo are mutually
+        exclusive on one framebuffer, so the installer has to look before it
+        writes. The check is sysfs, not the kernel config: an image built from an
+        older kernel is on the phone right now, whatever this repository says."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            saved = splash.VTCONSOLE
+            try:
+                con = root / 'vtcon0'
+                con.mkdir()
+                (con / 'name').write_text('(fg) dummy device\n')
+                (con / 'bind').write_text('1\n')
+                splash.VTCONSOLE = root
+                self.assertFalse(splash.fbcon_bound())
+                fb = root / 'vtcon1'
+                fb.mkdir()
+                (fb / 'name').write_text('(fg) frame buffer device\n')
+                (fb / 'bind').write_text('0\n')
+                self.assertFalse(splash.fbcon_bound(), 'unbound console counted')
+                (fb / 'bind').write_text('1\n')
+                self.assertTrue(splash.fbcon_bound())
+                # A missing sysfs tree (host, or a kernel with no VT layer) must
+                # not raise: the daemon is still the only way to see anything.
+                splash.VTCONSOLE = root / 'nope'
+                self.assertFalse(splash.fbcon_bound())
+            finally:
+                splash.VTCONSOLE = saved
+
+    def test_boot_reaches_the_panel_from_the_build_scripts(self):
+        """Three files have to agree or the panel stays blank and everyone is
+        surprised: the kernel must build fbcon in, and the boot image must ask for
+        a tty0 console (CONFIG_CMDLINE is empty in this tree, so the header
+        cmdline is the whole command line)."""
+        kernel_sh = (HERE / 'build-kernel.sh').read_text()
+        self.assertIn('FRAMEBUFFER_CONSOLE VT_HW_CONSOLE_BINDING', kernel_sh,
+                      'fbcon is no longer enabled in the build')
+        self.assertNotIn('TZDEV FRAMEBUFFER_CONSOLE', kernel_sh,
+                      'fbcon is still on the disable list, which cancels the enable')
+        self.assertIn('BT_HCI_SMD FRAMEBUFFER_CONSOLE', kernel_sh,
+                      'nothing asserts that fbcon survived olddefconfig; a symbol '
+                      'that only exists at =m silently shows no boot text')
+        deviceinfo = (ROOT / 'pmaports/device/downstream/'
+                      'device-samsung-j4primelte/deviceinfo').read_text()
+        self.assertIn('console=tty0', deviceinfo, 'no VT console in the bootargs, '
+                      'so /dev/console never reaches the panel')
+        self.assertIn('console=ttyMSM0,115200n8', deviceinfo,
+                      'losing the UART console would cost the debugging path')
+        self.assertIn('consoleblank=0', deviceinfo,
+                      'VT blanking on mdss_fb has stranded this backlight before')
+        self.assertIn('fbcon=map:0', deviceinfo)
+        self.assertNotIn(' quiet', deviceinfo,
+                         'quiet would hide the very messages this is for')
+
+
         self.assertIn('supervisor="supervise-daemon"', splash.INIT_TEXT)
         self.assertIn('after devfs', splash.INIT_TEXT)
         self.assertNotIn('j4-usb-debug', splash.INIT_TEXT.replace('after devfs', ''))

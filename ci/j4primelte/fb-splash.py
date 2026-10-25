@@ -2,12 +2,18 @@
 # J4_FB_SPLASH_V1
 """Persistent MDSS framebuffer owner + bring-up splash for SM-J415F pmOS.
 
-The kernel hands the aboot splash over via continuous splash, has no framebuffer
-console, and powers the panel down when the last /dev/fb0 handle closes. This
-daemon therefore opens fb0 once and keeps it open, draws a channel-order-safe
-white-on-dark splash, sets the real lcd-backlight LED level, and commits frames
-with FBIOPAN_DISPLAY. Run --test on the phone first. --install copies this exact
-file to /usr/local/sbin, adds a supervise-daemon OpenRC service and starts it.
+Old kernels for this phone were built without FRAMEBUFFER_CONSOLE, so the panel
+showed nothing at all and mdss_fb powered it down as soon as the last /dev/fb0
+handle closed. This daemon therefore opens fb0 once and keeps it open, draws a
+channel-order-safe white-on-dark splash, sets the real lcd-backlight LED level,
+and commits frames with FBIOPAN_DISPLAY. Run --test on the phone first.
+--install copies this exact file to /usr/local/sbin, adds a supervise-daemon
+OpenRC service and starts it.
+
+A kernel with FRAMEBUFFER_CONSOLE (what build-kernel.sh produces now) makes the
+daemon unnecessary for panel power - the console itself is the handle that keeps
+fb0 open - and drawing a splash then hides the boot text, so --install refuses
+unless --force says you meant it.
 
 No partition, firmware, network, SSH or password changes. Stop/disable this
 service before installing a desktop compositor later (it owns fb0 deliberately).
@@ -33,6 +39,7 @@ HELPER = Path('/usr/local/sbin/j4-fb-splash')
 INIT = Path('/etc/init.d/j4-fb-splash')
 RUNLEVEL_LINK = Path('/etc/runlevels/boot/j4-fb-splash')
 BACKLIGHT = Path('/sys/class/leds/lcd-backlight')
+VTCONSOLE = Path('/sys/class/vtconsole')
 FBIOGET_VSCREENINFO = 0x4600
 FBIOGET_FSCREENINFO = 0x4602
 FBIOPAN_DISPLAY = 0x4606
@@ -194,6 +201,28 @@ def draw_status(buffer, g, text):
               text, scale, FG)
 
 
+def fbcon_bound() -> bool:
+    """True when a framebuffer console is already driving the panel.
+
+    /sys/class/vtconsole/vtcon1/name reads "(fg) frame buffer device" and its
+    bind file flips to 1 once fbcon has taken the foreground console. That is the
+    difference between this daemon being the only thing showing anything and it
+    scribbling over the boot text: with two writers on one buffer you get half a
+    screen of glyphs and half a screen of logo, and the kernel's own console
+    state does not know it was overwritten. Checked from sysfs rather than from
+    the kernel config, because the running kernel is the thing that matters.
+    """
+    for name in sorted(VTCONSOLE.glob('vtcon*/name')):
+        try:
+            label = name.read_text(errors='replace')
+            bound = name.with_name('bind').read_text(errors='replace').strip()
+        except OSError:
+            continue
+        if 'frame buffer device' in label and bound == '1':
+            return True
+    return False
+
+
 def read_brightness():
     try:
         maximum = int((BACKLIGHT / 'max_brightness').read_text().strip())
@@ -259,7 +288,7 @@ def run(seconds=None):
             pass
 
 
-def install():
+def install(force: bool = False):
     if os.geteuid() != 0:
         raise SplashError('Run --install as root on the phone.')
     if struct.calcsize('P') != 4 or not os.uname().machine.startswith('arm'):
@@ -267,6 +296,14 @@ def install():
     info = Path('/usr/share/deviceinfo/deviceinfo')
     if not info.is_file() or 'samsung-j4primelte' not in info.read_text():
         raise SplashError('Installed deviceinfo is not samsung-j4primelte.')
+    if fbcon_bound() and not force:
+        raise SplashError(
+            'A framebuffer console owns fb0 and is drawing the boot text there; '
+            'this splash would overwrite it. Once fbcon is bound the console '
+            'itself keeps fb0 open, so the panel stays powered without this '
+            'daemon - remove it from the boot runlevel instead '
+            '(rc-update del j4-fb-splash boot). Pass --force to want the splash '
+            'and no boot text.')
     read_brightness()  # fail before any writes if the LED control is unusable
     for path in (HELPER, INIT):
         if path.is_symlink():
@@ -305,10 +342,12 @@ def main():
     group.add_argument('--test', type=int, metavar='SECONDS')
     group.add_argument('--run', action='store_true', help=argparse.SUPPRESS)
     group.add_argument('--install', action='store_true')
+    parser.add_argument('--force', action='store_true',
+                        help='install even though fbcon owns the framebuffer')
     args = parser.parse_args()
     try:
         if args.install:
-            install()
+            install(force=args.force)
         else:
             run(seconds=args.test)
         return 0

@@ -23,5 +23,20 @@ deviceinfo_flash_offset_tags="0x01e00000"
 deviceinfo_flash_heimdall_partition_kernel="BOOT"
 deviceinfo_flash_heimdall_partition_rootfs="SYSTEM"
 deviceinfo_initfs_compression="gzip:best"
+# Boot text on the panel, not only on the UART. This tree has CONFIG_CMDLINE=""
+# (checked against the vendor defconfig), so the boot image header cmdline plus
+# whatever LK appends is the whole command line - nothing here can shadow a
+# vendor argument, and nothing here is optional either.
+#   console=ttyMSM0  keeps serial/RNDIS debugging alive; with two consoles
+#                    /dev/console mirrors to both, so nothing is lost
+#   console=tty0     the VT that fbcon now draws on the panel
+#   loglevel=8       no "quiet": the boot messages are the point
+#   fbcon=map:0      this SoC has no primary-display concept, and the vendor MDSS
+#                    driver is what registers fb0, so bind the console to it
+#   consoleblank=0   VT blanking drives the panel through mdss_fb, and on the
+#                    downstream 3.18 driver a blanked console has stranded the
+#                    backlight before; a text console that turns the screen off
+#                    while you are reading it is worse than no text console
+deviceinfo_kernel_cmdline="console=ttyMSM0,115200n8 console=tty0 loglevel=8 fbcon=map:0 consoleblank=0"
 # Leave create_initfs_extra unset: this is a flat, single-partition rootfs.
 deviceinfo_usb_network_function="rndis.usb0"
