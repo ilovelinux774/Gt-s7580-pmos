@@ -33,6 +33,23 @@ debug[608:1632] = debug_cmd[512:].ljust(1024, b'\0')
 assert debug[page:] == boot[page:], 'Debug image payload changed'
 (folder / 'boot-debug.img').write_bytes(debug)
 
+# A third variant, for hunting the slab freelist corruption that panics this
+# board after tens of minutes (victims fault in __kmalloc_track_caller with a
+# poisoned freelist pointer, and one of them is always init). CONFIG_SLUB_DEBUG
+# is default y in this tree (init/Kconfig: "depends on SLUB && SYSFS"), so the
+# slub_debug= parameter and /sys/kernel/slab/*/validate already exist: this is
+# a cmdline-only change, the kernel is not rebuilt for it. panic_on_oops=0 keeps
+# the box alive after the first oops, so the report that names the corrupting
+# path is not lost along with it.
+slub_cmd = cmd + b' slub_debug=FZPU panic_on_oops=0'
+assert len(slub_cmd) < 1536, 'Boot cmdline too long'
+assert b'pmos.debug-shell' not in slub_cmd, 'Slab-debug image must still boot'
+slub = bytearray(boot)
+slub[64:576] = slub_cmd[:512].ljust(512, b'\0')
+slub[608:1632] = slub_cmd[512:].ljust(1024, b'\0')
+assert slub[page:] == boot[page:], 'Slab-debug image payload changed'
+(folder / 'boot-slabdebug.img').write_bytes(slub)
+
 rootfs = folder / 'rootfs.img'
 with rootfs.open('rb') as f:
     f.seek(1080)
@@ -50,6 +67,7 @@ report = {
     'rootfs_bytes': rootfs.stat().st_size,
     'cmdline': cmd.decode(),
     'debug_cmdline': debug_cmd.decode(),
+    'slubdebug_cmdline': slub_cmd.decode(),
     'payload_sha256': hashlib.sha256(boot[page:]).hexdigest(),
     'boot_partition_size_verified_on_phone': False,
 }

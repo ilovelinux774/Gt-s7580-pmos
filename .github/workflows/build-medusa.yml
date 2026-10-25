@@ -54,6 +54,7 @@ jobs:
           python3 ci/j4primelte/test-kernel-cache.py
           python3 ci/j4primelte/test-kernel-bt.py
           python3 ci/j4primelte/test-kernel-fbcon.py
+          python3 ci/j4primelte/test-verify-images.py
           python3 ci/j4primelte/test-kernel-gpu.py
           python3 ci/j4primelte/test-rootfs-move.py
           python3 ci/j4primelte/test-lxqt-image.py

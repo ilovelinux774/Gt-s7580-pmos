@@ -110,6 +110,9 @@ the boot header change; the kernel and ramdisk payloads stay byte-identical.
   Decompress with `xz -dk rootfs.img.xz` before using an image-flashing tool.
 - `SHA256SUMS`: hashes for the downloaded files.
 - `ROOTFS-UNCOMPRESSED.sha256`: hash after decompression.
+- `boot-slabdebug.img`: identical payload, `slub_debug=FZPU panic_on_oops=0` added.
+  Flash this instead to catch the slab corruption that panics the board; it
+  boots normally and does not stop in the initramfs.
 - `image-info.json`: actual sizes and boot-header validation results.
 
 **Recovery confirmed: OrangeFox.** No automatic flashing script is supplied. The

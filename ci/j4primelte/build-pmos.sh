@@ -64,10 +64,11 @@ python3 "$ROOT/ci/j4primelte/verify-images.py" "$IMAGES" | tee "$LOGS/image-vali
 # not require downloading the whole rootfs archive.
 BOOT_ONLY="$ROOT/artifacts/boot-only"
 mkdir -p "$BOOT_ONLY"
-cp "$IMAGES/boot.img" "$IMAGES/boot-debug.img" "$IMAGES/image-info.json" "$BOOT_ONLY/"
+cp "$IMAGES/boot.img" "$IMAGES/boot-debug.img" "$IMAGES/boot-slabdebug.img"
+cp "$IMAGES/image-info.json" "$BOOT_ONLY/"
 (
     cd "$BOOT_ONLY"
-    sha256sum boot.img boot-debug.img > SHA256SUMS
+    sha256sum boot.img boot-debug.img boot-slabdebug.img > SHA256SUMS
 )
 cp "$ROOT/README-j4primelte.md" "$IMAGES/README.md"
 cp "$LOGS/sources.env" "$LOGS/kernel.config" "$LOGS/installed-packages.txt" "$IMAGES/"
@@ -76,7 +77,7 @@ cp "$LOGS/kernel-source.patch" "$LOGS/pmbootstrap.patch" "$LOGS/kernel-build-pro
     cd "$IMAGES"
     sha256sum rootfs.img > ROOTFS-UNCOMPRESSED.sha256
     xz -T2 -2 rootfs.img
-    sha256sum boot.img boot-debug.img rootfs.img.xz > SHA256SUMS
+    sha256sum boot.img boot-debug.img boot-slabdebug.img rootfs.img.xz > SHA256SUMS
 )
 printf '\nBuilt TEST images; boot, display, and Wi-Fi are NOT hardware-validated.\n'
 ls -lh "$IMAGES"
