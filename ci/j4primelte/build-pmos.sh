@@ -64,8 +64,12 @@ python3 "$ROOT/ci/j4primelte/verify-images.py" "$IMAGES" | tee "$LOGS/image-vali
 # not require downloading the whole rootfs archive.
 BOOT_ONLY="$ROOT/artifacts/boot-only"
 mkdir -p "$BOOT_ONLY"
-cp "$IMAGES/boot.img" "$IMAGES/boot-debug.img" "$IMAGES/boot-slabdebug.img"
-cp "$IMAGES/image-info.json" "$BOOT_ONLY/"
+# Every image must land in the boot-only artifact: a cp that loses its
+# destination copies onto itself and "succeeds" beside a missing file.
+for image in boot.img boot-debug.img boot-slabdebug.img image-info.json; do
+    cp "$IMAGES/$image" "$BOOT_ONLY/$image"
+    test -s "$BOOT_ONLY/$image" || { echo "Missing from the boot-only artifact: $image"; exit 1; }
+done
 (
     cd "$BOOT_ONLY"
     sha256sum boot.img boot-debug.img boot-slabdebug.img > SHA256SUMS
