@@ -193,6 +193,14 @@ def known_symbols(tree: Path):
     twice, so every name in the fragment is checked against the tree it is
     about to be applied to.
     """
+    # A partial checkout is more dangerous than no tree at all: the answer would
+    # be a smaller set of real symbols, and every driver left out would then be
+    # reported as invented. Require the files an arm64 build reads, and return
+    # None - "unverified", the same answer as no tree at all - when they are not.
+    for required in ('arch/arm64/Kconfig', 'drivers/gpu/drm/Kconfig',
+                     'drivers/regulator/Kconfig', 'init/Kconfig'):
+        if not (tree / required).is_file():
+            return None
     if not (tree / '.git').exists():
         # A tarball or an exported tree has no index: fall back to grep, which is
         # slow but correct, and only the Kconfig files.
