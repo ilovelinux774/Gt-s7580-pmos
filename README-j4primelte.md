@@ -112,7 +112,9 @@ the boot header change; the kernel and ramdisk payloads stay byte-identical.
 - `ROOTFS-UNCOMPRESSED.sha256`: hash after decompression.
 - `boot-slabdebug.img`: identical payload, `slub_debug=FZPU panic_on_oops=0` added.
   Flash this instead to catch the slab corruption that panics the board; it
-  boots normally and does not stop in the initramfs.
+  boots normally and does not stop in the initramfs. It is only meaningful in a
+  build where `CONFIG_SLUB_DEBUG=y` (asserted by `build-kernel.sh` from run #36
+  on); in run #35 the argument is parsed away and nothing is checked.
 - `image-info.json`: actual sizes and boot-header validation results.
 
 **Recovery confirmed: OrangeFox.** No automatic flashing script is supplied. The

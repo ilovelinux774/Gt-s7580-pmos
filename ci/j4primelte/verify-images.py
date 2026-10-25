@@ -35,10 +35,11 @@ assert debug[page:] == boot[page:], 'Debug image payload changed'
 
 # A third variant, for hunting the slab freelist corruption that panics this
 # board after tens of minutes (victims fault in __kmalloc_track_caller with a
-# poisoned freelist pointer, and one of them is always init). CONFIG_SLUB_DEBUG
-# is default y in this tree (init/Kconfig: "depends on SLUB && SYSFS"), so the
-# slub_debug= parameter and /sys/kernel/slab/*/validate already exist: this is
-# a cmdline-only change, the kernel is not rebuilt for it. panic_on_oops=0 keeps
+# poisoned freelist pointer, and one of them is always init). The parameter and
+# /sys/kernel/slab/*/validate only exist with CONFIG_SLUB_DEBUG, which this
+# vendor defconfig turns off ("# CONFIG_SLUB_DEBUG is not set"); build-kernel.sh
+# re-enables it and asserts it, so an image that ignores this one is a build
+# failure, not a quiet no-op. panic_on_oops=0 keeps
 # the box alive after the first oops, so the report that names the corrupting
 # path is not lost along with it.
 slub_cmd = cmd + b' slub_debug=FZPU panic_on_oops=0'

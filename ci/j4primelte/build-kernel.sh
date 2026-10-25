@@ -80,6 +80,15 @@ for flag in ANDROID_PARANOID_NETWORK SEC_RESTRICT_ROOTING SECURITY_DEFEX \
     SECURITY_SELINUX MODULE_SIG DM_VERITY; do
     scripts/config --file out/.config --disable "$flag"
 done
+# The slab corruption that panics this board (see README) can only be
+# caught with the allocator's own checks, and CONFIG_SLUB_DEBUG is what
+# provides "slub_debug=" and /sys/kernel/slab/*/validate. This vendor
+# defconfig turns it off ("# CONFIG_SLUB_DEBUG is not set"), so enabling
+# it here is required, not optional - and it is asserted below, because a
+# scripts/config --enable for a symbol that stays off is otherwise silent.
+# CONFIG_SLUB_DEBUG_ON is deliberately left off: the normal boot image
+# must not pay for the checks, only boot-slabdebug.img asks for them.
+scripts/config --file out/.config --enable SLUB_DEBUG
 scripts/config --file out/.config --set-str LOCALVERSION '-pmos-j4-debug'
 scripts/config --file out/.config --disable LOCALVERSION_AUTO
 
@@ -105,7 +114,7 @@ fi
 for flag in SEC_J4PRIMELTE_PROJECT MACH_J4PRIMELTE_SEA_OPEN BUILD_ARM_APPENDED_DTB_IMAGE \
     DEVTMPFS SYSVIPC DEVPTS_MULTIPLE_INSTANCES BLK_DEV_INITRD RD_GZIP \
     USB_G_ANDROID USB_MSM_OTG EXT4_FS IP_NF_IPTABLES IP_NF_FILTER \
-    BT_HCI_SMD FRAMEBUFFER_CONSOLE; do
+    BT_HCI_SMD FRAMEBUFFER_CONSOLE SLUB_DEBUG; do
     grep -qx "CONFIG_${flag}=y" out/.config || { echo "Required option missing: $flag"; exit 1; }
 done
 if grep -qx 'CONFIG_ANDROID_PARANOID_NETWORK=y' out/.config; then
