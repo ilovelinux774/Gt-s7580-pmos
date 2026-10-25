@@ -10,10 +10,16 @@ and commits frames with FBIOPAN_DISPLAY. Run --test on the phone first.
 --install copies this exact file to /usr/local/sbin, adds a supervise-daemon
 OpenRC service and starts it.
 
-A kernel with FRAMEBUFFER_CONSOLE (what build-kernel.sh produces now) makes the
-daemon unnecessary for panel power - the console itself is the handle that keeps
-fb0 open - and drawing a splash then hides the boot text, so --install refuses
+FRAMEBUFFER_CONSOLE alone was never enough: on the flashed run #33 image the
+console was not bound at all (only /sys/class/vtconsole/vtcon0, the dummy
+device), which is why kernel-fbcon.py exists. With that patch the console owns
+fb0 early, so a splash drawn here would hide the boot text and --install refuses
 unless --force says you meant it.
+
+Note the console binds without a successful fb_open (mdss_fb refuses one while
+its ref_cnt is 0), so the console is not itself a handle keeping the panel up -
+but nothing powers the panel down either, because mdss_fb only does that on the
+last close of an fb it actually opened.
 
 No partition, firmware, network, SSH or password changes. Stop/disable this
 service before installing a desktop compositor later (it owns fb0 deliberately).

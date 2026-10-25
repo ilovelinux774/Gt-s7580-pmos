@@ -37,6 +37,10 @@ deviceinfo_initfs_compression="gzip:best"
 #                    downstream 3.18 driver a blanked console has stranded the
 #                    backlight before; a text console that turns the screen off
 #                    while you are reading it is worse than no text console
-deviceinfo_kernel_cmdline="console=ttyMSM0,115200n8 console=tty0 loglevel=8 fbcon=map:0 consoleblank=0"
+# fbcon=scrollback: keeps the console in a RAM buffer and redraws the
+# visible window instead of panning: fb0 reports a virtual height of 2960
+# (two screens), so a pan would move the text to a page the MDP pipe never
+# scans out and the panel would freeze after the first screenful.
+deviceinfo_kernel_cmdline="console=ttyMSM0,115200n8 console=tty0 loglevel=8 fbcon=map:0,scrollback:256k consoleblank=0"
 # Leave create_initfs_extra unset: this is a flat, single-partition rootfs.
 deviceinfo_usb_network_function="rndis.usb0"

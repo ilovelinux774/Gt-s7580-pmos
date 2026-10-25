@@ -40,7 +40,7 @@ def staged_kernel_files(root):
 
 # Helpers that patch the checked-out tree. Their content changes the kernel, so
 # it belongs in the key just like build-kernel.sh does.
-STAGING_HELPERS = ('kernel-bt.py', 'kernel-gpu.py')
+STAGING_HELPERS = ('kernel-bt.py', 'kernel-fbcon.py', 'kernel-gpu.py')
 
 
 def recipe_key(root):

@@ -28,6 +28,16 @@ cd "$KERNEL"
 # which carries HCI over the APPS_RIVA_BT_CMD / APPS_RIVA_BT_ACL SMD channels.
 python3 "$ROOT/ci/j4primelte/kernel-bt.py" "$KERNEL"
 
+# Boot text on the panel needs a source patch, not only config. With
+# CONFIG_FRAMEBUFFER_CONSOLE=y the driver still refuses the console bind:
+# fbcon_startup() asks fb_open() for permission, mdss_fb_open() runs its
+# unblank path while ref_cnt is 0 (which is exactly the case mid-probe),
+# that fails, and fbcon unregisters its own consw -- after which nothing in
+# userspace can bind it again. See ci/j4primelte/kernel-fbcon.py for the
+# evidence, including the on-device test that proves the bind itself works.
+python3 "$ROOT/ci/j4primelte/kernel-fbcon.py" "$KERNEL"
+python3 "$ROOT/ci/j4primelte/kernel-fbcon.py" "$KERNEL" --check
+
 # GPU experiment (opt-in, J4_GPU_EXPERIMENT=1): this kernel carries the MSM DRM
 # driver with MDP5 KMS and the a3xx (Adreno 308) GPU, but it can never bind:
 # dt_match[] excludes qcom,mdss_mdp because the framebuffer driver owns that
