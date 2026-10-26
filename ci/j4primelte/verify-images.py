@@ -51,6 +51,28 @@ slub[608:1632] = slub_cmd[512:].ljust(1024, b'\0')
 assert slub[page:] == boot[page:], 'Slab-debug image payload changed'
 (folder / 'boot-slabdebug.img').write_bytes(slub)
 
+# A fourth variant for the boot text. The kernel carries the fbcon patch in
+# every image now (the veto is gone, so vtcon1 survives a refused bind), but
+# binding *during* register_framebuffer() is what boot-looped run #35:
+# mdss_fb_open() powers the panel up a second time while the boot loader still
+# owns it. "fbcon=late" moves the takeover to late_initcall(), i.e. after the
+# display driver is completely up -- the context the bind was proven in by hand
+# on this phone. Appending a token to fbcon= cannot be done by tacking bytes
+# onto the cmdline, because the whole string is one __setup() argument: it has
+# to be substituted inside it, and the substitution must be asserted.
+late_cmd = cmd.replace(b'fbcon=map:0,scrollback:256k',
+                       b'fbcon=map:0,scrollback:256k,late')
+assert late_cmd != cmd, ('the base cmdline no longer carries the exact fbcon= '
+                         'argument this variant rewrites; refusing to build an '
+                         'image that is just a copy of boot.img')
+assert b'pmos.debug-shell' not in late_cmd, 'late-bind image must boot normally'
+assert len(late_cmd) < 1536, 'Boot cmdline too long'
+late = bytearray(boot)
+late[64:576] = late_cmd[:512].ljust(512, b'\0')
+late[608:1632] = late_cmd[512:].ljust(1024, b'\0')
+assert late[page:] == boot[page:], 'Late-bind image payload changed'
+(folder / 'boot-latebind.img').write_bytes(late)
+
 rootfs = folder / 'rootfs.img'
 with rootfs.open('rb') as f:
     f.seek(1080)
@@ -69,6 +91,7 @@ report = {
     'cmdline': cmd.decode(),
     'debug_cmdline': debug_cmd.decode(),
     'slubdebug_cmdline': slub_cmd.decode(),
+    'latebind_cmdline': late_cmd.decode(),
     'payload_sha256': hashlib.sha256(boot[page:]).hexdigest(),
     'boot_partition_size_verified_on_phone': False,
 }

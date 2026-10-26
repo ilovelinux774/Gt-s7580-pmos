@@ -41,6 +41,13 @@ deviceinfo_initfs_compression="gzip:best"
 # visible window instead of panning: fb0 reports a virtual height of 2960
 # (two screens), so a pan would move the text to a page the MDP pipe never
 # scans out and the panel would freeze after the first screenful.
+# ",late" is deliberately NOT in this string. Binding fbcon while
+# mdss_fb_probe() is still inside register_framebuffer() makes mdss_fb_open()
+# power-cycle a panel the boot loader owns, which boot-looped run #35; the
+# deferred bind is opt-in per image (see ci/j4primelte/verify-images.py, which
+# appends ",late" to build boot-latebind.img). Keeping the device default
+# vendor-shaped also means boot.img's cmdline here is byte-comparable with a
+# known-good image, which is what makes a rollback provable.
 deviceinfo_kernel_cmdline="console=ttyMSM0,115200n8 console=tty0 loglevel=8 fbcon=map:0,scrollback:256k consoleblank=0"
 # Leave create_initfs_extra unset: this is a flat, single-partition rootfs.
 deviceinfo_usb_network_function="rndis.usb0"

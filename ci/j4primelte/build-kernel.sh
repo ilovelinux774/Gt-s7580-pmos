@@ -29,14 +29,26 @@ cd "$KERNEL"
 python3 "$ROOT/ci/j4primelte/kernel-bt.py" "$KERNEL"
 
 # Boot text on the panel needs a source patch, not only config. With
-# CONFIG_FRAMEBUFFER_CONSOLE=y the driver still refuses the console bind:
+# CONFIG_FRAMEBUFFER_CONSOLE=y the display driver vetoes the console bind:
 # fbcon_startup() asks fb_open() for permission, mdss_fb_open() runs its
 # unblank path while ref_cnt is 0 (which is exactly the case mid-probe),
 # that fails, and fbcon unregisters its own consw -- after which nothing in
-# userspace can bind it again. See ci/j4primelte/kernel-fbcon.py for the
-# evidence, including the on-device test that proves the bind itself works.
+# userspace can bind it again (vendor vt.c calls con_startup() from
+# do_register_con_driver() and sets CON_DRIVER_FLAG_INIT right there).
+#
+# Run #35 fixed that by ignoring the veto, and that was only half a fix: the
+# bind then made the *same* unblank path run for real, power-cycling a panel
+# the boot loader still owned, and the phone rebooted ~25 s into every boot.
+# So the patch must both drop the veto and move the bind out of the
+# registration path, which is what "fbcon=late" (late_initcall) does.
+# build-latebind.img carries that argument; the ordinary images do not, so
+# their cmdline -- and therefore their boot behaviour -- stays what #33 had.
+#
+# --check below is a hard assert: helper text, guard and boot arg must all be
+# present, otherwise the build is one hunk away from the #35 bootloop.
 python3 "$ROOT/ci/j4primelte/kernel-fbcon.py" "$KERNEL"
 python3 "$ROOT/ci/j4primelte/kernel-fbcon.py" "$KERNEL" --check
+grep -q 'fbcon=map:0,scrollback:256k' "$ROOT/pmaports/device/downstream/device-samsung-j4primelte/deviceinfo" || { echo "kernel-fbcon: the deviceinfo fbcon= argument changed shape, and verify-images.py rewrites that exact string to build the late-bind image; it would now silently produce a copy of boot.img"; exit 1; }
 
 # GPU experiment (opt-in, J4_GPU_EXPERIMENT=1): this kernel carries the MSM DRM
 # driver with MDP5 KMS and the a3xx (Adreno 308) GPU, but it can never bind:

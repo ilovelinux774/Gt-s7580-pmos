@@ -22,6 +22,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / 'verify-images.py'
 PAGE = 2048
 KSIZE, RSIZE = 16, 16
+FBCON = b'fbcon=map:0,scrollback:256k'
 
 
 def read_cmdline(image):
@@ -29,7 +30,8 @@ def read_cmdline(image):
     return head.decode()
 
 
-def make_boot(cmdline=b'console=ttyMSM0,115200n8 rootwait', version=0, page=PAGE,
+def make_boot(cmdline=b'console=ttyMSM0,115200n8 rootwait ' + FBCON, version=0,
+              page=PAGE,
               kaddr=0x80008000, raddr=0x82000000):
     assert len(cmdline) <= 512 + 1024
     head = bytearray(page)
@@ -65,17 +67,18 @@ class RepackTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, str(self.tmp), True)
 
-    def build(self, cmdline=b'console=ttyMSM0,115200n8 rootwait', rootfs=None):
+    def build(self, cmdline=b'console=ttyMSM0,115200n8 rootwait ' + FBCON,
+                rootfs=None):
         (self.tmp / 'boot.img').write_bytes(make_boot(cmdline))
         (self.tmp / 'rootfs.img').write_bytes(
             make_rootfs() if rootfs is None else rootfs)
         return subprocess.run([sys.executable, str(SCRIPT), str(self.tmp)],
                               capture_output=True, text=True)
 
-    def test_three_images_keep_the_payload_byte_identical(self):
+    def test_all_variants_keep_the_payload_byte_identical(self):
         self.assertEqual(self.build().returncode, 0)
         boot = (self.tmp / 'boot.img').read_bytes()
-        for name in ('boot-debug.img', 'boot-slabdebug.img'):
+        for name in ('boot-debug.img', 'boot-slabdebug.img', 'boot-latebind.img'):
             image = (self.tmp / name).read_bytes()
             self.assertEqual(len(image), len(boot), name)
             self.assertEqual(image[PAGE:], boot[PAGE:],
@@ -90,12 +93,20 @@ class RepackTest(unittest.TestCase):
         base = read_cmdline((self.tmp / 'boot.img').read_bytes())
         debug = read_cmdline((self.tmp / 'boot-debug.img').read_bytes())
         slub = read_cmdline((self.tmp / 'boot-slabdebug.img').read_bytes())
+        late = read_cmdline((self.tmp / 'boot-latebind.img').read_bytes())
         self.assertEqual(debug, base + ' pmos.debug-shell')
         self.assertEqual(slub, base + ' slub_debug=FZPU panic_on_oops=0')
+        self.assertEqual(late, base.replace(
+            'fbcon=map:0,scrollback:256k', 'fbcon=map:0,scrollback:256k,late'))
+        self.assertEqual(late.count('fbcon='), 1,
+                         'late bind must extend the existing fbcon= argument')
+        self.assertNotIn('slub_debug', late)
+        self.assertNotIn('pmos.debug-shell', late)
         # The debugging images must stay distinguishable from each other: the
         # slab one has to boot all the way to the desktop to be useful.
         self.assertNotIn('pmos.debug-shell', slub)
         self.assertNotIn('slub_debug', debug)
+        self.assertNotIn(',late', base)
 
     def test_normal_image_carries_no_debug_flag(self):
         self.assertEqual(self.build().returncode, 0)
@@ -107,8 +118,10 @@ class RepackTest(unittest.TestCase):
         self.assertEqual(self.build().returncode, 0)
         report = json.loads((self.tmp / 'image-info.json').read_text())
         self.assertIn('slub_debug=FZPU', report['slubdebug_cmdline'])
+        self.assertIn('scrollback:256k,late', report['latebind_cmdline'])
         self.assertIn('pmos.debug-shell', report['debug_cmdline'])
         self.assertNotIn('slub_debug', report['cmdline'])
+        self.assertNotIn(',late', report['cmdline'])
         self.assertFalse(report['hardware_tested'])
         self.assertEqual(report['boot_header_version'], 0)
         self.assertEqual(report['kernel_bytes'], KSIZE)
@@ -123,6 +136,14 @@ class RepackTest(unittest.TestCase):
         proc = self.build(b'x' * 1536)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn('cmdline too long', proc.stderr)
+
+    def test_a_base_without_the_exact_fbcon_argument_is_refused(self):
+        # The late-bind variant rewrites the fbcon= string. If the device's
+        # cmdline ever changes shape, a variant that is silently identical to
+        # boot.img is worse than a failed build.
+        proc = self.build(b'console=ttyMSM0,115200n8 rootwait')
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('fbcon=', proc.stderr)
 
     def test_unsupported_header_version_is_refused(self):
         proc = self.build()

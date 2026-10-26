@@ -115,7 +115,37 @@ the boot header change; the kernel and ramdisk payloads stay byte-identical.
   boots normally and does not stop in the initramfs. It is only meaningful in a
   build where `CONFIG_SLUB_DEBUG=y` (asserted by `build-kernel.sh` from run #36
   on); in run #35 the argument is parsed away and nothing is checked.
+- `boot-latebind.img`: identical payload, with `,late` substituted into the existing
+  `fbcon=` argument (`fbcon=map:0,scrollback:256k,late`). This is the boot-text
+  image: the kernel patch is in every image, but only this one asks fbcon to bind
+  at `late_initcall()` instead of from inside `register_framebuffer()`.
 - `image-info.json`: actual sizes and boot-header validation results.
+
+### Boot text: why there are two variants
+
+With `CONFIG_FRAMEBUFFER_CONSOLE=y` the panel stayed dark until the display
+server started, because `fbcon_startup()` asks the driver for permission via
+`fb_open()` and Samsung's `mdss_fb_open()` runs its unblank path whenever no
+owner holds the framebuffer (`mfd->ref_cnt == 0`) -- which is exactly the case
+while `mdss_fb_probe()` is still registering it. The refusal is fatal rather
+than merely annoying: the vendor `vt.c` consumes `con_startup()` from
+`do_register_con_driver()`, so after one refusal nothing in userspace can bind
+fbcon again.
+
+Run #35 removed that veto. It was the right diagnosis and a dangerous patch:
+the bind then *ran* the unblank path, power-cycling a panel the boot loader
+still owned. Symptom on an SM-J415F: Samsung logo, black, backlight with no
+content, reboot about 25 s in, repeated. `pstore` recorded nothing before the
+reboot because a hang does not panic, so no `console-ramoops` is written.
+
+Run #37 therefore splits the change: every image drops the veto so `vtcon1`
+survives, and only `boot-latebind.img` asks for the bind at `late_initcall()`,
+after the display driver is completely up -- the same context in which the bind
+was proven by hand on the device (`FBIOPUT_CON2FBMAP` returning 0 while the
+panel was already scanning out, yielding `vtcon1 (M) frame buffer device` with
+`bind 1`). `boot.img` in #37 has the same cmdline as run #33, so it is a safe
+image to have on hand; if a late bind ever misbehaves, flash `boot.img`.
+
 
 **Recovery confirmed: OrangeFox.** No automatic flashing script is supplied. The
 owner reported BOOT `/dev/mmcblk0p23` (32M in lsblk), SYSTEM `/dev/mmcblk0p47`,
