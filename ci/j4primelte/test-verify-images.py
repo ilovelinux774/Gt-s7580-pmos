@@ -78,8 +78,7 @@ class RepackTest(unittest.TestCase):
     def test_all_variants_keep_the_payload_byte_identical(self):
         self.assertEqual(self.build().returncode, 0)
         boot = (self.tmp / 'boot.img').read_bytes()
-        for name in ('boot-debug.img', 'boot-slabdebug.img', 'boot-latebind.img',
-                     'boot-latebind-slabdebug.img'):
+        for name in ('boot-debug.img', 'boot-slabdebug.img', 'boot-veto.img'):
             image = (self.tmp / name).read_bytes()
             self.assertEqual(len(image), len(boot), name)
             self.assertEqual(image[PAGE:], boot[PAGE:],
@@ -94,29 +93,28 @@ class RepackTest(unittest.TestCase):
         base = read_cmdline((self.tmp / 'boot.img').read_bytes())
         debug = read_cmdline((self.tmp / 'boot-debug.img').read_bytes())
         slub = read_cmdline((self.tmp / 'boot-slabdebug.img').read_bytes())
-        late = read_cmdline((self.tmp / 'boot-latebind.img').read_bytes())
+        veto = read_cmdline((self.tmp / 'boot-veto.img').read_bytes())
         self.assertEqual(debug, base + ' pmos.debug-shell')
         self.assertEqual(slub, base + ' slub_debug=FZPU panic_on_oops=0')
-        self.assertEqual(late, base.replace(
-            'fbcon=map:0,scrollback:256k', 'fbcon=map:0,scrollback:256k,late'))
-        self.assertEqual(late.count('fbcon='), 1,
-                         'late bind must extend the existing fbcon= argument')
-        self.assertNotIn('slub_debug', late)
-        self.assertNotIn('pmos.debug-shell', late)
-        comb = read_cmdline((self.tmp / 'boot-latebind-slabdebug.img').read_bytes())
-        # The combined image is the single-variable test: bind + allocator
-        # traps, nothing else. Both halves must be present or the experiment
-        # measures the wrong thing.
-        self.assertIn('fbcon=map:0,scrollback:256k,late', comb)
-        self.assertIn('slub_debug=FZPU,U panic_on_oops=0', comb)
-        self.assertNotIn('pmos.debug-shell', comb)
-        self.assertEqual(comb.count('fbcon='), 1)
-        self.assertEqual(comb, late + ' slub_debug=FZPU,U panic_on_oops=0')
+        # The control image differs by one token inside the existing fbcon=
+        # argument and by nothing else, which is what makes the comparison with
+        # boot.img a single-variable experiment.
+        self.assertEqual(veto, base.replace(
+            'fbcon=map:0,scrollback:256k', 'fbcon=map:0,scrollback:256k,veto'))
+        self.assertEqual(veto.count('fbcon='), 1,
+                         'the veto token must extend the existing fbcon= argument')
+        self.assertNotIn('slub_debug', veto)
+        self.assertNotIn('pmos.debug-shell', veto)
+        # The fix must be the DEFAULT: no token of its own, and no veto token,
+        # or boot.img would quietly be the control group (that inversion is what
+        # run #39 shipped).
+        self.assertNotIn('veto', base)
+        self.assertNotIn(',late', base)
+        self.assertIn('fbcon=map:0,scrollback:256k', base)
         # The debugging images must stay distinguishable from each other: the
         # slab one has to boot all the way to the desktop to be useful.
         self.assertNotIn('pmos.debug-shell', slub)
         self.assertNotIn('slub_debug', debug)
-        self.assertNotIn(',late', base)
 
     def test_normal_image_carries_no_debug_flag(self):
         self.assertEqual(self.build().returncode, 0)
@@ -128,10 +126,10 @@ class RepackTest(unittest.TestCase):
         self.assertEqual(self.build().returncode, 0)
         report = json.loads((self.tmp / 'image-info.json').read_text())
         self.assertIn('slub_debug=FZPU', report['slubdebug_cmdline'])
-        self.assertIn('scrollback:256k,late', report['latebind_cmdline'])
-        self.assertIn('slub_debug=FZPU,U', report['latebind_slubdebug_cmdline'])
+        self.assertIn('scrollback:256k,veto', report['veto_cmdline'])
         self.assertIn('pmos.debug-shell', report['debug_cmdline'])
         self.assertNotIn('slub_debug', report['cmdline'])
+        self.assertNotIn('veto', report['cmdline'])
         self.assertNotIn(',late', report['cmdline'])
         self.assertFalse(report['hardware_tested'])
         self.assertEqual(report['boot_header_version'], 0)

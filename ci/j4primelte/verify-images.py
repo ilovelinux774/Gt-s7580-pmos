@@ -51,45 +51,28 @@ slub[608:1632] = slub_cmd[512:].ljust(1024, b'\0')
 assert slub[page:] == boot[page:], 'Slab-debug image payload changed'
 (folder / 'boot-slabdebug.img').write_bytes(slub)
 
-# A fourth variant, now the CONTROL group rather than the fix. The kernel patch
-# skips mdss_fb_open() and binds at late_initcall() by default; appending
-# "late" to fbcon= is what puts the old behaviour back -- takeover from the
-# FB_EVENT_FB_REGISTERED notifier, which pstore pinned at 1.04 s inside
-# mdss_fb_probe() with the marker line never printed, i.e. never returning from
-# the fb_open() call. So this image is expected to keep boot-looping, and it
-# exists only to prove that the difference between it and boot.img is the bind
-# point and nothing else.
+# A fourth image: the CONTROL group, not the fix. The kernel patch defers the bind
+# (no mdss_fb_open() call during probe, no takeover from the
+# FB_EVENT_FB_REGISTERED notifier, bind at late_initcall()) for every cmdline
+# without `,veto`. Appending `veto` restores the vendor behaviour -- the veto runs,
+# the bind is refused, the panel stays dark, and the boot survives, which is what
+# #33 proved. It exists so that "does the deferred bind work" is a one-variable
+# question: same kernel, same ramdisk, same DTB, one token.
 # Appending a token to fbcon= cannot be done by tacking bytes onto the cmdline,
 # because the whole string is one __setup() argument: it has to be substituted
 # inside it, and the substitution must be asserted.
-late_cmd = cmd.replace(b'fbcon=map:0,scrollback:256k',
-                       b'fbcon=map:0,scrollback:256k,late')
-assert late_cmd != cmd, ('the base cmdline no longer carries the exact fbcon= '
+veto_cmd = cmd.replace(b'fbcon=map:0,scrollback:256k',
+                       b'fbcon=map:0,scrollback:256k,veto')
+assert veto_cmd != cmd, ('the base cmdline no longer carries the exact fbcon= '
                          'argument this variant rewrites; refusing to build an '
                          'image that is just a copy of boot.img')
-assert b'pmos.debug-shell' not in late_cmd, 'late-bind image must boot normally'
-assert len(late_cmd) < 1536, 'Boot cmdline too long'
-late = bytearray(boot)
-late[64:576] = late_cmd[:512].ljust(512, b'\0')
-late[608:1632] = late_cmd[512:].ljust(1024, b'\0')
-assert late[page:] == boot[page:], 'Late-bind image payload changed'
-(folder / 'boot-latebind.img').write_bytes(late)
-
-# The one-image version of the two-step experiment: bind the console at
-# late_initcall AND keep the allocator's own traps armed, so a corruption
-# caused by the bind reports itself instead of killing init 25 minutes later.
-# panic_on_oops=0 matters as much as FZPU here: without it the first victim
-# (usually Xorg) takes the box down before the trap on the writing site is
-# ever reached. U adds the user-space redzone check, which is what tells us
-# whether anything lands in the tail past fbcon's softback_end.
-combined_cmd = late_cmd + b' slub_debug=FZPU,U panic_on_oops=0'
-assert len(combined_cmd) < 1536, 'Boot cmdline too long'
-assert b'pmos.debug-shell' not in combined_cmd, 'combined image must boot normally'
-combined = bytearray(boot)
-combined[64:576] = combined_cmd[:512].ljust(512, b'\0')
-combined[608:1632] = combined_cmd[512:].ljust(1024, b'\0')
-assert combined[page:] == boot[page:], 'Combined image payload changed'
-(folder / 'boot-latebind-slabdebug.img').write_bytes(combined)
+assert b'pmos.debug-shell' not in veto_cmd, 'control image must boot normally'
+assert len(veto_cmd) < 1536, 'Boot cmdline too long'
+veto = bytearray(boot)
+veto[64:576] = veto_cmd[:512].ljust(512, b'\0')
+veto[608:1632] = veto_cmd[512:].ljust(1024, b'\0')
+assert veto[page:] == boot[page:], 'Control image payload changed'
+(folder / 'boot-veto.img').write_bytes(veto)
 
 rootfs = folder / 'rootfs.img'
 with rootfs.open('rb') as f:
@@ -109,8 +92,7 @@ report = {
     'cmdline': cmd.decode(),
     'debug_cmdline': debug_cmd.decode(),
     'slubdebug_cmdline': slub_cmd.decode(),
-    'latebind_cmdline': late_cmd.decode(),
-    'latebind_slubdebug_cmdline': combined_cmd.decode(),
+    'veto_cmdline': veto_cmd.decode(),
     'payload_sha256': hashlib.sha256(boot[page:]).hexdigest(),
     'boot_partition_size_verified_on_phone': False,
 }

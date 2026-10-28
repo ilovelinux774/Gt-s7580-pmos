@@ -66,13 +66,13 @@ BOOT_ONLY="$ROOT/artifacts/boot-only"
 mkdir -p "$BOOT_ONLY"
 # Every image must land in the boot-only artifact: a cp that loses its
 # destination copies onto itself and "succeeds" beside a missing file.
-for image in boot.img boot-debug.img boot-slabdebug.img boot-latebind.img boot-latebind-slabdebug.img image-info.json; do
+for image in boot.img boot-debug.img boot-slabdebug.img boot-veto.img image-info.json; do
     cp "$IMAGES/$image" "$BOOT_ONLY/$image"
     test -s "$BOOT_ONLY/$image" || { echo "Missing from the boot-only artifact: $image"; exit 1; }
 done
 (
     cd "$BOOT_ONLY"
-    sha256sum boot.img boot-debug.img boot-slabdebug.img boot-latebind.img boot-latebind-slabdebug.img > SHA256SUMS
+    sha256sum boot.img boot-debug.img boot-slabdebug.img boot-veto.img > SHA256SUMS
 )
 cp "$ROOT/README-j4primelte.md" "$IMAGES/README.md"
 cp "$LOGS/sources.env" "$LOGS/kernel.config" "$LOGS/installed-packages.txt" "$IMAGES/"
@@ -81,7 +81,7 @@ cp "$LOGS/kernel-source.patch" "$LOGS/pmbootstrap.patch" "$LOGS/kernel-build-pro
     cd "$IMAGES"
     sha256sum rootfs.img > ROOTFS-UNCOMPRESSED.sha256
     xz -T2 -2 rootfs.img
-    sha256sum boot.img boot-debug.img boot-slabdebug.img boot-latebind.img boot-latebind-slabdebug.img rootfs.img.xz > SHA256SUMS
+    sha256sum boot.img boot-debug.img boot-slabdebug.img boot-veto.img rootfs.img.xz > SHA256SUMS
 )
 printf '\nBuilt TEST images; boot, display, and Wi-Fi are NOT hardware-validated.\n'
 ls -lh "$IMAGES"

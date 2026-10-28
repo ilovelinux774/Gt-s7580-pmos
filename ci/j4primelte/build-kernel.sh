@@ -31,29 +31,29 @@ python3 "$ROOT/ci/j4primelte/kernel-bt.py" "$KERNEL"
 # Boot text on the panel needs a source patch, not only config. With
 # CONFIG_FRAMEBUFFER_CONSOLE=y the display driver vetoes the console bind:
 # fbcon_startup() asks fb_open() for permission, mdss_fb_open() runs its
-# unblank path while ref_cnt is 0 (which is exactly the case mid-probe),
-# that fails, and fbcon unregisters its own consw -- after which nothing in
-# userspace can bind it again (vendor vt.c calls con_startup() from
-# do_register_con_driver() and sets CON_DRIVER_FLAG_INIT right there).
+# unblank path while ref_cnt is 0 (which is exactly the case mid-probe), and
+# the refusal is final -- vendor vt.c calls con_startup() from
+# do_register_con_driver() and sets CON_DRIVER_FLAG_INIT right there, so after
+# one refusal nothing binds fbcon ever again.
 #
-# Run #35 fixed that by ignoring the veto, and that was only half a fix: the
-# bind then made the *same* unblank path run for real. "fbcon=late" moved the
-# bind to late_initcall() and the phone still rebooted -- but pstore says it
-# died at 1.04 s inside mdss_fb_probe(), long before late_initcall and before
-# the patch's own marker line: the fatal part was the fb_open() call itself,
-# not when the bind happened. So the patch now skips that call outright and
-# takes the console over at late_initcall(), in every image, no boot arg needed.
+# Ignoring the veto (#35, #36) boot-looped the board; adding "fbcon=late" on top
+# of that (#37, #38) did too, because those images never suppressed the *other*
+# bind path, the takeover fbcon_fb_registered() runs from the
+# FB_EVENT_FB_REGISTERED notifier while mdss_fb_probe() is still executing. #39
+# tried to gate that and inverted its own flag instead, so it called fb_open() and
+# bound during probe -- and pstore for the first time showed the death in every
+# variant at the same place ("mdss_fb_probe: fb0: split_mode", ~1.07 s, no oops).
 #
-# "fbcon=late" is inverted from what it was in #37/#38: it now selects the old
-# behaviour (open called, takeover at registration time), which is what those
-# images proved fatal. boot-latebind.img keeps it as the control group; flash
-# boot.img, boot-debug.img or boot-slabdebug.img to test the fix.
+# The patch now defers by default: fb_open() is not evaluated at all during
+# registration, the notifier-driven takeover is suppressed, and the bind happens
+# once from late_initcall(). "fbcon=veto" restores the vendor behaviour and is
+# what boot-veto.img carries, as the control group.
 #
-# --check below is a hard assert: helper text, guard and boot arg must all be
-# present, otherwise the build is one hunk away from the #35 bootloop.
+# --check below is a hard assert: helper text, guard and the veto token must all
+# be present, otherwise the build is one hunk away from the #35-#39 bootloop.
 python3 "$ROOT/ci/j4primelte/kernel-fbcon.py" "$KERNEL"
 python3 "$ROOT/ci/j4primelte/kernel-fbcon.py" "$KERNEL" --check
-grep -q 'fbcon=map:0,scrollback:256k' "$ROOT/pmaports/device/downstream/device-samsung-j4primelte/deviceinfo" || { echo "kernel-fbcon: the deviceinfo fbcon= argument changed shape, and verify-images.py rewrites that exact string to build the late-bind image; it would now silently produce a copy of boot.img (harmless since #39, because the fix no longer depends on the argument, but the control group would stop existing)"; exit 1; }
+grep -q 'fbcon=map:0,scrollback:256k' "$ROOT/pmaports/device/downstream/device-samsung-j4primelte/deviceinfo" || { echo "kernel-fbcon: the deviceinfo fbcon= argument changed shape, and verify-images.py rewrites that exact string to build the veto control image; it would now silently produce a copy of boot.img (harmless for the fix, which no longer depends on a boot argument, but the control group would stop existing)"; exit 1; }
 
 # GPU experiment (opt-in, J4_GPU_EXPERIMENT=1): this kernel carries the MSM DRM
 # driver with MDP5 KMS and the a3xx (Adreno 308) GPU, but it can never bind:

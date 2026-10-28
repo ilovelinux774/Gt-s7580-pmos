@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Make fbcon bindable on j4primelte, and bind it only after the panel probed.
+"""Defer fbcon's bind on j4primelte until the display driver has finished probing.
 
-Everything here comes from reading the pinned tree, plus one boot-looped phone
-and one pstore log that finally said what actually happened.
+Read this before changing anything: the shape of the veto below is the residue of
+three wrong theories, and the pstore log of run #39 is what killed the last one.
 
 The vendor veto. ``fbcon_startup()`` asks the driver for permission::
 
@@ -11,62 +11,61 @@ The vendor veto. ``fbcon_startup()`` asks the driver for permission::
             return NULL;
     }
 
-``mdss_fb_open()`` (mdss_fb.c:2864) runs ``pm_runtime_get_sync()`` and then
-``mdss_fb_blank_sub(FB_BLANK_UNBLANK)`` whenever ``mfd->ref_cnt`` is 0
-(mdss_fb.c:2894) -- which is precisely the case while ``mdss_fb_probe()`` is
-still inside ``register_framebuffer()``. So the veto protects the kernel from a
-panel power-up in the middle of its own probe, and the console pays for it:
-``do_register_con_driver()`` (vendor vt.c:3604) consumes ``con_startup()`` once
-and sets CON_DRIVER_FLAG_INIT there, so after one refusal *nothing* ever
-registers ``fb_con`` again -- no userspace action can bind the console, and
-/sys/class/vtconsole keeps only the dummy device.
+``mdss_fb_open()`` (mdss_fb.c:2864) runs ``pm_runtime_get_sync()`` and, while
+``mfd->ref_cnt`` is 0 -- exactly the case while ``mdss_fb_probe()`` is still
+inside ``mdss_fb_register()`` -- ``mdss_fb_blank_sub(FB_BLANK_UNBLANK)``. The
+refusal is fatal rather than merely annoying: ``do_register_con_driver()``
+(vendor vt.c:3604) calls ``con_startup()`` once and sets CON_DRIVER_FLAG_INIT
+there, so after one refusal *nothing* ever registers ``fb_con`` again, and
+/sys/class/vtconsole keeps only the dummy device. That is why runs up to #33 had
+no way to show boot text.
 
-The failed fix (runs #35-#38). ``console-ramoops`` of a boot-looped LATEBIND
-boot ends mid-probe::
+What each experiment actually did:
 
-    [    1.042290] mdss_register_panel: adding framebuffer device soc:qcom,mdss_wb_panel
-    [    1.043259] mdss_fb_probe: fb0: split_mode:0 left:0 right:0
-    <no further record, no oops, no panic>
+  * #35, #36: call ``fb_open()``, ignore its return value. Boot-loop.
+  * #37, #38: same, plus ``fbcon=late`` to move the *takeover* to
+    late_initcall(). Boot-looped identically, because the takeover that
+    ``register_framebuffer()`` triggers from the FB_EVENT_FB_REGISTERED notifier
+    was never suppressed in those images -- the gating hunk only appeared in #39.
+  * #39: intended "skip the call and suppress the registration takeover". What it
+    really shipped was (a) the call still made, because ``fb_open()`` sits in the
+    ``if`` *condition* and only the refusal was made conditional, and (b) the
+    registration-time takeover left enabled for the default command line, because
+    renaming the flag inverted the sense of ``!flag``. So #39 was the first image
+    that bound the console *inside* probe with the panel half-initialised -- and
+    it died exactly where the others did: console-ramoops of the #39 boot ends at
+    ``[ 1.073138 ] mdss_fb_probe: fb0: split_mode:0 left:0 right:0`` with cmdline
+    ``fbcon=map:0,scrollback:256k`` (no ``,late``, so the flash had taken), no
+    ``Console: switching``, no oops. Silent, i.e. a watchdog reset, which fits a
+    deadlock rather than a fault.
 
-with ``fbcon=map:0,scrollback:256k,late`` on its own command line, and with no
-"fbcon: fb_open refused" marker and no "Console: switching" line anywhere in the
-buffer. That pins the death to the takeover ``register_framebuffer()`` triggers
-(fbmem.c:1695 takes console_lock() and notifies fbcon) and, inside it, to the
-``fb_open()`` call: the marker sat *after* that call, so its absence means
-``mdss_fb_open()`` never returned. "fbcon=late" itself cannot be what killed it
--- the boot arg only moves *when* the bind is taken over -- so the earlier
-conclusion "binding from an initcall is fatal by itself" is not supported by
-this log; the unconditional open is, and #35 through #38 all died the same way.
+Two things that log does *not* say, and I previously claimed it did: it does not
+prove ``mdss_fb_open()`` never returned (its success path prints nothing at all,
+so a missing marker cannot tell "returned 0" from "hung"), and the final line is
+a coarse marker only -- ``mdss_fb_probe()`` prints it a dozen statements before
+``mdss_fb_register()`` with no output in between. What it does establish is that
+binding the console while the framebuffer is being registered reboots this board,
+whatever the veto returns, in every variant tried so far.
 
-What this patch therefore does:
+The untested shape, and the point of this patch: do not call ``fb_open()`` at all
+(its return value is not the problem -- evaluating it is), do not take the console
+over during registration, and bind once from ``late_initcall()``, i.e. after
+``mdss_fb_probe()`` has run ``mdp.init_fnc()``. That is the closest kernel-side
+approximation of the only bind ever proven on this phone, which was done from
+userspace while X held fb0 (``FBIOPUT_CON2FBMAP`` -> 0, ``vtcon1 (M)``, ``bind 1``).
 
-  * the failing ``fb_open()`` is *skipped*, not merely ignored, so mdss_fb_open()
-    is never entered from the registration path; fbcon_startup() then returns
-    normally and fb_con stays registered;
-  * the takeover that ``fbcon_fb_registered()`` performs at registration time is
-    suppressed by default, and done instead at late_initcall(), after
-    mdss_fb_probe() has returned. That is the persistent fix and it needs no
-    boot argument; "fbcon=late" selects the *old* behaviour (open called, bind
-    refused) and is what boot-latebind.img now carries, as a control group;
-  * the late bind is still not a proven-safe takeover: at late_initcall nobody
-    owns fb0, so an fb_open() there would run the same blank path. The only bind
-    ever proven on this board ran while X held fb0 (ref_cnt != 0, blank path
-    skipped). Calling fbcon_init()/mdss_fb_set_par() on a panel the boot loader
-    handed over is the open question this run has to answer;
-  * fbcon_exit()'s close is harmless in the skip case: mdss_fb_release_all()
-    returns -EINVAL while ref_cnt is 0 ("try to close unopened fb %d"), so no
-    panel power transition is issued from the console side either way.
+Deferred by default, so boot.img carries the fix with no boot argument to
+remember. ``fbcon=veto`` restores the vendor behaviour and is what boot-veto.img
+ships as the control group; ``fbcon=late`` is still accepted and means "defer",
+for the cmdlines #37/#38 used. fbcon_exit()'s close stays harmless:
+mdss_fb_release_all() returns -EINVAL while ref_cnt is 0, so no panel power
+transition is issued from the console side either way.
 
-Careful with "vendor text is gone" checks: ``module_put(owner); return NULL;``
-also appears in the kzalloc failure path four lines below, and there is a second
-``fbops->fb_open`` call site in fbcon_pick_variant() at line 704 that must NOT be
-touched. So each hunk carries a `probe` instead -- a string unique in the whole
-file whose exact occurrence count proves the edit landed.
-
-The printk next to the skip is the on-device proof that a bind really went
-through this path -- it can only be reached after fb_open() returned an error --
-which is why it must end its line properly (runs #35/#36 emitted a doubled
-escape and merged the message into the next one).
+Each hunk carries a `probe` -- a string unique in the file whose exact count
+proves the edit landed. Do not replace that with "the original text must be gone":
+``module_put(owner); return NULL;`` also ends the kzalloc failure path four lines
+below the veto, and there is a second ``fbops->fb_open`` call site in
+fbcon_pick_variant() (line 704) that must not be touched.
 
 Idempotent: re-running the helper on an already patched tree changes nothing.
 """
@@ -76,13 +75,11 @@ import sys
 from pathlib import Path
 
 MARKER = 'pmos-j4primelte:'
+FLAG = 'fbcon_defer_bind'
 RELATIVE = Path('drivers') / 'video' / 'console' / 'fbcon.c'
 
 # (old, new, probe) triples, applied in order. Every `old` must appear exactly
-# once before and exactly `probe.count` times after; `new` must contain `old`
-# whole or not at all -- it may not leave `old` sitting inside itself as a
-# substring, which would make an absence check meaningless (that is how the
-# module_put()/return NULL pair from the veto reached the kzalloc path).
+# once; after the whole set, every probe must count exactly what it declares.
 VETO_ORIGINAL = (
     "\tif (info->fbops->fb_open && info->fbops->fb_open(info, 0)) {\n"
     "\t\tmodule_put(owner);\n"
@@ -91,102 +88,102 @@ VETO_ORIGINAL = (
 )
 
 HUNKS = [
-    # 1. The veto, skipped by default. "fbcon=late" re-enables it via hunk 2,
-    #    which is what the previous images did and what the log convicted.
-    (
-        VETO_ORIGINAL,
-        "\tif (info->fbops->fb_open && info->fbops->fb_open(info, 0)) {\n"
-        "\t\t/* pmos-j4primelte: mdss_fb_open() power-cycles the panel while\n"
-        "\t\t * no owner holds the framebuffer, which is exactly the case\n"
-        "\t\t * inside mdss_fb_probe()'s register_framebuffer(); calling it\n"
-        "\t\t * from here hung the board mid-probe (console-ramoops of the\n"
-        "\t\t * boot-looped run ends at \"mdss_fb_probe: fb0: split_mode\", with\n"
-        "\t\t * no oops and no marker line, i.e. the call never returned).\n"
-        "\t\t * Skip it and take the console over at late_initcall() below.\n"
-        "\t\t */\n"
-        "\t\tprintk(KERN_INFO \"fbcon: fb%i open refused by driver, skipping it and binding at late init\\n\", info->node);\n"
-        "\t\t/* \"fbcon=late\" keeps the vendor refusal, i.e. no bind at all;\n"
-        "\t\t * see the gate in fbcon_fb_registered(), where the flag lives;\n"
-        "\t\t * without \"late\" the block falls through and fb_con registers. */\n"
-        "\t\tif (fbcon_late_refusal) {\n"
-        "\t\t\tmodule_put(owner);\n"
-        "\t\t\treturn NULL;\n"
-        "\t\t}\n"
-        "\t}\n",
-        ('fbcon: fb%i open refused by driver', 1),
-    ),
-    # 2. "fbcon=late" is what keeps the old, fatal path reachable: with it,
-    #    fbcon_fb_registered() still takes over from the FB_EVENT_FB_REGISTERED
-    #    notifier, i.e. inside mdss_fb_probe(). Without it, that takeover is
-    #    suppressed and only the deferred one runs.
-    (
-        "\t\tif (info_idx != -1)\n"
-        "\t\t\tret = do_fbcon_takeover(1);\n",
-        "\t\tif (info_idx != -1 && !fbcon_late_refusal)\n"
-        "\t\t\tret = do_fbcon_takeover(1);\n",
-        ('info_idx != -1 && !fbcon_late_refusal', 1),
-    ),
-    # 3. Declaration for the new fbcon= option, next to the other globals the
-    #    parser writes. Anchored on fbcon_has_console_bind because the line
-    #    above it ends in a trailing space in this tree.
+    # 1. The gate, on by default: the fix must not depend on a boot argument,
+    #    and it lives in the same place as the other parser-written globals.
     (
         "static int fbcon_has_console_bind;\n",
         "static int fbcon_has_console_bind;\n"
-        "static int fbcon_late_refusal;\n",
-        ('static int fbcon_late_refusal;', 1),
+        "/* pmos-j4primelte: bind at late_initcall() instead of during\n"
+        " * register_framebuffer(); \"fbcon=veto\" puts the vendor behaviour back. */\n"
+        "static int " + FLAG + " = 1;\n",
+        ('static int ' + FLAG + ' = 1;', 1),
     ),
-    # 4. The option, inside the existing fbcon= parser loop (the loop returns
-    #    1 for unknown tokens, so the option is inert if this hunk is ever
-    #    dropped -- see the build guard in build-kernel.sh).
+    # 2. Options, inside the existing fbcon= parser loop. The loop returns 1 for
+    #    unknown tokens, so a dropped hunk here means the option is inert -- which
+    #    is why build-kernel.sh greps for the token too.
     (
         "\t\tif (!strncmp(options, \"map:\", 4)) {\n",
+        "\t\tif (!strcmp(options, \"veto\")) {\n"
+        "\t\t\t" + FLAG + " = 0;\n"
+        "\t\t\tcontinue;\n"
+        "\t\t}\n"
         "\t\tif (!strcmp(options, \"late\")) {\n"
-        "\t\t\tfbcon_late_refusal = 1;\n"
+        "\t\t\t" + FLAG + " = 1;\n"
         "\t\t\tcontinue;\n"
         "\t\t}\n"
         "\n"
         "\t\tif (!strncmp(options, \"map:\", 4)) {\n",
-        ('!strcmp(options, "late")', 1),
+        ('!strcmp(options, "veto")', 1),
     ),
-    # 5. The deferred takeover. Registration already left fb_con registered and
-    #    con2fb_map set by the map: override, and do_take_over_console()
-    #    tolerates the -EBUSY from that registration, so all that is missing is
-    #    the bind -- done once mdss_fb_probe() returned and before init runs, so
-    #    the boot messages still land on the panel.
+    # 3. The veto. The flag branch comes first so that "defer" cannot evaluate
+    #    the call at all; the vendor condition is reused verbatim as the else-if
+    #    so that "veto" is byte-for-byte the vendor code. #39 instead left the
+    #    condition line alone and guarded only the body, so it still called it.
+    (
+        VETO_ORIGINAL,
+        "\t/* pmos-j4primelte: mdss_fb_open() power-cycles the panel while no\n"
+        "\t * owner holds the framebuffer, which is the case inside\n"
+        "\t * mdss_fb_probe()'s register_framebuffer(), and the bind that the\n"
+        "\t * FB_EVENT_FB_REGISTERED notifier runs then reaches mdss_fb_set_par()\n"
+        "\t * before mdp.init_fnc() has. Every image that bound from here rebooted\n"
+        "\t * silently (console-ramoops of #35-#39 all end at \"mdss_fb_probe:\n"
+        "\t * fb0: split_mode\"). So: do not call fb_open() here, and let the\n"
+        "\t * deferred takeover below do the bind once probing is over. */\n"
+        "\tif (" + FLAG + ") {\n"
+        "\t\tprintk(KERN_INFO \"fbcon: fb%i not opened here, bind deferred to late init\\n\", info->node);\n"
+        "\t} else if (info->fbops->fb_open && info->fbops->fb_open(info, 0)) {\n"
+        "\t\tmodule_put(owner);\n"
+        "\t\treturn NULL;\n"
+        "\t}\n",
+        ('fbcon: fb%i not opened here', 1),
+    ),
+    # 4. Suppress the takeover that fbcon_fb_registered() performs from the
+    #    notifier. This is the hunk #37 and #38 were missing.
+    (
+        "\t\tif (info_idx != -1)\n"
+        "\t\t\tret = do_fbcon_takeover(1);\n",
+        "\t\tif (info_idx != -1 && !" + FLAG + ")\n"
+        "\t\t\tret = do_fbcon_takeover(1);\n",
+        ('info_idx != -1 && !' + FLAG, 1),
+    ),
+    # 5. The deferred bind. fb_con is registered (hunk 3 let startup succeed) and
+    #    con2fb_map is already set by the map: override, and do_take_over_console()
+    #    tolerates the -EBUSY of that earlier registration, so all that is missing
+    #    is the bind. Before init, so the boot messages still land on the panel.
     (
         "module_init(fb_console_init);\n",
         "#ifndef MODULE\n"
         "/* pmos-j4primelte: bind the console once the display driver has\n"
-        " * finished probing instead of from inside register_framebuffer().\n"
-        " * Runs in every image: a refused fb_open() at registration time\n"
-        " * otherwise leaves fb_con forever unbound, and this call is late\n"
-        " * enough that mdss_fb_probe() has returned. */\n"
-        "static int __init fbcon_bind_late_takeover(void)\n"
+        " * finished probing. No-op with \"fbcon=veto\". */\n"
+        "static int __init fbcon_deferred_takeover(void)\n"
         "{\n"
+        "\tif (!" + FLAG + ")\n"
+        "\t\treturn 0;\n"
         "\tconsole_lock();\n"
         "\tif (!con_is_bound(&fb_con))\n"
         "\t\tdo_fbcon_takeover(0);\n"
         "\tconsole_unlock();\n"
         "\treturn 0;\n"
         "}\n"
-        "late_initcall(fbcon_bind_late_takeover);\n"
+        "late_initcall(fbcon_deferred_takeover);\n"
         "#endif /* !MODULE */\n"
         "\n"
         "module_init(fb_console_init);\n",
-        ('late_initcall(fbcon_bind_late_takeover);', 1),
+        ('late_initcall(fbcon_deferred_takeover);', 1),
     ),
 ]
 
 # fbcon_startup() ends with exactly two refusals in the pinned tree: the veto's
-# module_put()/return NULL pair and the identical pair in the kzalloc failure
-# path right below it. After patching the first one only moves inside an
-# "if (!fbcon_late_refusal)" branch, so the total may not change -- and since it was
-# 2 before the patch too, this doubles as proof that no hunk deleted or
-# duplicated a refusal. The polarity matters more than the count: a refusal on
-# the *else* side of that condition would fire on every successful fb_open()
-# and leave the panel dark forever, which no structural check would notice, so
-# test-kernel-fbcon.py pins the shape of the block instead.
-OPENS_EXPECTED = 1
+# module_put()/return NULL pair and the identical pair in the kzalloc failure path
+# right below it. Neither may move. Two also proves no hunk duplicated a refusal.
+REFUSALS_EXPECTED = 2
+
+# One per role: declaration, the two parser assignments, the veto branch, the
+# takeover gate, the deferred bind's own guard.
+FLAG_REFS_EXPECTED = 6
+
+# Three hunks carry the stamp comment (the gate, the veto, the deferred bind).
+MARK_STAMPS = 3
 
 # The hunk whose absence must abort the build.
 PRIMARY = VETO_ORIGINAL
@@ -201,10 +198,10 @@ def probes_present(text):
 
 
 def is_patched(tree):
-    """(all five replacement texts present, every probe counting exactly right)."""
+    """(all five replacement texts present and counted right, stamp lines right)."""
     text = fbcon_path(tree).read_text()
-    stamped = all(new in text for _, new, _ in HUNKS)
-    return stamped and probes_present(text), text.count(MARKER) == 2
+    stamped = all(new in text for _, new, _ in HUNKS) and probes_present(text)
+    return stamped, text.count(MARKER) == MARK_STAMPS
 
 
 def apply(tree):
@@ -213,9 +210,6 @@ def apply(tree):
     if not path.is_file():
         raise SystemExit('kernel-fbcon: %s missing; is this the pinned tree?' % path)
     text = path.read_text()
-    # Counted before any replacement: the file must end with exactly as many
-    # real fb_open() call sites as it started with (we skip the call inside
-    # fbcon_startup(), we do not add or delete one).
     opens_before = text.count('fbops->fb_open(info, 0)')
     if all(new in text for _, new, _ in HUNKS):
         if not probes_present(text):
@@ -232,33 +226,36 @@ def apply(tree):
             raise SystemExit('kernel-fbcon: hunk %d appears %d times, expected 1'
                              % (index + 1, found))
         text = text.replace(old, new, 1)
-    # The consw wiring is what makes this patch the whole story; if fb_con no
-    # longer names fbcon_startup, this helper is patching the wrong thing.
     if not re.search(r'\.con_startup\s*=\s*fbcon_startup', text):
         raise SystemExit('kernel-fbcon: fb_con no longer wires con_startup '
                          'to fbcon_startup; refusing')
-    # A silent loss of any one gate reference restores the behaviour that
-    # boot-looped #35-#38, so demand all four roles the flag appears in:
-    # declaration, parser assignment, veto refusal, takeover gate. (The deferred
-    # takeover carries its own name, not the flag: it must run in every image.)
-    refs = text.count('fbcon_late_refusal')
-    if refs < 4:
-        raise SystemExit('kernel-fbcon: the late-bind flag is referenced %d '
-                         'times, expected at least 4; refusing to write' % refs)
-    if text.count('module_put(owner);') != OPENS_EXPECTED + 1:
-        raise SystemExit('kernel-fbcon: module_put(owner) now appears %d times, '
-                         'expected %d; a hunk swallowed the wrong block'
-                         % (text.count('module_put(owner);'), OPENS_EXPECTED + 1))
+    # The polarity checks. A build that shipped the opposite sense of any of
+    # these is what #39 was, and no string-only test caught it, so the shapes
+    # below are asserted as well as the counts.
+    refs = text.count(FLAG)
+    if refs != FLAG_REFS_EXPECTED:
+        raise SystemExit('kernel-fbcon: the defer flag is referenced %d times, '
+                         'expected %d; refusing to write' % (refs, FLAG_REFS_EXPECTED))
+    if 'static int ' + FLAG + ' = 1;' not in text:
+        raise SystemExit('kernel-fbcon: the defer flag is not on by default, which '
+                         'would leave boot.img with a dark panel like #33; refusing')
+    if '\tif (' + FLAG + ') {\n' not in text:
+        raise SystemExit('kernel-fbcon: fb_open() is not behind the defer branch, '
+                         'so the call still happens during probe; refusing')
     if text.count('fbops->fb_open(info, 0)') != opens_before:
         raise SystemExit('kernel-fbcon: the number of fb_open() call sites moved '
                          'from %d to %d; this patch adds and removes none'
                          % (opens_before, text.count('fbops->fb_open(info, 0)')))
+    if text.count('module_put(owner);') != REFUSALS_EXPECTED:
+        raise SystemExit('kernel-fbcon: module_put(owner) now appears %d times, '
+                         'expected %d; a hunk swallowed the wrong block'
+                         % (text.count('module_put(owner);'), REFUSALS_EXPECTED))
     path.write_text(text)
     stamped, stamped_two = is_patched(tree)
     if not stamped or not stamped_two:
         raise SystemExit('kernel-fbcon: patch did not stick')
-    print('kernel-fbcon: fb_open skipped, takeover deferred to late_initcall() '
-          '("fbcon=late" restores the old behaviour as the control group)')
+    print('kernel-fbcon: fb_open() not called at registration, bind deferred to '
+          'late_initcall() ("fbcon=veto" restores the vendor behaviour)')
     return 'patched'
 
 

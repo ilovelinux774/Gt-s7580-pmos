@@ -115,86 +115,63 @@ the boot header change; the kernel and ramdisk payloads stay byte-identical.
   boots normally and does not stop in the initramfs. It is only meaningful in a
   build where `CONFIG_SLUB_DEBUG=y` (asserted by `build-kernel.sh` from run #36
   on); in run #35 the argument is parsed away and nothing is checked.
-- `boot-latebind.img`: identical payload, with `,late` substituted into the existing
-  `fbcon=` argument (`fbcon=map:0,scrollback:256k,late`). From run #39 on this is
-  the **control group, not the fix**: `,late` selects the old behaviour (call
-  `mdss_fb_open()` from inside `register_framebuffer()`, refuse the bind), which
-  is what boot-looped #35-#38. `boot.img` is the one that carries the fix.
-- `boot-latebind-slabdebug.img`: the late bind **and** the allocator traps at once
-  (`fbcon=map:0,scrollback:256k,late` + `slub_debug=FZPU,U panic_on_oops=0`). This
-  is the diagnostic image: it is the only one that can answer "does binding the
-  console corrupt memory" without also changing whether the desktop runs.
+- `boot-veto.img`: identical payload, with `,veto` substituted into the existing
+  `fbcon=` argument (`fbcon=map:0,scrollback:256k,veto`). This is the **control
+  group, not the fix**: it puts the vendor veto back, so the console is never bound
+  (dark during boot, like run #33) and the panel is never touched from fbcon.
 - `image-info.json`: actual sizes and boot-header validation results.
 
-### Boot text: the veto, and where the bind is allowed to happen
+### Boot text: the veto, and why the bind has to move out of probe
 
-With `CONFIG_FRAMEBUFFER_CONSOLE=y` the panel stayed dark until the display
-server started, because `fbcon_startup()` asks the driver for permission via
-`fb_open()` and Samsung's `mdss_fb_open()` runs its unblank path whenever no
-owner holds the framebuffer (`mfd->ref_cnt == 0`) -- which is exactly the case
-while `mdss_fb_probe()` is still registering it. The refusal is fatal rather
-than merely annoying: the vendor `vt.c` consumes `con_startup()` from
-`do_register_con_driver()`, so after one refusal nothing in userspace can bind
-fbcon again.
+With `CONFIG_FRAMEBUFFER_CONSOLE=y` the panel stays dark until the display server
+starts, because `fbcon_startup()` asks the driver for permission via `fb_open()`
+and Samsung's `mdss_fb_open()` (mdss_fb.c:2864) runs its unblank path whenever no
+owner holds the framebuffer (`mfd->ref_cnt == 0`) -- exactly the case while
+`mdss_fb_probe()` is still registering it. The refusal is final, not merely
+annoying: the vendor `vt.c` consumes `con_startup()` inside
+`do_register_con_driver()` and sets `CON_DRIVER_FLAG_INIT` there, so after one
+refusal nothing in userspace can bind fbcon again (`/sys/class/vtconsole` keeps
+only the dummy device, and `FBIOPUT_CON2FBMAP` from a shell then has no driver to
+bind).
 
-Run #35 removed that veto. It was the right diagnosis and a dangerous patch:
-the bind then *ran* the unblank path, power-cycling a panel the boot loader
-still owned. Symptom on an SM-J415F: Samsung logo, black, backlight with no
-content, immediate reboot, repeated. `pstore` does record that: the board resets
-without an oops, but `console-ramoops` in `/sys/fs/pstore` survives a warm reset,
-so recovery can read the last boot's log. (`dmesg-ramoops-0` next to it is a
-binary dump; parse the `console-` record.) Pull it *before* reflashing.
+What the five attempts measured, all read out of `pstore` rather than guessed:
 
-Reading it is what corrected the diagnosis. A latebind boot died at
-`[ 1.043259 ]` on the line `mdss_fb_probe: fb0: split_mode:0 left:0 right:0` --
-not 25 s later, not at `late_initcall()`, and with neither the patch's own
-marker line nor a `Console: switching` line anywhere in the buffer, which means
-`mdss_fb_open()` never returned. The boot argument only moves *when the bind is
-taken over*; the fatal call is made by the takeover that
-`register_framebuffer()` triggers, so runs #35 through #38 were all hanging on
-the same `fb_open()`, and deferring it changed nothing.
+| run | what the kernel did | result |
+|---|---|---|
+| #33 | veto kept | boots, no boot text (the safe baseline) |
+| #35, #36 | `fb_open()` called, error ignored | reboot; `console-ramoops` ends at `mdss_fb_probe: fb0: split_mode` |
+| #37, #38 | same, plus `fbcon=late` to bind at `late_initcall()` | same death, same line, ~1.04 s -- the gating hunk was never in those images, so the notifier still bound during probe |
+| #39 | intended "skip the call, suppress the notifier takeover" | same death at 1.073 s. It did neither: the call sits in the `if` *condition*, so guarding only the body still called it, and renaming the flag inverted the sense of `!flag`, so the default cmdline kept the registration-time takeover |
 
-The patch therefore *skips* the call instead of ignoring its result, in every
-image, and takes the console over at `late_initcall()` -- after
-`mdss_fb_probe()` returned, before `init` runs, so boot messages reach the panel.
-`fbcon=late` now means the opposite of what it meant in #37/#38: it puts the
-refusal back, and `boot-latebind.img` is kept only as the control that is
-expected to go on boot-looping. If the fix ever misbehaves, flash back
-run #37's plain `boot.img` (`3ba9fa06e0d410dbd2e1f8e700090ab1eebc68f491a40dcfde53d805373ae80e`),
-which is the image that was verified to reach OpenRC on this phone.
+So "binding while `register_framebuffer()` is running" is the variable that kills
+this board, in every shape tried, and the log also corrected two of my own
+over-readings: `mdss_fb_open()` prints nothing on success, so an absent marker
+line cannot prove the call hung; and `mdss_fb_probe()` prints that final line a
+dozen statements before `mdss_fb_register()`, so it marks the region, not the
+function. A silent end-of-log with no oops fits a deadlock (probe holds
+`console_lock` across the notifier) far better than a fault.
 
-What this run has to answer is whether the *deferred* bind is safe at all: at
-`late_initcall()` nobody owns fb0 either, so a `fb_open()` there would run the
-same blank path -- we simply do not call it. `fbcon_init()` then reaches
-`mdss_fb_set_par()` on a panel the boot loader handed over, which is the piece
-never exercised in this shape. The hand bind that worked had X holding fb0
-(`ref_cnt != 0`, blank path skipped), so if the deferred bind still dies, the
-conclusion is that the bind must wait for a userspace owner, not for a later
-initcall -- and `FBIOPUT_CON2FBMAP` from a service ordered `after tinydm` is
-where the work moves.
+The patch therefore defers the bind rather than negotiating with the veto: at
+registration time `fb_open()` is not evaluated at all and the takeover is
+suppressed, and the bind is done once from `late_initcall()`, after
+`mdss_fb_probe()` has run `mdp.init_fnc()`. Deferred **by default** in the
+compiled kernel, so `boot.img` carries the fix and there is no boot argument to
+remember; `fbcon=veto` selects the vendor behaviour and is what `boot-veto.img`
+ships, which makes the comparison a single-variable one (same kernel, same
+ramdisk, same DTB, one token). The unproven part, which this run is designed to
+answer: at `late_initcall()` nobody owns fb0 yet, so unlike the hand bind that
+worked on-device (`ref_cnt != 0`, blank path skipped) the deferred bind will run
+`fbcon_init()` -> `mdss_fb_set_par()` on a panel the boot loader handed over. If
+that is fatal too, the conclusion is that the bind must wait for a userspace owner
+and moves to a service ordered `after tinydm` -- not to another initcall.
 
-Second thing the log said, and it is not about fbcon: the board is fed by the
-`s2mu005` PMIC watchdog, enabled at `[ 2.255376 ]` on a healthy boot, and the
-only userspace service in the capture that survives it is `sleep-inhibitor`
-(`openrc-status.txt`: started, 00:00:01). A boot that never reaches it -- or a
-runlevel the user trimmed while testing -- gets a *hardware* reset tens of
-seconds later with no oops and nothing in pstore. That is the honest
-explanation for "reboots about 25 s in" on images whose only other change was
-removing services from `/etc/runlevels/default`, so do not read those deaths as
-kernel faults, and do not trim the runlevel while testing boot behaviour.
-
-Measured on-device, so far: a hand bind while the display server owned fb0
-produced `vtcon1 (M) frame buffer device` with `bind 1` and no hang -- in that
-context `mfd->ref_cnt` is non-zero, so `mdss_fb_open()` skips its blank path
-entirely. That is the shape `late_initcall()` tries to imitate, and it is why the
-deferred takeover is still the one live idea here. Two facts had been read as
-warnings and are not: the first kernel fault in that session appeared 1,533 s
-(about 25 min) *later* and came from the poisoned per-cpu freelist head, not from
-the console; and run #36 rebooted 25 s in with the display service removed, which
-only shows the crash did not need the desktop. Removing both `tinydm` and
-`j4-x-sysfs` from the default runlevel on the phone did **not** stop the crash,
-which is also why `j4-x-sysfs` is innocent: it only bind-mounts and symlinks
-inside `/sys`, it cannot write kernel memory.
+Two measurement traps, both already paid for. `pstore` survives a warm reset, so
+recovery can read the previous boot's `console-ramoops`; pull it **before**
+reflashing, and ignore `dmesg-ramoops-0` (binary, no timestamps). And the s2mu005
+PMIC watchdog is enabled ~2.25 s into a healthy boot with `sleep-inhibitor` the
+only userspace service keeping it quiet, so trimming `/etc/runlevels/default`
+while testing produces a silent reset tens of seconds later that looks exactly
+like a kernel fault -- `tinydm`, `j4-x-sysfs` and the rest stay where they are.
 
 
 **Recovery confirmed: OrangeFox.** No automatic flashing script is supplied. The
