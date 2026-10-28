@@ -51,15 +51,17 @@ slub[608:1632] = slub_cmd[512:].ljust(1024, b'\0')
 assert slub[page:] == boot[page:], 'Slab-debug image payload changed'
 (folder / 'boot-slabdebug.img').write_bytes(slub)
 
-# A fourth variant for the boot text. The kernel carries the fbcon patch in
-# every image now (the veto is gone, so vtcon1 survives a refused bind), but
-# binding *during* register_framebuffer() is what boot-looped run #35:
-# mdss_fb_open() powers the panel up a second time while the boot loader still
-# owns it. "fbcon=late" moves the takeover to late_initcall(), i.e. after the
-# display driver is completely up -- the context the bind was proven in by hand
-# on this phone. Appending a token to fbcon= cannot be done by tacking bytes
-# onto the cmdline, because the whole string is one __setup() argument: it has
-# to be substituted inside it, and the substitution must be asserted.
+# A fourth variant, now the CONTROL group rather than the fix. The kernel patch
+# skips mdss_fb_open() and binds at late_initcall() by default; appending
+# "late" to fbcon= is what puts the old behaviour back -- takeover from the
+# FB_EVENT_FB_REGISTERED notifier, which pstore pinned at 1.04 s inside
+# mdss_fb_probe() with the marker line never printed, i.e. never returning from
+# the fb_open() call. So this image is expected to keep boot-looping, and it
+# exists only to prove that the difference between it and boot.img is the bind
+# point and nothing else.
+# Appending a token to fbcon= cannot be done by tacking bytes onto the cmdline,
+# because the whole string is one __setup() argument: it has to be substituted
+# inside it, and the substitution must be asserted.
 late_cmd = cmd.replace(b'fbcon=map:0,scrollback:256k',
                        b'fbcon=map:0,scrollback:256k,late')
 assert late_cmd != cmd, ('the base cmdline no longer carries the exact fbcon= '
