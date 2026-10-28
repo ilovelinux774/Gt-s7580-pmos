@@ -119,6 +119,10 @@ the boot header change; the kernel and ramdisk payloads stay byte-identical.
   `fbcon=` argument (`fbcon=map:0,scrollback:256k,late`). This is the boot-text
   image: the kernel patch is in every image, but only this one asks fbcon to bind
   at `late_initcall()` instead of from inside `register_framebuffer()`.
+- `boot-latebind-slabdebug.img`: the late bind **and** the allocator traps at once
+  (`fbcon=map:0,scrollback:256k,late` + `slub_debug=FZPU,U panic_on_oops=0`). This
+  is the diagnostic image: it is the only one that can answer "does binding the
+  console corrupt memory" without also changing whether the desktop runs.
 - `image-info.json`: actual sizes and boot-header validation results.
 
 ### Boot text: why there are two variants
@@ -145,6 +149,18 @@ was proven by hand on the device (`FBIOPUT_CON2FBMAP` returning 0 while the
 panel was already scanning out, yielding `vtcon1 (M) frame buffer device` with
 `bind 1`). `boot.img` in #37 has the same cmdline as run #33, so it is a safe
 image to have on hand; if a late bind ever misbehaves, flash `boot.img`.
+
+Measured on-device, so far: a hand bind while the display server owned fb0
+produced `vtcon1 (M) frame buffer device` with `bind 1` and no hang, and the
+first kernel fault appeared 1,533 s (about 25 min) *later* in that same
+session - the poisoned per-cpu freelist head that then killed init. Run #36
+(a bind-less image, but with `CONFIG_SLUB_DEBUG` compiled in) rebooted about
+25 s in with the display service removed from the default runlevel, so the
+timing cannot be blamed on the session. Run #37's plain `boot.img`, which drops
+the veto but never binds, reached OpenRC on the same rootfs. The one variable
+left is the bind itself, and `boot-latebind-slabdebug.img` is how to flip it
+once: `FZPU,U` reports the offending write at the site that made it, and
+`panic_on_oops=0` keeps the machine alive long enough to record it.
 
 
 **Recovery confirmed: OrangeFox.** No automatic flashing script is supplied. The

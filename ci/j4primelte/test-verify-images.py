@@ -78,7 +78,8 @@ class RepackTest(unittest.TestCase):
     def test_all_variants_keep_the_payload_byte_identical(self):
         self.assertEqual(self.build().returncode, 0)
         boot = (self.tmp / 'boot.img').read_bytes()
-        for name in ('boot-debug.img', 'boot-slabdebug.img', 'boot-latebind.img'):
+        for name in ('boot-debug.img', 'boot-slabdebug.img', 'boot-latebind.img',
+                     'boot-latebind-slabdebug.img'):
             image = (self.tmp / name).read_bytes()
             self.assertEqual(len(image), len(boot), name)
             self.assertEqual(image[PAGE:], boot[PAGE:],
@@ -102,6 +103,15 @@ class RepackTest(unittest.TestCase):
                          'late bind must extend the existing fbcon= argument')
         self.assertNotIn('slub_debug', late)
         self.assertNotIn('pmos.debug-shell', late)
+        comb = read_cmdline((self.tmp / 'boot-latebind-slabdebug.img').read_bytes())
+        # The combined image is the single-variable test: bind + allocator
+        # traps, nothing else. Both halves must be present or the experiment
+        # measures the wrong thing.
+        self.assertIn('fbcon=map:0,scrollback:256k,late', comb)
+        self.assertIn('slub_debug=FZPU,U panic_on_oops=0', comb)
+        self.assertNotIn('pmos.debug-shell', comb)
+        self.assertEqual(comb.count('fbcon='), 1)
+        self.assertEqual(comb, late + ' slub_debug=FZPU,U panic_on_oops=0')
         # The debugging images must stay distinguishable from each other: the
         # slab one has to boot all the way to the desktop to be useful.
         self.assertNotIn('pmos.debug-shell', slub)
@@ -119,6 +129,7 @@ class RepackTest(unittest.TestCase):
         report = json.loads((self.tmp / 'image-info.json').read_text())
         self.assertIn('slub_debug=FZPU', report['slubdebug_cmdline'])
         self.assertIn('scrollback:256k,late', report['latebind_cmdline'])
+        self.assertIn('slub_debug=FZPU,U', report['latebind_slubdebug_cmdline'])
         self.assertIn('pmos.debug-shell', report['debug_cmdline'])
         self.assertNotIn('slub_debug', report['cmdline'])
         self.assertNotIn(',late', report['cmdline'])

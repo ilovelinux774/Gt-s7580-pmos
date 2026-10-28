@@ -73,6 +73,22 @@ late[608:1632] = late_cmd[512:].ljust(1024, b'\0')
 assert late[page:] == boot[page:], 'Late-bind image payload changed'
 (folder / 'boot-latebind.img').write_bytes(late)
 
+# The one-image version of the two-step experiment: bind the console at
+# late_initcall AND keep the allocator's own traps armed, so a corruption
+# caused by the bind reports itself instead of killing init 25 minutes later.
+# panic_on_oops=0 matters as much as FZPU here: without it the first victim
+# (usually Xorg) takes the box down before the trap on the writing site is
+# ever reached. U adds the user-space redzone check, which is what tells us
+# whether anything lands in the tail past fbcon's softback_end.
+combined_cmd = late_cmd + b' slub_debug=FZPU,U panic_on_oops=0'
+assert len(combined_cmd) < 1536, 'Boot cmdline too long'
+assert b'pmos.debug-shell' not in combined_cmd, 'combined image must boot normally'
+combined = bytearray(boot)
+combined[64:576] = combined_cmd[:512].ljust(512, b'\0')
+combined[608:1632] = combined_cmd[512:].ljust(1024, b'\0')
+assert combined[page:] == boot[page:], 'Combined image payload changed'
+(folder / 'boot-latebind-slabdebug.img').write_bytes(combined)
+
 rootfs = folder / 'rootfs.img'
 with rootfs.open('rb') as f:
     f.seek(1080)
@@ -92,6 +108,7 @@ report = {
     'debug_cmdline': debug_cmd.decode(),
     'slubdebug_cmdline': slub_cmd.decode(),
     'latebind_cmdline': late_cmd.decode(),
+    'latebind_slubdebug_cmdline': combined_cmd.decode(),
     'payload_sha256': hashlib.sha256(boot[page:]).hexdigest(),
     'boot_partition_size_verified_on_phone': False,
 }
