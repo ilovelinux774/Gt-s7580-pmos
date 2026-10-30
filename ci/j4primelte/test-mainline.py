@@ -45,6 +45,7 @@ def load(module_name: str, filename: str):
 
 
 repack = load('j4_repack', 'mainline-repack-boot.py')
+payload_builder = load('j4_payload', 'mainline-payload.py')
 config = load('j4_config', 'mainline-config.py')
 staging = load('j4_staging', 'mainline-kernel.py')
 verify = load('j4_verify', 'verify-mainline.py')
@@ -53,9 +54,9 @@ donor = load('j4_donor_note', 'donor-note.py')
 DTB_MAGIC = bytes.fromhex('d00dfeed')
 
 
-def append_dtb(image: bytes, tree: bytes, align: int = 8) -> bytes:
-    """Mirror build-mainline.sh: pad the kernel, then the tree reaches the end."""
-    return image + b'\0' * ((-len(image)) % align) + tree
+def append_dtb(image: bytes, tree: bytes) -> bytes:
+    """Align inside the gzip header; no bytes may separate gzip and the DTB."""
+    return payload_builder.combine(image, tree)
 
 
 def fake_dtb(size: int = 4096) -> bytes:
@@ -384,6 +385,50 @@ class BootPacking(unittest.TestCase):
                 donor.main([str(path), '--expect-sha256', '00'])
 
 
+class PayloadAlignment(unittest.TestCase):
+    def test_every_gzip_remainder_places_dtb_at_reference_lk_offset(self):
+        import random
+        rng = random.Random(12345)
+        seen = set()
+        for n in range(1, 300):
+            raw = bytes(rng.randrange(256) for _ in range(n))
+            image = gzip.compress(raw, mtime=0)
+            remainder = len(image) % 8
+            if remainder in seen:
+                continue
+            seen.add(remainder)
+            aligned = payload_builder.align_gzip(image)
+            self.assertEqual(len(aligned) % 8, 0)
+            self.assertEqual(gzip.decompress(aligned), raw)
+            tree = fake_dtb()
+            self.assertEqual(verify.reference_lk_gzip_end(aligned + tree), len(aligned))
+            self.assertIn(aligned[3], (0, 8))
+        self.assertEqual(seen, set(range(8)), 'cover every possible gzip alignment')
+
+    def test_external_zero_padding_is_rejected_by_independent_verifier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tree = fake_dtb()
+            image = next(gzip.compress(fake_arm64_image(n), mtime=0)
+                         for n in range(200, 230)
+                         if len(gzip.compress(fake_arm64_image(n), mtime=0)) % 8)
+            old_payload = image + b'\0' * ((-len(image)) % 8) + tree
+            (root / 'm1-Image.gz-dtb').write_bytes(old_payload)
+            (root / 'm1.dtb').write_bytes(tree)
+            failures = []
+            verify.check_appended(root, 'm1', failures)
+            self.assertTrue(any('gap' in f or 'reference LK gzip end' in f
+                                for f in failures), failures)
+            with self.assertRaises(ValueError):
+                repack.check_gzip_boundary(old_payload, len(old_payload) - len(tree))
+
+    def test_unsupported_gzip_flags_are_refused(self):
+        image = bytearray(gzip.compress(b'kernel', mtime=0))
+        image[3] = 4  # FEXTRA is not parsed by the reference LK inflater.
+        with self.assertRaises(ValueError):
+            payload_builder.align_gzip(bytes(image))
+
+
 class RepackCli(unittest.TestCase):
     """The command line the CI build script actually runs."""
 
@@ -436,9 +481,8 @@ class RepackCli(unittest.TestCase):
         self.assertIn('DTB', str(ctx.exception))
 
     def test_misaligned_tree_is_refused(self):
-        # LK scans for the magic on an aligned boundary; an unaligned tree would
-        # boot with no device tree and no error message anywhere. One byte of
-        # extra padding is enough to hide it from that scan.
+        # This pipeline aligns the DTB while preserving an exact gzip EOF.
+        # An unaligned tree is rejected even if its magic happens to be present.
         image = b'\x1f\x8b\x08' + b'k' * 101      # len 104, a multiple of 8
         payload = image + b'\0' * (8 + 1) + fake_dtb(4096)
         with self.assertRaises(SystemExit):

@@ -266,6 +266,30 @@ def check_dtb(mainline: Path, name: str, panel: bool, failures: list):
                         f'be {"absent" if panel else "the console"}')
 
 
+def reference_lk_gzip_end(blob: bytes):
+    """Emulate Qualcomm LK's gzip-header skip and raw DEFLATE end calculation.
+
+    Reference: msm8916-mainline/lk2nd lib/zlib_inflate/decompress.c. This is a
+    compatibility check against that implementation, not proof of Samsung LK.
+    """
+    if len(blob) < 18 or blob[:3] != b'\x1f\x8b\x08' or blob[3] not in (0, 8):
+        raise ValueError('unsupported reference LK gzip header')
+    pos = 10
+    if blob[3] == 8:
+        end = blob.find(b'\0', pos, min(len(blob), pos + 256))
+        if end < 0:
+            raise ValueError('invalid or oversized reference LK gzip filename')
+        pos = end + 1
+    raw = zlib.decompressobj(-zlib.MAX_WBITS)
+    raw.decompress(blob[pos:])
+    if not raw.eof:
+        raise ValueError('truncated raw DEFLATE stream')
+    deflate_end = len(blob) - len(raw.unused_data)
+    if deflate_end + 8 > len(blob):
+        raise ValueError('missing gzip footer')
+    return deflate_end + 8
+
+
 def check_appended(mainline: Path, name: str, failures: list):
     """Independently check gzip, the ARM64 Image header and the trailing DTB."""
     combined = mainline / f'{name}-Image.gz-dtb'
@@ -299,9 +323,16 @@ def check_appended(mainline: Path, name: str, failures: list):
     if not stream.eof:
         failures.append(f'{name}: gzip kernel is truncated')
         return
-    padding = stream.unused_data
-    if len(padding) > 7 or any(padding):
-        failures.append(f'{name}: unexpected bytes between gzip and DTB')
+    if stream.unused_data:
+        failures.append(f'{name}: gap between gzip EOF and DTB; reference LK '
+                        'would look for the DTB in the gap')
+    try:
+        lk_offset = reference_lk_gzip_end(blob)
+        if lk_offset != dtb_offset:
+            failures.append(f'{name}: reference LK gzip end {lk_offset} differs '
+                            f'from DTB offset {dtb_offset}')
+    except (ValueError, zlib.error) as exc:
+        failures.append(f'{name}: reference LK cannot parse the gzip header: {exc}')
     if len(image) < 64 or image[56:60] != b'ARM\x64':
         failures.append(f'{name}: decompressed payload has no ARM64 Image magic')
         return
@@ -310,7 +341,7 @@ def check_appended(mainline: Path, name: str, failures: list):
         failures.append(f'{name}: ARM64 effective image size {image_size} is invalid')
     print(f'{name}: ARM64 Image {len(image)} B, effective {image_size} B, '
           f'text offset 0x{text_offset:x}, flags 0x{flags:x}, '
-          f'DTB offset {dtb_offset}, padding {len(padding)} B')
+          f'DTB offset {dtb_offset}, gzip trailer gap {len(stream.unused_data)} B')
 
 
 def read_boot_independently(data: bytes):

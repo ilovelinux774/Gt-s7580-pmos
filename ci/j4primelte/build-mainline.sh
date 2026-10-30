@@ -25,8 +25,8 @@ set -euo pipefail
 if [ "${1:-}" = "-n" ] || [ "${1:-}" = "--dry-run" ]; then
     here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
     bash -n "${BASH_SOURCE[0]}"
-    for helper in mainline-config.py mainline-kernel.py mainline-repack-boot.py \
-                  verify-mainline.py donor-note.py test-mainline.py; do
+    for helper in mainline-config.py mainline-kernel.py mainline-payload.py \
+                  mainline-repack-boot.py verify-mainline.py donor-note.py test-mainline.py; do
         python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$here/$helper"
     done
     echo "mainline build/pack pipeline parses OK"
@@ -174,28 +174,12 @@ build_variant() {
     test -s "$out/arch/arm64/boot/Image.gz"
     test -s "$dtb"
     cp "$dtb" "$MAIN/$name.dtb"
-    # Appended DTB, no QCDT: Samsung LK only looks for a separate dt image when
-    # the header says dt_size != 0, and a v0 header from this vendor says 0, so
-    # the tree it will use is the one glued to the end of the kernel payload.
-    python3 - "$MAIN/$name-Image.gz-dtb" "$out/arch/arm64/boot/Image.gz" "$dtb" <<'PY'
-import sys
-from pathlib import Path
-dest, image_path, dtb_path = (Path(a) for a in sys.argv[1:4])
-image, dtb = image_path.read_bytes(), dtb_path.read_bytes()
-# A bare `cat` would leave the tree at an arbitrary offset; the devicetree spec
-# requires 8-byte alignment in memory, and LK locates the appended tree by
-# scanning the kernel tail for d00dfeed on an aligned boundary. Zero-padding the
-# compressed kernel is what kbuild's own Image.gz-dtb rule does for the same
-# reason, so the tree starts at a multiple of 8 and ends at the last byte.
-pad = (-len(image)) % 8
-payload = image + b'\0' * pad + dtb
-dest.write_bytes(payload)
-data = dest.read_bytes()
-assert data == payload, 'written payload does not match'
-assert data[len(image) + pad:len(image) + pad + 4] == bytes.fromhex('d00dfeed')
-assert len(data) - (len(image) + pad) == len(dtb), 'DTB must reach the last byte'
-print(f'{len(image)} byte kernel + {pad} B padding + {len(dtb)} byte DTB appended, verified')
-PY
+    # Qualcomm LK's gzip decompressor can return the exact gzip end as the
+    # appended-DTB offset. Align *inside* the gzip FNAME header instead of
+    # inserting zero bytes between the gzip stream and the device tree.
+    python3 "$here/mainline-payload.py" \
+        --image "$out/arch/arm64/boot/Image.gz" --dtb "$dtb" \
+        --out "$MAIN/$name-Image.gz-dtb"
     git -C "$KERNEL" show -s --format='%H %ci %s' HEAD > "$MAIN/$name-kernel-commit.txt" 2>/dev/null || \
         echo "$J4_MAINLINE_SHA (no git metadata)" > "$MAIN/$name-kernel-commit.txt"
     # A module can never be loaded here: the initramfs and the rootfs are armv7

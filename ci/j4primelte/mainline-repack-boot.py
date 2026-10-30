@@ -37,6 +37,7 @@ import hashlib
 import re
 import struct
 import sys
+import zlib
 
 MAGIC = b'ANDROID!'
 NAME_OFFSET = 48
@@ -85,6 +86,25 @@ def find_appended_dtb(payload: bytes) -> int:
         f'no appended DTB found in the last {DTB_WINDOW // 1024} KiB of the '
         'payload: an arm64 kernel that boots with no device tree hangs before the '
         'console, so this is refused rather than packed')
+
+
+def check_gzip_boundary(payload: bytes, dtb_at: int):
+    """Reject an external gap: Qualcomm LK may expect the DTB at gzip EOF."""
+    image = payload[:dtb_at]
+    if len(image) < 18 or image[:3] != b'\x1f\x8b\x08':
+        raise ValueError('kernel is not gzip')
+    if image[3] not in (0, 8):
+        raise ValueError('gzip has optional fields unsupported by reference LK')
+    if image[3] == 8 and image.find(b'\0', 10, min(len(image), 266)) < 0:
+        raise ValueError('gzip filename is missing or exceeds reference LK limits')
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        decoder.decompress(image)
+        decoder.flush()
+    except zlib.error as exc:
+        raise ValueError('invalid gzip kernel') from exc
+    if not decoder.eof or decoder.unused_data:
+        raise ValueError('DTB must begin immediately at the end of gzip, with no gap')
 
 
 def split_cmdline(encoded: bytes) -> tuple:
@@ -332,6 +352,7 @@ def main(argv=None):
                          'and only reads an appended tree when dt_size == 0)')
     try:
         dtb_at = find_appended_dtb(kernel)
+        check_gzip_boundary(kernel, dtb_at)
     except ValueError as exc:
         raise SystemExit(str(exc))
     print(f'kernel payload: {dtb_at} B Image.gz + '
