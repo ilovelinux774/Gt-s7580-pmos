@@ -68,6 +68,14 @@ def fake_dtb(size: int = 4096) -> bytes:
     return DTB_MAGIC + struct.pack('>I', size) + b'\0' * (size - 8)
 
 
+def fake_arm64_image(size: int = 4096) -> bytes:
+    """Minimal independently readable ARM64 Image header for verifier tests."""
+    image = bytearray(b'K' * size)
+    struct.pack_into('<QQQ', image, 8, 0x80000, size, 0)
+    image[56:60] = b'ARM\x64'
+    return bytes(image)
+
+
 def make_boot(kernel: bytes = b'original kernel', ramdisk: bytes = b'ramdisk blob',
               second: bytes = b'', page: int = 4096, name: bytes = b'j4primelte',
               cmdline: str = 'ro console=ttyMSM0,115200n8 rootwait '
@@ -82,9 +90,15 @@ def make_boot(kernel: bytes = b'original kernel', ramdisk: bytes = b'ramdisk blo
     first, tail = repack.split_cmdline(cmdline.encode())
     out[64:64 + 512] = first.ljust(512, b'\0')
     out[608:608 + 1024] = tail.ljust(1024, b'\0')
+    # Build the fixture independently using mkbootimg's v0 checksum formula.
+    import hashlib
+    checksum = hashlib.sha1()
     for blob in (kernel, ramdisk, second):
+        checksum.update(blob)
+        checksum.update(struct.pack('<I', len(blob)))
         out += blob
         out += b'\0' * (align(len(blob)) - len(blob))
+    out[576:608] = checksum.digest().ljust(32, b'\0')
     return bytes(out)
 
 
@@ -128,6 +142,21 @@ class Fragment(unittest.TestCase):
             frag.write_text('+ DRM\nPANEL + DRM_MSM\n')
             with self.assertRaises(ValueError):
                 config.parse_fragment(frag, panel=True)
+
+    def test_generic_modules_and_non_qcom_platforms_are_pruned(self):
+        original = ('CONFIG_ARCH_QCOM=y\nCONFIG_ARCH_EXYNOS=y\n'
+                    'CONFIG_ARCH_SUPPORTS_SOMETHING=y\nCONFIG_UNNEEDED=m\n'
+                    'CONFIG_ALREADY_BUILTIN=y\n')
+        menus = 'config ARCH_QCOM\nmenuconfig ARCH_EXYNOS\n'
+        result, modules, platforms = config.prune_inherited_config(original, menus)
+        self.assertEqual((modules, platforms), (1, 1))
+        self.assertIn('CONFIG_ARCH_QCOM=y', result)
+        self.assertIn('# CONFIG_ARCH_EXYNOS is not set', result)
+        self.assertIn('CONFIG_ARCH_SUPPORTS_SOMETHING=y', result)
+        self.assertIn('# CONFIG_UNNEEDED is not set', result)
+        self.assertIn('CONFIG_ALREADY_BUILTIN=y', result)
+        with self.assertRaises(ValueError):
+            config.prune_inherited_config(original, 'config ARCH_EXYNOS\n')
 
     def test_render_defconfig(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -225,7 +254,13 @@ class BootPacking(unittest.TestCase):
         base = repack.BootImage(make_boot())
         payload = append_dtb(gzip.compress(b'k' * 4000), fake_dtb())
         out = repack.build(base, payload)
-        digest = hashlib.sha1(payload + out.ramdisk + out.second).digest()
+        # mkbootimg hashes each payload followed by its little-endian size.
+        h = hashlib.sha1()
+        for blob in (payload, out.ramdisk, out.second):
+            h.update(blob)
+            h.update(struct.pack('<I', len(blob)))
+        digest = h.digest()
+        self.assertNotEqual(digest, hashlib.sha1(payload + out.ramdisk + out.second).digest())
         self.assertEqual(bytes(out.data[576:596]), digest)
         self.assertEqual(bytes(out.data[596:608]), b'\0' * 12)
         # Writing the digest must not have shifted anything: the ramdisk still
@@ -244,20 +279,39 @@ class BootPacking(unittest.TestCase):
         self.assertIn('pmos_root_uuid=86e7262b-b628-4b89-8a6e-e96ef9b1aab6', tokens,
                       'the donor root marker has to survive or init never exits')
 
-    def test_split_lands_on_a_space(self):
+    def test_cmdline_uses_exact_android_v0_split(self):
         short = b'a' * 500 + b' tok tok'
         first, tail = repack.split_cmdline(short)
-        self.assertEqual((first, tail), (short, b''),
-                         'a cmdline that fits the first field must not be split')
-        long_cmd = b'z' * 505 + b' ' + b'w' * 90
-        first, tail = repack.split_cmdline(long_cmd)
-        self.assertLessEqual(len(first), 512)
-        self.assertEqual(first + b' ' + tail, long_cmd,
-                         'the cut has to be on whitespace so the join is exact')
-        # An unbreakable token has no good answer; a hard cut is the honest one,
-        # and it must not eat a byte of the tail.
-        first, tail = repack.split_cmdline(b'x' * 600)
-        self.assertEqual((len(first), len(tail)), (512, 88))
+        self.assertEqual((first, tail), (short, b''))
+        for text in (b'z' * 505 + b' ' + b'w' * 90, b'x' * 600,
+                     b'k' * 511 + b' value=hello'):
+            first, tail = repack.split_cmdline(text)
+            self.assertEqual(len(first), 512)
+            self.assertEqual(first + tail, text)
+            image = repack.BootImage(make_boot())
+            image.set_cmdline(text.decode())
+            again = repack.BootImage(bytes(image.data))
+            self.assertEqual(again.cmdline.encode(), text,
+                             'cross-field bootargs must round-trip verbatim')
+
+    def test_invalid_or_ambiguous_root_uuid_is_refused(self):
+        payload = append_dtb(gzip.compress(b'k' * 4000), fake_dtb())
+        for command in ('console=ttyMSM0', 'pmos_root_uuid=abc',
+                        'pmos_root_uuid=86e7262b-b628-4b89-8a6e-e96ef9b1aab6 '
+                        'pmos_root_uuid=86e7262b-b628-4b89-8a6e-e96ef9b1aab6'):
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                repack.build(repack.BootImage(make_boot(cmdline=command)), payload)
+
+    def test_real_donor_checksum_when_present(self):
+        donor_path = Path(os.environ.get('J4_MAINLINE_BASE_BOOT',
+                          '/home/user/j4-mainline-donors/boot-37-KNOWN-GOOD-rollback.img'))
+        if not donor_path.is_file():
+            self.skipTest('known-good donor is not available locally')
+        base = repack.BootImage(donor_path.read_bytes())
+        check = repack.BootImage(bytes(base.data))
+        check.set_id(base.kernel, base.ramdisk, base.second)
+        self.assertEqual(check.data[576:608], base.data[576:608],
+                         'formula must match a real mkbootimg-generated donor')
 
     def test_cmdline_too_long_is_refused(self):
         base = repack.BootImage(make_boot())
@@ -320,6 +374,14 @@ class BootPacking(unittest.TestCase):
         struct.pack_into('<I', truncated, 8 + 2 * 4, 0)   # ramdisk_size = 0
         with self.assertRaises(SystemExit):
             donor.note(bytes(truncated))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'donor.img'
+            path.write_bytes(make_boot())
+            with self.assertRaises(SystemExit):
+                donor.main([str(path), '--expect-root-uuid',
+                            '11111111-1111-1111-1111-111111111111'])
+            with self.assertRaises(SystemExit):
+                donor.main([str(path), '--expect-sha256', '00'])
 
 
 class RepackCli(unittest.TestCase):
@@ -379,6 +441,14 @@ class RepackCli(unittest.TestCase):
         # extra padding is enough to hide it from that scan.
         image = b'\x1f\x8b\x08' + b'k' * 101      # len 104, a multiple of 8
         payload = image + b'\0' * (8 + 1) + fake_dtb(4096)
+        with self.assertRaises(SystemExit):
+            self.run_cli(payload)
+
+    def test_tree_four_byte_but_not_eight_byte_aligned_is_refused(self):
+        image = b'\x1f\x8b\x08' + b'k' * 101  # 104 bytes
+        payload = image + b'\0' * 4 + fake_dtb(4096)
+        self.assertEqual((len(image) + 4) % 4, 0)
+        self.assertNotEqual((len(image) + 4) % 8, 0)
         with self.assertRaises(SystemExit):
             self.run_cli(payload)
 
@@ -678,6 +748,8 @@ class DeviceTree(unittest.TestCase):
             self.assertIn('ramoops', text)
             self.assertIn('samsung,j4primelte', text)
             self.assertIsNone(verify.check_console(text))
+            self.assertEqual(verify.check_usb(text), [],
+                             'USB controller, PHY and extcon must be connected')
         # The gates.
         self.assertNotIn('s6d7at0b01', m1)
         self.assertNotIn('ti,lm3632', m1)
@@ -692,6 +764,18 @@ class DeviceTree(unittest.TestCase):
         self.assertEqual(verify.status_of_compatible(m1, '"qcom,mdss"'), 'disabled')
         self.assertEqual(verify.status_of_compatible(panel, '"qcom,mdss"'), 'okay')
         self.assertIsNone(verify.status_of_compatible(m1, '"qcom,no-such-driver"'))
+
+    def test_usb_verifier_catches_a_wrong_phy_or_extcon(self):
+        text = self.decompile(self.compile(staging.DTS))
+        self.assertEqual(verify.check_usb(text), [])
+        bad_phy = text.replace('qcom,usb-hs-28nm-femtophy',
+                               'qcom,wrong-usb-phy', 1)
+        self.assertTrue(any('phy' in p for p in verify.check_usb(bad_phy)))
+        dummy = verify.body_of_compatible(text, '"linux,extcon-usb-dummy"')
+        phandle = verify.property_ints(dummy, 'phandle')[0]
+        bad_extcon = re.sub(r'extcon\s*=\s*<0x[0-9a-f]+>',
+                            'extcon = <0xffff>', text, count=1)
+        self.assertTrue(any('extcon' in p for p in verify.check_usb(bad_extcon)))
 
     def test_console_uart_is_enabled_and_first(self):
         text = self.decompile(self.compile(staging.DTS))
@@ -742,7 +826,7 @@ class VerifyHelpers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             tree = fake_dtb(2048)
-            image = gzip.compress(b'kernel' * 100)
+            image = gzip.compress(fake_arm64_image())
             (root / 'm1-Image.gz-dtb').write_bytes(append_dtb(image, tree))
             (root / 'm1.dtb').write_bytes(tree)
             failures = []
@@ -756,9 +840,10 @@ class VerifyHelpers(unittest.TestCase):
     def test_boot_checks_compare_against_the_donor(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            base = make_boot(cmdline='ro pmos_root_uuid=abc rootwait')
+            base = make_boot(cmdline='ro pmos_root_uuid=86e7262b-b628-4b89-8a6e-e96ef9b1aab6 rootwait')
             (root / 'donor.img').write_bytes(base)
-            payload = append_dtb(gzip.compress(b'k' * 3000), fake_dtb())
+            payload = append_dtb(gzip.compress(fake_arm64_image()), fake_dtb())
+            (root / 'm1-Image.gz-dtb').write_bytes(payload)
             (root / 'boot').mkdir()
             good = repack.build(repack.BootImage(base), payload)
             (root / 'boot' / 'boot-m1-rootfs.img').write_bytes(bytes(good.data))
@@ -773,6 +858,87 @@ class VerifyHelpers(unittest.TestCase):
             failures = []
             verify.check_boot(root / 'boot', root / 'donor.img', failures)
             self.assertTrue(any('ramdisk' in f for f in failures), failures)
+
+    def test_wrong_checksum_and_kernel_are_independently_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = make_boot()
+            (root / 'donor.img').write_bytes(base)
+            payload = append_dtb(gzip.compress(fake_arm64_image()), fake_dtb())
+            (root / 'm1-Image.gz-dtb').write_bytes(payload)
+            bootdir = root / 'boot'
+            bootdir.mkdir()
+            good = repack.build(repack.BootImage(base), payload, debug_shell=True)
+            path = bootdir / 'boot-m1-debug.img'
+            path.write_bytes(bytes(good.data))
+            failures = []
+            verify.check_boot(bootdir, root / 'donor.img', failures,
+                              required_images=['boot-m1-debug.img'])
+            self.assertEqual(failures, [])
+            damaged = bytearray(good.data)
+            damaged[576] ^= 1
+            path.write_bytes(damaged)
+            failures = []
+            verify.check_boot(bootdir, root / 'donor.img', failures)
+            self.assertTrue(any('checksum' in f for f in failures), failures)
+            path.write_bytes(bytes(good.data))
+            (root / 'm1-Image.gz-dtb').write_bytes(payload + b'corruption')
+            failures = []
+            verify.check_boot(bootdir, root / 'donor.img', failures)
+            self.assertTrue(any('kernel does not match' in f for f in failures), failures)
+            failures = []
+            verify.check_boot(bootdir, root / 'donor.img', failures,
+                              required_images=['boot-m1-rootfs.img'])
+            self.assertTrue(any('missing required image' in f for f in failures), failures)
+
+    def test_memory_collision_with_donor_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Use the real phone's address pattern, including the tags region.
+            data = bytearray(make_boot())
+            struct.pack_into('<I', data, 32, 0x81e00000)
+            (root / 'donor.img').write_bytes(data)
+            tree = fake_dtb()
+            (root / 'm1.dtb').write_bytes(tree)
+            small = fake_arm64_image()
+            (root / 'm1-Image.gz-dtb').write_bytes(append_dtb(gzip.compress(small), tree))
+            failures = []
+            verify.check_memory_layout(root, root / 'donor.img', 'm1', failures)
+            self.assertEqual(failures, [])
+            large = bytearray(small)
+            struct.pack_into('<Q', large, 16, 0x04000000)
+            (root / 'm1-Image.gz-dtb').write_bytes(append_dtb(gzip.compress(large), tree))
+            failures = []
+            verify.check_memory_layout(root, root / 'donor.img', 'm1', failures)
+            self.assertTrue(any('overlap' in f for f in failures), failures)
+
+    def test_non_arm64_or_misaligned_payload_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tree = fake_dtb()
+            (root / 'm1.dtb').write_bytes(tree)
+            (root / 'm1-Image.gz-dtb').write_bytes(
+                append_dtb(gzip.compress(b'not an arm64 kernel'), tree))
+            failures = []
+            verify.check_appended(root, 'm1', failures)
+            self.assertTrue(any('ARM64' in f for f in failures), failures)
+            image = gzip.compress(fake_arm64_image())
+            payload = append_dtb(image, tree)[:-len(tree)] + b'\0' * 4 + tree
+            (root / 'm1-Image.gz-dtb').write_bytes(payload)
+            failures = []
+            verify.check_appended(root, 'm1', failures)
+            self.assertTrue(any('aligned' in f for f in failures), failures)
+
+    def test_workflow_uses_pinned_donor_not_a_run_database_id(self):
+        workflow = (HERE.parent.parent / '.github/workflows/build-mainline.yml').read_text()
+        self.assertIn('J4_MAINLINE_DONOR_URL', workflow)
+        self.assertIn('--expect-sha256', workflow)
+        self.assertIn('--expect-root-uuid', workflow)
+        self.assertNotIn('gh run download', workflow)
+        build = (HERE / 'build-mainline.sh').read_text()
+        self.assertIn('export CROSS_COMPILE="$CROSS"', build)
+        self.assertGreater(build.index('cp "$out/.config" "$MAIN/kernel-config-$name"'),
+                           build.index('-j"$jobs" "${targets[@]}"'))
 
     def test_missing_donor_is_reported_not_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:

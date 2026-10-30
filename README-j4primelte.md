@@ -302,102 +302,86 @@ On the next boot, inspect `rc-service j4-wifi status` and
 phone reboots, restore host `172.16.42.2/24` on the actual USB interface before
 reconnecting to the phone at `172.16.42.1`.
 
-## Mainline arm64 kernel (M1): BOOT only, rootfs untouched
+## Mainline arm64 kernel (M1): experimental BOOT-only bring-up
 
-`build-medusa.yml` builds the downstream 3.18 kernel. That kernel has no usable GPU
-path (libhybris was dropped from postmarketOS in November 2024), so the mobile UI
-needs the arm64 mainline kernel. `build-mainline.yml` is the separate job that gets
-there one milestone at a time:
+This is a **hardware-untested** port. The first target is a pmOS initramfs
+shell over USB (RNDIS/telnet, optionally ACM) or the BLSP1 UART. A successful
+compile or format check does **not** establish that Samsung LK boots this
+particular ARM64 kernel, that the phone's USB controller probes, or that a shell
+will appear. Panel, touch, Wi-Fi, audio and GPU remain later milestones.
 
-| milestone | content | status |
-|---|---|---|
-| M0 | device survey, partition map, boot header layout | done |
-| M1 | boot to a telnet/simpledrm console over the *existing* rootfs | this job |
-| M2 | panel + backlight (`J4_MAINLINE_PANEL=1`, panel `.config`) | staged, untested |
-| M3 | capacitive touch (s6sy761) | not started |
-| M4 | Wi-Fi/BT (wcn3620 over WCNSS SMD) | not started |
-| M5 | freedreno GPU | not started |
+The pipeline builds no rootfs and flashes nothing. Its donor is the published,
+known-good `boot-37-KNOWN-GOOD-rollback.img` from release `j4-39`: the download,
+SHA-256 and the installed p47 rootfs UUID are pinned in
+`ci/j4primelte/mainline-sources.env`. The boot image's 32-bit pmOS initramfs is
+copied byte for byte, and `CONFIG_COMPAT=y` is required in the ARM64 kernel.
+The #37 image is also the BOOT-only rollback in OrangeFox:
+<https://github.com/ilovelinux774/Gt-s7580-pmos/releases/tag/j4-39>.
 
-The job never produces a rootfs. It downloads the newest successful `build-medusa`
-run's `j4primelte-boot-only-*` artifact and uses its **boot.img as a donor**: the
-initramfs ramdisk is copied **byte for byte**, only the kernel payload is replaced.
-That is why the installed userspace survives — the boot image carries no rootfs and
-SYSTEM (p47) is never written. Flashing the previous boot.img is a complete rollback.
+**For the first test use only `boot-m1-debug.img`.** Its `pmos.debug-shell`
+flag starts the donor initramfs debug shell before its normal rootfs mount and
+resize steps. Do not use `boot-m1-rootfs.img` for this initial test: while it
+still flashes only BOOT, normal init may check, resize, mount and write to the
+existing filesystem. The observed BOOT partition is `/dev/mmcblk0p23` (32 MiB);
+the installed rootfs is p47. Rollback means flashing the #37 boot image to
+BOOT, not flashing a rootfs. The phone has OrangeFox; this procedure does not
+use fastboot.
 
-The four images it publishes:
+The current design tries to preserve the existing ARM32 rootfs through ARM64
+compatibility; it has not been proven on the phone. If an ARM64 rootfs later
+turns out to be necessary, replacing the current rootfs would erase the current
+LXQt, Wi-Fi and audio installation and its configuration. Do not flash one
+without a backup and an explicit decision to replace it.
 
-| image | behaviour |
-|---|---|
-| `boot-m1-rootfs.img` | mainline kernel, boots the installed rootfs |
-| `boot-m1-debug.img` | same kernel, drops to the initramfs telnet shell at 172.16.42.1 |
-| `boot-panel-rootfs.img` | only with `panel_milestone` checked: M2 device tree |
-| `boot-panel-debug.img` | only with `panel_milestone` checked |
+The build checks more than the image extension:
 
-Decisions that are not obvious from the code:
+- it verifies the pinned donor's full SHA-256, Android-v0 payload/size ID, page
+  size and root UUID, and rejects a different donor;
+- it retains the donor ramdisk and boot-header load addresses, appends the J4+
+  DTB on an 8-byte boundary and hashes the correct Android-v0 payload/size ID;
+- it independently reads each output, checks its boot ID, donor ramdisk and
+  UUID, actual ARM64 kernel header, gzip stream, DTB and required bootargs;
+- it audits CONFIG_COMPAT, gzip initramfs, RPM/SMD, ChipIdea UDC, the actual
+  `qcom,usb-hs-28nm-femtophy`, dummy extcon, RNDIS and ACM as built-ins;
+- it checks that the compiled DTB connects the USB controller to its PHY and
+  dummy extcon, and tests estimated ARM64 kernel ranges against the donor's
+  tags and initramfs addresses. LK's actual placement is **not** established.
 
-- **Payload is `Image.gz` + our own DTB appended**, no QCDT/`second` image. Samsung
-  LK only looks for a `second` dt image when `dt_size != 0`; a v0 header with
-  `dt_size == 0` takes the appended DTB, which is what release LK2ND binaries
-  support here. `verify-mainline.py` fails the build unless the appended tree's own
-  `totalsize` accounts for exactly the bytes after the kernel, and the tree starts on
-  an 8-byte boundary (zero padding after `Image.gz`), which is what the devicetree
-  spec and LK's backwards scan for `d00dfeed` both require.
-- **Boot header v0 legacy layout** (see `mainline-repack-boot.py` for the offsets):
-  ten u32 sizes/addresses, `name[16]` at 48, `cmdline[512]` at 64, `id[8]` at 576,
-  `extra_cmdline[1024]` at 608. The GKI 16-word struct is wrong for this phone and
-  produced garbage like "unsupported boot header version 3".
-- **Everything is built-in** (`CONFIG_MODULES=n`): the ramdisk and the rootfs are the
-  downstream **armv7** ones, so there is nowhere to load an arm64 `.ko` from, and
-  `CONFIG_COMPAT=y` must stay on or the 32-bit `/init` cannot execute.
-- Bootargs are additive and idempotent: `clk_ignore_unused pd_ignore_unused
-  regulator_ignore_unused rootwait` are appended to the donor cmdline (vendor
-  `androidboot.*`, `lcd_id`, `vmalloc` arguments are inherited, never stripped), so
-  `pmos_root_uuid` keeps pointing at the installed rootfs.
-- Panel/touch/GPU are deliberately **off** in M1: the device tree keeps `&mdss`
-  disabled and the `simple-framebuffer` node self-disables, so nothing can fight
-  the bootloader over the display controller before M2.
-- **Milestone switching is a second source file, not a `-D` flag.**
-  `mainline/msm8917-samsung-j4primelte.dts` holds the shared tree with
-  `#ifdef J4_PANEL` zones, and
-  `mainline/msm8917-samsung-j4primelte-panel.dts` is a three-line wrapper that
-  `#define`s `J4_PANEL` and includes it. Both `.dtb`s then come out of one
-  `make dtbs`. `DTC_FLAGS=-DJ4_PANEL` was tried and cannot work: kbuild runs
-  `cpp` before `dtc`, and this `dtc` has no `-D` at all — it aborted every other
-  qcom/actions dtb in the tree with `invalid option -- 'D'`.
+The generic arm64 defconfig normally enables many unrelated platforms and
+modules; before applying the J4+ fragment, this build removes unrelated platform
+menus and inherited `=m` drivers. Required J4+ drivers are then explicitly
+built in. A kernel too large for the 32 MiB BOOT partition or an estimated
+memory overlap fails verification instead of being presented as safe.
+
+The separate `.github/workflows/build-mainline.yml` is registered on `main`, but
+must be dispatched on branch `pmos-j4primelte-20260927`. Set `panel_milestone`
+only for the staged, untested M2 variant; it is not part of the M1 acceptance.
+The job produces `boot-m1-debug.img` and `boot-m1-rootfs.img` as build artifacts;
+a separately published GitHub Release is required for phone-side delivery.
 
 ## Running the mainline pipeline locally
 
-Everything the workflow does lives in `ci/j4primelte/build-mainline.sh`, and the
-checks are worth running first because they are the ones that catch a stale device
-tree or a header edit (builds go into `~/j4-mainline-kernel` and
-`~/j4-mainline-out-*`; never build into `/tmp`, it is 992 MiB of tmpfs here, and
-a directory literally named `build` is wiped by the workspace snapshotter):
+Run the tests against the complete pinned tree, not a partial checkout:
 
 ```sh
-TMPDIR=/home/user/tmp J4_MAINLINE_KERNEL_TREE=/home/user/j4-mainline-kernel python3 ci/j4primelte/test-mainline.py
+J4_MAINLINE_KERNEL_TREE=$HOME/j4-mainline-kernel python3 ci/j4primelte/test-mainline.py
 ```
 
-The full build clones the pinned tree, then packs boot images from a donor
-`boot.img`. `J4_MAINLINE_BASE_BOOT` is the donor gate: without it the kernel
-payloads are still built and published, and the job says the boot images were
-skipped instead of pretending otherwise:
+Build M1 with the exact pinned donor and the ARM64 cross compiler installed:
 
 ```sh
-J4_MAINLINE_BASE_BOOT=$HOME/j4-mainline-donor/boot.img J4_MAINLINE_PANEL=1 bash ci/j4primelte/build-mainline.sh
+J4_MAINLINE_BASE_BOOT=$HOME/j4-mainline-donor/boot.img bash ci/j4primelte/build-mainline.sh
 ```
 
-To redo only the device tree and the packing after a bootarg or `.dts` edit (the
-compiled kernel is reused from `~/j4-mainline-out-*`):
+Verify the completed artifacts independently:
 
 ```sh
-J4_MAINLINE_DTBS_ONLY=1 J4_MAINLINE_BASE_BOOT=$HOME/j4-mainline-donor/boot.img bash ci/j4primelte/build-mainline.sh
+python3 ci/j4primelte/verify-mainline.py artifacts/mainline $HOME/j4-mainline-donor/boot.img
 ```
 
-An M1 image that boots gives a shell over RNDIS (`172.16.42.1`, telnet) and on the
-BLSP1 UART at 115200 8N1 — `stdout-path = "serial0:115200n8"` with `&blsp1_uart1`
-enabled, which is the first thing `verify-mainline.py` checks, because a DTB whose
-console node is still `status = "disabled"` looks fine in source and is useless on
-the wire.
+`J4_MAINLINE_DTBS_ONLY=1` reuses a prior output only when its archived `.config`
+still matches; the same ARM64 toolchain is required because Kconfig also probes
+the compiler during a device-tree-only build.
 
 ## Collect logs
 

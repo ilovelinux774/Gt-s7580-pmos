@@ -24,7 +24,7 @@ u32 unless noted:
    44   os_version
    48   name[16]           "j4primelte"
    64   cmdline[512]
-  576   id[32]             sha1(kernel || ramdisk || second), zero padded
+  576   id[32]             SHA-1(payload || le32(size), for each payload), padded
   608   extra_cmdline[1024]
 
 A GKI 16-word struct does not describe this image, and reading it with those
@@ -54,7 +54,7 @@ IMAGE_NAME = b'j4primelte'
 # driver yet. These are appended to whatever the donor image carried, which
 # includes Samsung's own androidboot.*, lcd_id and vmalloc= arguments.
 MAINLINE_BOOTARGS = ('clk_ignore_unused pd_ignore_unused regulator_ignore_unused '
-                     'rootwait')
+                     'rootwait earlycon')
 # postmarketOS initramfs flag: drop to the telnet shell instead of mounting the
 # rootfs. The only way to look at a phone whose panel stays black.
 DEBUG_FLAG = 'pmos.debug-shell'
@@ -76,7 +76,7 @@ def find_appended_dtb(payload: bytes) -> int:
     low = max(0, len(payload) - DTB_WINDOW)
     offset = payload.rfind(DTB_MAGIC)
     while offset >= low:
-        if offset % 4 == 0 and offset + 8 <= len(payload):
+        if offset % 8 == 0 and offset + 8 <= len(payload):
             totalsize = struct.unpack_from('>I', payload, offset + 4)[0]
             if totalsize == len(payload) - offset and totalsize > 0x10:
                 return offset
@@ -88,20 +88,15 @@ def find_appended_dtb(payload: bytes) -> int:
 
 
 def split_cmdline(encoded: bytes) -> tuple:
-    """Split a cmdline into what fits the 512-byte field and the 1024-byte tail.
+    """Split at Android v0's exact field boundary, without altering a byte.
 
-    The two regions are re-joined with a single space on read, so the cut has to
-    land on whitespace or a bootarg would be silently split in half.
+    Android mkbootimg writes the first 512 bytes into cmdline[] and the
+    remaining bytes into extra_cmdline[].  A token may cross the boundary;
+    adding or removing a space on either side silently changes the bootargs.
     """
-    if len(encoded) <= CMDLINE_FIRST:
-        return encoded, b''
-    cut = encoded.rfind(b' ', 0, CMDLINE_FIRST + 1)
-    if cut <= 0:
-        # Nothing to give up on: cut exactly at the field boundary. Skipping a
-        # byte here would silently lose part of a bootarg.
-        return (encoded[:CMDLINE_FIRST],
-                encoded[CMDLINE_FIRST:CMDLINE_FIRST + CMDLINE_REST])
-    return encoded[:cut], encoded[cut + 1:cut + 1 + CMDLINE_REST]
+    if len(encoded) > CMDLINE_FIRST + CMDLINE_REST:
+        raise ValueError('cmdline exceeds Android v0 header capacity')
+    return encoded[:CMDLINE_FIRST], encoded[CMDLINE_FIRST:]
 
 
 def align(value: int, page: int) -> int:
@@ -153,6 +148,11 @@ class BootImage:
         self.kernel = self._payload(0, self.kernel_size)
         self.ramdisk = self._payload(1, self.ramdisk_size)
         self.second = self._payload(2, self.second_size)
+        required = self.page_size + sum(align(n, self.page_size) for n in
+                                        (self.kernel_size, self.ramdisk_size,
+                                         self.second_size))
+        if len(self.data) < required:
+            raise ValueError('truncated boot image including payload padding')
 
     def _region_start(self, index: int) -> int:
         offset = self.page_size                     # the header is page 0
@@ -175,7 +175,7 @@ class BootImage:
                                EXTRA_CMDLINE_OFFSET + CMDLINE_REST])
         first = first.split(b'\0', 1)[0].decode('ascii', 'replace')
         rest = rest.split(b'\0', 1)[0].decode('ascii', 'replace')
-        return f'{first} {rest}'.strip()
+        return first + rest
 
     def set_cmdline(self, cmdline: str):
         encoded = cmdline.encode('ascii')
@@ -198,7 +198,14 @@ class BootImage:
         return image
 
     def set_id(self, kernel: bytes, ramdisk: bytes, second: bytes):
-        digest = hashlib.sha1(kernel + ramdisk + second).digest()
+        # Android mkbootimg v0 includes the little-endian size after EACH
+        # payload (including a zero size for an empty second stage). This is
+        # validated independently against the phone's known-good #37 image.
+        hasher = hashlib.sha1()
+        for blob in (kernel, ramdisk, second):
+            hasher.update(blob)
+            hasher.update(struct.pack('<I', len(blob)))
+        digest = hasher.digest()
         # Exactly 32 bytes: the legacy id field is id[8] u32s, and a 20-byte
         # digest has to be zero padded rather than written short.
         self.data[ID_OFFSET:ID_OFFSET + 32] = digest.ljust(32, b'\0')
@@ -224,7 +231,8 @@ class BootImage:
         to forgive a change there.
         """
         page = self.page_size
-        out = bytearray(page)
+        # Preserve the donor's entire header page, including vendor padding.
+        out = bytearray(self.data[:page])
         out[0:8] = MAGIC
         struct.pack_into('<10I', out, 8, len(kernel), self.kernel_addr,
                          len(ramdisk), self.ramdisk_addr,
@@ -253,6 +261,16 @@ class BootImage:
 def build(base: BootImage, kernel: bytes, debug_shell: bool = False,
           cmdline_extra: str = '') -> BootImage:
     """Return a copy of `base` whose kernel is `kernel`, ramdisk untouched."""
+    roots = [arg for arg in split_args(base.cmdline)
+             if arg.startswith('pmos_root_uuid=')]
+    root_pattern = (r'pmos_root_uuid=[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-'
+                    r'[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
+    if len(roots) != 1 or not re.fullmatch(root_pattern, roots[0]):
+        raise ValueError('donor must have exactly one valid pmos_root_uuid')
+    if not base.kernel or not base.ramdisk:
+        raise ValueError('donor must include a nonempty kernel and initramfs')
+    if not debug_shell and DEBUG_FLAG in split_args(base.cmdline):
+        raise ValueError('rootfs image cannot be built from a debug-shell donor')
     extra = split_args(MAINLINE_BOOTARGS)
     if debug_shell:
         extra.append(DEBUG_FLAG)

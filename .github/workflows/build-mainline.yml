@@ -4,13 +4,13 @@ name: Build mainline arm64 boot image for J4+ SM-J415F (M1)
 #
 #   * It builds the pinned msm89x7 mainline tree for arm64 and puts that kernel
 #     into a boot image by swapping ONLY the kernel field of a boot.img that a
-#     build-medusa run produced. The vendor ramdisk is carried over unchanged,
+#     known-good #37 release produced. The pmOS ramdisk is carried over unchanged,
 #     because it is what mounts /boot and starts init in pmOS's partition
 #     layout - the mainline defconfig enables no Samsung-specific ramdisk driver
 #     and would not know what to do with it.
-#   * It never builds, writes or repacks a rootfs. The M1 promise is a shell
-#     over RNDIS/telnet and the BLSP1 UART console; panel, touch, Wi-Fi and GPU
-#     arrive in M2..M5, each with its own build gate.
+#   * It never builds or flashes a rootfs. The M1 debug image requests an
+#     initramfs shell before mounting the installed rootfs; USB and UART are
+#     bring-up goals, not claimed to work on untested hardware.
 #   * The donor is the same phone's own boot image, so the page size, the load
 #     addresses and the cmdline length limits in ci/j4primelte/mainline-repack-boot.py
 #     match the target. A GT-S7580 boot.img is used for header parsing tests
@@ -19,10 +19,6 @@ name: Build mainline arm64 boot image for J4+ SM-J415F (M1)
 on:
   workflow_dispatch:
     inputs:
-      base_run:
-        description: 'build-medusa run number to take the donor boot.img from (empty = newest successful one)'
-        type: string
-        default: ''
       panel_milestone:
         description: 'M2 as well: build the panel DTB and the .config that can drive it'
         type: boolean
@@ -52,6 +48,10 @@ jobs:
       J4_MAINLINE_KERNEL_TREE: /home/runner/j4-mainline-kernel
       J4_MAINLINE_BASE_BOOT: /home/runner/j4-mainline-donor/boot.img
     steps:
+      - name: Require the J4+ working branch
+        run: |
+          test "$GITHUB_REF_NAME" = pmos-j4primelte-20260927 || { echo "Select the pmos-j4primelte-20260927 branch when running this workflow" >&2; exit 1; }
+
       - name: Checkout this branch
         uses: actions/checkout@v4
         with:
@@ -85,28 +85,17 @@ jobs:
           python3 ci/j4primelte/test-mainline.py
           python3 ci/j4primelte/test-kernel-cache.py
 
-      - name: Fetch the donor boot.img from a build-medusa run
+      - name: Fetch and verify the known-good J4+ donor
         run: |
-          set -eu
-          if [ -n "${{ inputs.base_run }}" ]; then
-            run="${{ inputs.base_run }}"
-          else
-            # Newest completed build-medusa run that actually produced images.
-            run=$(gh run list --workflow build-medusa.yml --branch "$GITHUB_REF_NAME" \
-                    --status completed --conclusion success --limit 1 \
-                    --json databaseId --jq '.[0].databaseId')
-          fi
-          test -n "$run" || { echo "no successful build-medusa run found" >&2; exit 1; }
-          echo "donor comes from build-medusa run $run"
-          mkdir -p artifacts/donor
-          gh run download "$run" -n "j4primelte-boot-only-$run" -D artifacts/donor
-          file artifacts/donor/boot.img
-          mkdir -p "$HOME/j4-mainline-donor"
-          cp artifacts/donor/boot.img "$HOME/j4-mainline-donor/boot.img"
-          python3 ci/j4primelte/donor-note.py "$HOME/j4-mainline-donor/boot.img" \
-            artifacts/donor/DONOR.txt
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          set -euo pipefail
+          source ci/j4primelte/mainline-sources.env
+          mkdir -p artifacts/donor "$HOME/j4-mainline-donor"
+          curl --fail --location --show-error --retry 3 --connect-timeout 20 \
+            "$J4_MAINLINE_DONOR_URL" -o "$J4_MAINLINE_BASE_BOOT"
+          python3 ci/j4primelte/donor-note.py "$J4_MAINLINE_BASE_BOOT" \
+            artifacts/donor/DONOR.txt \
+            --expect-sha256 "$J4_MAINLINE_DONOR_SHA256" \
+            --expect-root-uuid "$J4_MAINLINE_DONOR_ROOT_UUID"
 
       - name: Clone, configure and build the mainline kernel
         # J4_MAINLINE_PANEL is the only knob the script has for M2; passing a

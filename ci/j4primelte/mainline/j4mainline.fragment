@@ -23,6 +23,10 @@
 
 # --- platform: the tree must describe this SoC at all ---------------------------
 + ARCH_QCOM
+# The donor initramfs and installed userspace are 32-bit ARM binaries.
++ COMPAT
++ BLK_DEV_INITRD
++ RD_GZIP
 # Device tree support is def_bool y on arm64; naming it keeps the audit at the
 # end of the build honest (every REQUIRED symbol is enabled somewhere).
 + OF
@@ -42,6 +46,9 @@
 + MSM_GCC_8917
 + QCOM_CLK_RPMH
 + QCOM_CLK_SMD_RPM
++ RPMSG
++ RPMSG_QCOM_SMD
++ QCOM_SMD_RPM
 + QCOM_CLK_APCS_MSM8916
 + RESET_CONTROLLER
 + PINCTRL
@@ -130,14 +137,22 @@
 # --- USB gadget: RNDIS is the network and the shell -----------------------------
 + USB_SUPPORT
 + USB
+# msm8917.dtsi uses qcom,ci-hdrc with the 28nm femto USB PHY.
++ USB_CHIPIDEA
++ USB_CHIPIDEA_UDC
++ USB_CHIPIDEA_MSM
++ USB_ULPI_BUS
++ PHY_QCOM_USB_HS_28NM
 + USB_GADGET
 + USB_LIBCOMPOSITE
 + USB_F_ACM
++ USB_F_NCM
 + USB_F_RNDIS
 + USB_F_MASS_STORAGE
 + USB_F_FS
 + USB_CONFIGFS
 + USB_CONFIGFS_ACM
++ USB_CONFIGFS_NCM
 + USB_CONFIGFS_RNDIS
 + USB_CONFIGFS_F_FS
 + USB_CONFIGFS_MASS_STORAGE
@@ -148,6 +163,9 @@
 + TYPEC
 + EXTCON
 + EXTCON_USB_GPIO
+# The M1 DT wires the controller to linux,extcon-usb-dummy: without
+# this driver the controller can defer forever and no USB shell appears.
++ EXTCON_USB_DUMMY
 
 # --- networking the initramfs and NetworkManager need ---------------------------
 + NET_CORE
@@ -306,10 +324,9 @@
 # Sound is a separate milestone with its own QC8916/aw883x work; the ALSA core
 # alone would only add a silent /dev/snd and a slower build.
 - SOUND
-# Nothing talks to the modem, ADSP or WPSC cores from this kernel: keep the
-# remoteproc stack out so a missing modem image can never block boot.
+# No modem/ADSP remoteproc firmware is needed for M1. Keep REMOTEPROC off,
+# but retain RPMSG and Qualcomm SMD: the RPM power/clock path needs them.
 - REMOTEPROC
-- RPMSG
 - QRTR
 - QCOM_FASTRPC
 # Debug-info choices: naming only DEBUG_INFO_NONE is not enough, olddefconfig
@@ -335,6 +352,7 @@ PANEL + DRM_MSM_DSI_28NM_PHY
 PANEL + DRM_PANEL
 PANEL + DRM_PANEL_SIMPLE
 PANEL + DRM_PANEL_SAMSUNG_S6D7AT0B01
+PANEL + I2C_GPIO
 PANEL + MFD_TI_LMU
 PANEL + REGULATOR_LM363X
 PANEL + BACKLIGHT_CLASS_DEVICE

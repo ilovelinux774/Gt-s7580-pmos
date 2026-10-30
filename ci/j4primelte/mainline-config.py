@@ -4,10 +4,10 @@
 The base is the arm64 defconfig of the pinned tree; on top of it goes
 mainline/j4mainline.fragment. Both halves matter:
 
-  * `make defconfig` on arm64 already knows about Qualcomm SoCs, but it also
-    drags in every other vendor's display, mmc and usb driver, and it leaves
-    CONFIG_MODULES=m - which on this phone means "the driver is not there",
-    because the donor initramfs and the installed rootfs are armv7.
+  * `make defconfig` on arm64 already knows about Qualcomm SoCs, but also
+    enables many unrelated platforms and modular drivers. We trim those first,
+    then explicitly enable the J4+ drivers as built-ins: the ARM32 donor
+    initramfs and existing rootfs do not contain modules for this kernel.
   * the fragment is a *policy* file: what must be built in, what must be off,
     and why. It is deliberately short enough to read in one sitting.
 
@@ -34,12 +34,19 @@ SYMBOL = re.compile(r'^[A-Z0-9][A-Z0-9_]*$')
 REQUIRED = {
     # the SoC itself
     'ARCH_QCOM': 'without this no qcom driver is even offered',
+    'COMPAT': 'the donor initramfs and existing rootfs contain ARM32 binaries',
+    'BLK_DEV_INITRD': 'the bootloader-supplied initramfs must be accepted',
+    'RD_GZIP': 'the known-good donor initramfs is gzip compressed',
     'OF': 'every device on this phone is described by the flattened tree',
     'RELOCATABLE': 'LK may hand over the kernel at a different address',
     # clocks, pinctrl, resets - nothing probes without them
     'MSM_GCC_8917': 'the MSM8917 clock controller; NOT selected by ARCH_QCOM',
     'QCOM_CLK_RPMH': 'rpmh clocks (SDC1/MMC, CPU)',
     'QCOM_CLK_SMD_RPM': 'smd-rpm clocks for the older RPM interface',
+    'RPMSG': 'the messaging bus underneath the SMD RPM transport',
+    'RPMSG_QCOM_SMD': 'Qualcomm SMD transports regulator and clock requests',
+    'QCOM_SMD_RPM': 'the older Qualcomm RPM transport for eMMC supplies',
+    'REGULATOR_QCOM_SMD_RPM': 'RPM-controlled PMIC supplies for eMMC',
     'RESET_CONTROLLER': 'needed by the mmc and usb drivers on this SoC',
     'PINCTRL_MSM': 'the TLMM pin controller',
     'PINCTRL_MSM8917': 'pin function table for this SoC',
@@ -81,6 +88,17 @@ REQUIRED = {
     'INPUT_EVDEV': '/dev/input/eventN',
     # usb gadget: the network, the shell and the only way in
     'USB_GADGET': 'gadget support',
+    'USB_CHIPIDEA': 'the qcom,ci-hdrc USB controller in msm8917.dtsi',
+    'USB_CHIPIDEA_UDC': 'USB device mode on the ChipIdea controller',
+    'USB_CHIPIDEA_MSM': 'Qualcomm platform glue for the ChipIdea controller',
+    'USB_ULPI_BUS': 'the USB controller talks to its transceiver over ULPI',
+    'PHY_QCOM_USB_HS_28NM': 'msm8917.dtsi uses qcom,usb-hs-28nm-femtophy',
+    'EXTCON': 'the gadget controller receives USB VBUS state via extcon',
+    'EXTCON_USB_DUMMY': 'provides linux,extcon-usb-dummy declared in the J4 DT',
+    'USB_F_ACM': 'optional serial console inside the donor debug shell',
+    'USB_F_NCM': 'the initramfs can fall back to the NCM gadget function',
+    'USB_CONFIGFS_ACM': 'configfs can create the donor debug shell ACM gadget',
+    'USB_CONFIGFS_NCM': 'configfs can create an NCM network gadget',
     'USB_LIBCOMPOSITE': 'the composite framework configfs sits on',
     'USB_F_RNDIS': 'the RNDIS function pmaports configures for debugging',
     'USB_CONFIGFS': 'configfs gadget control, which is what the init script uses',
@@ -106,6 +124,7 @@ PANEL_REQUIRED = {
     'DRM_PANEL': 'panel bridge core',
     'DRM_PANEL_SIMPLE': 'selected by the generated panel driver',
     'DRM_PANEL_SAMSUNG_S6D7AT0B01': 'the J4+ panel driver staged by mainline-kernel.py',
+    'I2C_GPIO': 'the panel bias chip uses the GPIO-backed I2C bus in the panel DT',
     'MFD_TI_LMU': 'lm3632 is an mfd device with regulator and backlight cells',
     'REGULATOR_LM363X': 'the vpos/vneg bias rails the panel needs',
     'TOUCHSCREEN_S6SY761': 's6sy761, the candidate driver for sec_ts',
@@ -115,6 +134,12 @@ PANEL_REQUIRED = {
 FORBIDDEN_ALWAYS = {
     'MODULES': 'the donor initramfs and the armv7 rootfs carry no arm64 modules '
                'for this kernel, so =m means the driver is absent at boot',
+}
+
+FORBIDDEN_M1 = {
+    'DRM_MSM': 'M1 does not take ownership of the display controller',
+    'DRM_PANEL_SAMSUNG_S6D7AT0B01': 'the panel belongs to the later M2 build',
+    'TOUCHSCREEN_S6SY761': 'touch belongs to a later milestone',
 }
 
 # Must never be on. Some of these are downstream-only symbols that exist to make
@@ -263,6 +288,30 @@ def merge_config(tree: Path, dest: Path, fragment: Path, panel: bool) -> Path:
     return dest
 
 
+def prune_inherited_config(text: str, platform_kconfig: str):
+    """Disable unrelated ARM64 platform menus and inherited =m drivers.
+
+    Turning MODULES off while carrying the generic ARM64 defconfig's hundreds of
+    =m entries silently promotes unrelated drivers to built-ins. Besides wasted
+    build time, the enlarged uncompressed Image can collide with the bootloader's
+    fixed DTB/initramfs addresses. Keep only Qualcomm platform menus; the explicit
+    fragment re-enables every driver this particular board needs.
+    """
+    text, modules = re.subn(r'^CONFIG_([A-Z0-9_]+)=m$',
+                            r'# CONFIG_\1 is not set', text, flags=re.M)
+    platforms = set(re.findall(r'^(?:menuconfig|config) (ARCH_[A-Z0-9_]+)$',
+                               platform_kconfig, flags=re.M))
+    if 'ARCH_QCOM' not in platforms:
+        raise ValueError('arm64 platform definitions do not include ARCH_QCOM')
+    disabled = 0
+    for symbol in sorted(platforms - {'ARCH_QCOM'}):
+        text, count = re.subn(r'^CONFIG_' + re.escape(symbol) + r'=[ym]$',
+                              '# CONFIG_' + symbol + ' is not set', text,
+                              flags=re.M)
+        disabled += count
+    return text, modules, disabled
+
+
 def apply_config(tree: Path, out: Path, fragment: Path, panel: bool = False):
     """Produce out/.config: base defconfig + fragment, dependency-resolved."""
     env = dict(os.environ, ARCH='arm64')
@@ -289,9 +338,17 @@ def apply_config(tree: Path, out: Path, fragment: Path, panel: bool = False):
         return proc
 
     if not cfg.is_file():
-        # `make defconfig` reads the config from stdin when it is not a tty,
-        # which avoids kconfig's relative DEFCONFIG path lookup entirely.
-        run('make', f'O={out}', 'defconfig', stdin=merged.read_text())
+        # Start with the tree's actual arm64 defconfig, then discard unrelated
+        # modules/platforms BEFORE disabling MODULES or Kconfig promotes them.
+        run('make', f'O={out}', 'defconfig')
+        platforms = tree / 'arch' / 'arm64' / 'Kconfig.platforms'
+        if not platforms.is_file():
+            raise SystemExit(f'{platforms}: missing ARM64 platform menu')
+        trimmed, modules, platforms_disabled = prune_inherited_config(
+            cfg.read_text(), platforms.read_text())
+        cfg.write_text(trimmed)
+        print(f'pruned {modules} inherited modules and {platforms_disabled} '
+              'non-Qualcomm platform menus before applying the J4+ fragment')
     for kind, symbol, value in ops:
         if kind == 'literal':
             continue
@@ -345,6 +402,10 @@ def check_config(cfg: Path, panel: bool) -> dict:
         if values.get(symbol, 'n') != 'n':
             problems.append(f'CONFIG_{symbol} must never be on '
                             f'(no arm64 modules exist in the donor initramfs)')
+    if not panel:
+        for symbol, why in sorted(FORBIDDEN_M1.items()):
+            if values.get(symbol, 'n') != 'n':
+                problems.append(f'CONFIG_{symbol} must be off in M1: {why}')
     release = 'unknown'
     candidate = cfg.parent / 'include' / 'config' / 'kernel.release'
     if candidate.is_file():

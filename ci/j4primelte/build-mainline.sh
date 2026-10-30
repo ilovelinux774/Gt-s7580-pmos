@@ -6,10 +6,13 @@
 # and the boot image reuses that job's initramfs as a donor. See
 # mainline-repack-boot.py for why swapping only the kernel is safe.
 #
-#   J4_MAINLINE_BASE_BOOT   donor boot.img (from j4primelte-boot-only-*)
+#   J4_MAINLINE_BASE_BOOT   SHA-256-pinned, known-good #37 donor boot.img
 #   J4_MAINLINE_PANEL=1     also build the M2 panel variant
 #   J4_MAINLINE_SKIP_APT=1  dependencies are already installed (CI does this)
 #   J4_MAINLINE_KERNEL_TREE where the pinned tree lives (~/j4-mainline-kernel)
+#   J4_MAINLINE_OUT_PREFIX  optional prefix for kernel build directories
+#   J4_MAINLINE_ARTIFACT_DIR optional artifact directory (defaults to repo/artifacts)
+#   J4_MAINLINE_JOBS        optional parallel build jobs (defaults to nproc)
 #   J4_MAINLINE_DTBS_ONLY=1 reuse an existing output dir: device tree + packing
 #                           only, for re-running the boot images after a bootarg
 #                           or device tree edit
@@ -36,8 +39,9 @@ here="$ROOT/ci/j4primelte"
 source "$here/mainline-sources.env"
 
 KERNEL="${J4_MAINLINE_KERNEL_TREE:-$HOME/j4-mainline-kernel}"
-LOGS="$ROOT/artifacts/logs"
-MAIN="$ROOT/artifacts/mainline"
+ARTIFACTS="${J4_MAINLINE_ARTIFACT_DIR:-$ROOT/artifacts}"
+LOGS="$ARTIFACTS/logs"
+MAIN="$ARTIFACTS/mainline"
 OUT="$MAIN/boot"
 mkdir -p "$LOGS" "$MAIN" "$OUT"
 cp "$here/mainline-sources.env" "$LOGS/mainline-sources.env"
@@ -113,25 +117,22 @@ CROSS=aarch64-linux-gnu-
 if ! command -v "${CROSS}gcc" >/dev/null 2>&1; then
     if [ "$(uname -m)" = "aarch64" ]; then
         CROSS=
-    elif [ "$DTBS_ONLY" = 1 ]; then
-        # Reusing a previous run's Image.gz means the only compile left is dtc,
-        # which is a host tool. Requiring the cross compiler here would refuse a
-        # run that can succeed - and re-packing the boot images is exactly the
-        # thing this mode exists for.
-        CROSS=
-        echo "note: no cross compiler, but only device trees are being built" >&2
     else
         echo "no ${CROSS}gcc and not on arm64: cannot build this kernel" >&2
         exit 1
     fi
 fi
+# Kconfig probes compiler capabilities even during defconfig/olddefconfig.
+# Export the SAME cross compiler used by make; otherwise an x86 host gcc can
+# produce a .config different from the one later used for the arm64 Image.
+export CROSS_COMPILE="$CROSS"
 "${CROSS}gcc" --version | head -1 | tee "$LOGS/toolchain.txt"
 dtc --version | tee -a "$LOGS/toolchain.txt"
 
 build_variant() {
     local name=$1
     local dtb_name=$2
-    local out="$HOME/j4-mainline-out-$name"
+    local out="${J4_MAINLINE_OUT_PREFIX:-$HOME/j4-mainline-out-}$name"
     if [ "$DTBS_ONLY" != 1 ]; then
         rm -rf "$out"
     fi
@@ -146,17 +147,29 @@ build_variant() {
         python3 "$here/mainline-config.py" apply \
             --tree "$KERNEL" --out "$out" "${config_args[@]}" \
             > "$LOGS/config-$name.txt" 2>&1
+    else
+        test -s "$MAIN/kernel-config-$name" && cmp -s "$out/.config" "$MAIN/kernel-config-$name" || {
+            echo "kernel config missing or changed: run without J4_MAINLINE_DTBS_ONLY" >&2
+            exit 1
+        }
+    fi
+    # Build the two J4+ DTBs, not thousands of unrelated arm64 board DTBs.
+    local targets=(Image.gz qcom/msm8917-samsung-j4primelte.dtb
+                   qcom/msm8917-samsung-j4primelte-panel.dtb)
+    [ "$DTBS_ONLY" = 1 ] && targets=(qcom/msm8917-samsung-j4primelte.dtb
+                                      qcom/msm8917-samsung-j4primelte-panel.dtb)
+    local jobs="${J4_MAINLINE_JOBS:-$(nproc)}"
+    [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || { echo 'J4_MAINLINE_JOBS must be a positive integer' >&2; exit 1; }
+    make -C "$KERNEL" O="$out" ARCH=arm64 CROSS_COMPILE="$CROSS" \
+        -j"$jobs" "${targets[@]}" > "$LOGS/kernel-$name.log" 2>&1
+    if [ "$DTBS_ONLY" = 1 ]; then
+        cmp -s "$out/.config" "$MAIN/kernel-config-$name" || {
+            echo 'dtbs-only changed .config; existing Image.gz is no longer auditable' >&2; exit 1;
+        }
+    else
+        # Archive the actual post-make config, not a pre-syncconfig guess.
         cp "$out/.config" "$MAIN/kernel-config-$name"
     fi
-    test -s "$MAIN/kernel-config-$name" || {
-        echo "no kernel-config-$name to pack against: run without J4_MAINLINE_DTBS_ONLY" >&2
-        exit 1
-    }
-    # Word-split on purpose: the target list is one or two words.
-    local targets='Image.gz dtbs'
-    [ "$DTBS_ONLY" = 1 ] && targets=dtbs
-    make -C "$KERNEL" O="$out" ARCH=arm64 CROSS_COMPILE="$CROSS" \
-        -j"$(nproc)" $targets > "$LOGS/kernel-$name.log" 2>&1
     local dtb="$out/arch/arm64/boot/dts/qcom/$dtb_name.dtb"
     test -s "$out/arch/arm64/boot/Image.gz"
     test -s "$dtb"
@@ -216,7 +229,9 @@ fi
 # that says "boot images skipped" next to real boot images is a lie.
 rm -f "$OUT/skipped.txt"
 # Same parser the verifier and the packer use, so the note cannot disagree.
-python3 "$here/donor-note.py" "$J4_MAINLINE_BASE_BOOT" "$MAIN/ramdisk.txt"
+python3 "$here/donor-note.py" "$J4_MAINLINE_BASE_BOOT" "$MAIN/ramdisk.txt" \
+    --expect-sha256 "$J4_MAINLINE_DONOR_SHA256" \
+    --expect-root-uuid "$J4_MAINLINE_DONOR_ROOT_UUID"
 cat "$MAIN/ramdisk.txt"
 
 variants=(m1)

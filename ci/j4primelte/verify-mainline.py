@@ -14,9 +14,11 @@ and boot/boot-<variant>-<mode>.img; "panel" says the M2 variant was requested.
 """
 from pathlib import Path
 import importlib.util
+import hashlib
 import re
 import shutil
 import subprocess
+import struct
 import sys
 import zlib
 
@@ -102,16 +104,8 @@ def node_status(text: str, node_pattern: str):
     return status.group(1) if status else 'okay'
 
 
-def status_of_compatible(text: str, compatible: str):
-    """status of the node that carries this compatible, found from the inside out.
-
-    Matching the node by name is how this check failed to check anything for a
-    while: upstream calls the display controller `display-subsystem@1a00000` and
-    only keeps `mdss:` as a label, which dtc throws away. A regex on `mdss@` then
-    returned None, and None satisfied "must not be okay" for M1 while the panel
-    build was accused of not being okay. The compatible is what a driver binds
-    to, so it is what identifies the node.
-    """
+def body_of_compatible(text: str, compatible: str):
+    """Find the flattened node carrying a compatible string; labels are gone."""
     at = text.find(compatible)
     if at < 0:
         return None
@@ -124,13 +118,43 @@ def status_of_compatible(text: str, compatible: str):
             if depth < 0:
                 break
         index -= 1
+    if index == 0:
+        return None
     start = text.rfind('\n', 0, index) + 1
-    header = text[start:index + 1]
-    body = node_body(text[start:], r'[^{]*')
+    return node_body(text[start:], r'[^{]*')
+
+
+def status_of_compatible(text: str, compatible: str):
+    body = body_of_compatible(text, compatible)
     if body is None:
         return None
     status = re.search(r'status\s*=\s*"([a-z]+)"', body)
     return status.group(1) if status else 'okay'
+
+
+def check_usb(text: str):
+    """Check the actual controller, its 28nm PHY, and dummy VBUS phandles."""
+    problems = []
+    compat = {'controller': '"qcom,ci-hdrc"',
+              'phy': '"qcom,usb-hs-28nm-femtophy"',
+              'extcon': '"linux,extcon-usb-dummy"'}
+    nodes = {name: body_of_compatible(text, val) for name, val in compat.items()}
+    for name, body in nodes.items():
+        if body is None:
+            problems.append(f'missing {name} device-tree node')
+        elif status_of_compatible(text, compat[name]) != 'okay':
+            problems.append(f'{name} device-tree node is disabled')
+    if problems:
+        return problems
+    controller = nodes['controller']
+    if not re.search(r'dr_mode\s*=\s*"peripheral"', controller):
+        problems.append('controller is not in peripheral mode')
+    for prop, name in (('phys', 'phy'), ('extcon', 'extcon')):
+        link = property_ints(controller, prop)
+        target = property_ints(nodes[name], 'phandle')
+        if not target or link != target:
+            problems.append(f'controller {prop} does not point to the {name} node')
+    return problems
 
 
 def check_console(text: str):
@@ -192,10 +216,7 @@ def check_dtb(mainline: Path, name: str, panel: bool, failures: list):
         return
     text = dtc_text(dtb)
     if text is None:
-        print(f'note: dtc is not installed, {dtb.name} only checked for size '
-              f'({dtb.stat().st_size} bytes)')
-        if dtb.stat().st_size < 4096:
-            failures.append(f'{name}: {dtb.name} is too small to be a board tree')
+        failures.append(f'{name}: dtc is required to verify the compiled device tree')
         return
     for expected in ('Samsung Galaxy J4+ (SM-J415F)', 'samsung,j4primelte'):
         if expected not in text:
@@ -212,6 +233,8 @@ def check_dtb(mainline: Path, name: str, panel: bool, failures: list):
     problem = check_console(text)
     if problem:
         failures.append(f'{name}: {problem}')
+    for problem in check_usb(text):
+        failures.append(f'{name}: USB: {problem}')
 
     # The milestone gates. An M1 tree that already lights up MDSS or claims the
     # panel's power pins is a bug even when it boots: it fights the bootloader for
@@ -244,66 +267,190 @@ def check_dtb(mainline: Path, name: str, panel: bool, failures: list):
 
 
 def check_appended(mainline: Path, name: str, failures: list):
+    """Independently check gzip, the ARM64 Image header and the trailing DTB."""
     combined = mainline / f'{name}-Image.gz-dtb'
     dtb = mainline / f'{name}.dtb'
     if not combined.is_file() or not dtb.is_file():
         failures.append(f'{name}: missing {combined.name} or {dtb.name}')
         return
-    blob = combined.read_bytes()
-    tree = dtb.read_bytes()
+    blob, tree = combined.read_bytes(), dtb.read_bytes()
+    if len(tree) < 40 or tree[:4] != b'\xd0\x0d\xfe\xed':
+        failures.append(f'{name}: built DTB has no valid FDT header')
+        return
+    if struct.unpack_from('>I', tree, 4)[0] != len(tree):
+        failures.append(f'{name}: DTB totalsize does not match the file')
+        return
     if len(blob) <= len(tree) or blob[-len(tree):] != tree:
         failures.append(f'{name}: trailing bytes are not the built DTB')
         return
-    kernel = blob[:len(blob) - len(tree)]
-    if not kernel.startswith(b'\x1f\x8b\x08'):
-        failures.append(f'{name}: the kernel part of the payload is not a gzip '
-                        'Image.gz stream; LK would hand an uncompressed Image to a '
-                        'decompressing bootloader and die in the first instruction')
-    elif gzip_is_truncated(kernel):
-        # A truncated gzip stream is the signature of an out-of-disk CI run: the
-        # phone resets during decompression and leaves nothing on the console.
-        failures.append(f'{name}: the gzip kernel stream is truncated')
+    dtb_offset = len(blob) - len(tree)
+    if dtb_offset % 8:
+        failures.append(f'{name}: appended DTB is not 8-byte aligned')
+    compressed = blob[:dtb_offset]
+    if not compressed.startswith(b'\x1f\x8b\x08'):
+        failures.append(f'{name}: kernel is not a gzip stream')
+        return
+    try:
+        stream = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        image = stream.decompress(compressed) + stream.flush()
+    except zlib.error:
+        failures.append(f'{name}: gzip kernel is invalid or truncated')
+        return
+    if not stream.eof:
+        failures.append(f'{name}: gzip kernel is truncated')
+        return
+    padding = stream.unused_data
+    if len(padding) > 7 or any(padding):
+        failures.append(f'{name}: unexpected bytes between gzip and DTB')
+    if len(image) < 64 or image[56:60] != b'ARM\x64':
+        failures.append(f'{name}: decompressed payload has no ARM64 Image magic')
+        return
+    text_offset, image_size, flags = struct.unpack_from('<QQQ', image, 8)
+    if not image_size or image_size < len(image):
+        failures.append(f'{name}: ARM64 effective image size {image_size} is invalid')
+    print(f'{name}: ARM64 Image {len(image)} B, effective {image_size} B, '
+          f'text offset 0x{text_offset:x}, flags 0x{flags:x}, '
+          f'DTB offset {dtb_offset}, padding {len(padding)} B')
 
 
-def check_boot(boot_dir: Path, base: Path, failures: list):
+def read_boot_independently(data: bytes):
+    """Read a legacy boot.img without using the packer's parser or ID code."""
+    if len(data) < 1632 or data[:8] != b'ANDROID!':
+        raise ValueError('missing Android v0 header')
+    (ks, ka, rs, ra, ss, sa, tags, page, version, osver) = \
+        struct.unpack_from('<10I', data, 8)
+    if version != 0 or page not in (2048, 4096):
+        raise ValueError('unsupported header version or page size')
+    if not ks or not rs:
+        raise ValueError('empty kernel or initramfs')
+    align = lambda n: ((n + page - 1) // page) * page
+    expected_len = page + align(ks) + align(rs) + align(ss)
+    if len(data) < expected_len:
+        raise ValueError('truncated payload or padding')
+    kernel_at = page
+    ramdisk_at = kernel_at + align(ks)
+    second_at = ramdisk_at + align(rs)
+    kernel = data[kernel_at:kernel_at + ks]
+    ramdisk = data[ramdisk_at:ramdisk_at + rs]
+    second = data[second_at:second_at + ss]
+    sha = hashlib.sha1()
+    for part, length in ((kernel, ks), (ramdisk, rs), (second, ss)):
+        sha.update(part)
+        sha.update(struct.pack('<I', length))
+    correct_id = sha.digest() + bytes(12)
+    command = (data[64:576].split(b'\0', 1)[0] +
+               data[608:1632].split(b'\0', 1)[0]).decode('ascii', 'strict')
+    return {'kernel': kernel, 'ramdisk': ramdisk, 'second': second,
+            'addresses': (ka, ra, sa, tags, page, version, osver),
+            'cmdline': command, 'valid_id': data[576:608] == correct_id}
+
+
+def root_uuid(command: str):
+    values = [arg for arg in command.split() if arg.startswith('pmos_root_uuid=')]
+    pattern = r'pmos_root_uuid=[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-' \
+              r'[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+    return values[0] if len(values) == 1 and re.fullmatch(pattern, values[0]) else None
+
+
+def check_boot(boot_dir: Path, base: Path, failures: list, required_images=()):
     if not base or not base.is_file():
         failures.append('no donor boot.img given to compare payloads against')
         return
-    donor = repack.BootImage(base.read_bytes())
+    try:
+        donor = read_boot_independently(base.read_bytes())
+    except (ValueError, UnicodeError, struct.error) as exc:
+        failures.append(f'donor: invalid boot image: {exc}')
+        return
+    if not donor['valid_id']:
+        failures.append('donor: Android v0 payload/size checksum does not match')
+    donor_uuid = root_uuid(donor['cmdline'])
+    if not donor_uuid:
+        failures.append('donor: missing, invalid or ambiguous pmos_root_uuid')
     images = sorted(boot_dir.glob('boot-*.img'))
+    for name in required_images:
+        if not (boot_dir / name).is_file():
+            failures.append(f'missing required image: {name}')
     if not images:
         failures.append('no boot images were produced at all')
         return
-    for image in images:
-        data = image.read_bytes()
+    for image_path in images:
         try:
-            img = repack.BootImage(data)
-        except ValueError as exc:
-            failures.append(f'{image.name}: {exc}')
+            data = image_path.read_bytes()
+            img = read_boot_independently(data)
+        except (ValueError, UnicodeError, struct.error) as exc:
+            failures.append(f'{image_path.name}: invalid boot image: {exc}')
             continue
-        if img.ramdisk != donor.ramdisk:
-            failures.append(f'{image.name}: ramdisk is not the donor ramdisk byte '
-                            'for byte')
-        if img.kernel_addr != donor.kernel_addr or img.tags_addr != donor.tags_addr:
-            failures.append(f'{image.name}: load addresses changed, LK may not like '
-                            'that')
-        if len(data) > repack.MAX_IMAGE:
-            failures.append(f'{image.name}: {len(data)} B does not fit a 32 MiB BOOT '
-                            'partition')
-        if img.kernel_size <= 0 or img.kernel_size > len(data):
-            failures.append(f'{image.name}: kernel payload size {img.kernel_size} '
-                            'is bogus')
-        if b'pmos_root_uuid=' not in img.cmdline.encode():
-            failures.append(f'{image.name}: cmdline lost pmos_root_uuid, '
-                            'the phone would sit in the initramfs forever')
-        debug_expected = 'debug' in image.name
-        debug_actual = 'pmos.debug-shell' in img.cmdline
-        if debug_expected != debug_actual:
-            failures.append(f'{image.name}: pmos.debug-shell={debug_actual}, '
-                            f'expected {debug_expected}')
-        for flag in ('clk_ignore_unused', 'pd_ignore_unused'):
-            if flag not in img.cmdline:
-                failures.append(f'{image.name}: {flag} missing, the splash dies')
+        name = image_path.name
+        if not img['valid_id']:
+            failures.append(f'{name}: Android v0 payload/size checksum mismatch')
+        if img['ramdisk'] != donor['ramdisk']:
+            failures.append(f'{name}: ramdisk is not the donor ramdisk byte for byte')
+        if img['second'] != donor['second']:
+            failures.append(f'{name}: second payload changed')
+        if img['addresses'] != donor['addresses']:
+            failures.append(f'{name}: one or more donor header addresses changed')
+        if len(data) > 32 * 1024 * 1024:
+            failures.append(f'{name}: image exceeds the measured 32 MiB BOOT partition')
+        if root_uuid(img['cmdline']) != donor_uuid or not donor_uuid:
+            failures.append(f'{name}: pmos_root_uuid differs from the donor')
+        match = re.fullmatch(r'boot-(m1|panel)-(rootfs|debug)\.img', name)
+        if not match:
+            failures.append(f'{name}: unexpected image name')
+            continue
+        variant, mode = match.groups()
+        expected_payload = boot_dir.parent / f'{variant}-Image.gz-dtb'
+        if not expected_payload.is_file():
+            failures.append(f'{name}: missing staged kernel payload')
+        elif img['kernel'] != expected_payload.read_bytes():
+            failures.append(f'{name}: kernel does not match staged {variant} payload')
+        debug_actual = 'pmos.debug-shell' in img['cmdline'].split()
+        if (mode == 'debug') != debug_actual:
+            failures.append(f'{name}: debug-shell flag does not match image mode')
+        for flag in ('clk_ignore_unused', 'pd_ignore_unused',
+                     'regulator_ignore_unused', 'rootwait', 'earlycon'):
+            if flag not in img['cmdline'].split():
+                failures.append(f'{name}: required boot argument {flag} missing')
+
+
+def check_memory_layout(mainline: Path, base: Path, name: str, failures: list):
+    """Refuse layouts that collide under the donor or common Qualcomm load addresses.
+
+    We cannot inspect this phone's proprietary LK implementation here, so passing
+    this conservative check is not evidence of how LK actually places the image.
+    It does catch a large built-in kernel that certainly risks overwriting the
+    tags or initramfs at the addresses inherited from the known-good donor.
+    """
+    payload = mainline / f'{name}-Image.gz-dtb'
+    dtb = mainline / f'{name}.dtb'
+    if not base or not base.is_file() or not payload.is_file() or not dtb.is_file():
+        return  # Missing artifacts are reported by the other gates.
+    try:
+        donor = read_boot_independently(base.read_bytes())
+        raw = zlib.decompress(payload.read_bytes(), 16 + zlib.MAX_WBITS)
+        if len(raw) < 64 or raw[56:60] != b'ARM\x64':
+            return  # The ARM64 gate reports this in detail.
+        text_offset, size = struct.unpack_from('<QQ', raw, 8)
+        if not size:
+            return
+        ka, ra, _sa, tags, _page, _ver, _os = donor['addresses']
+        base_2m = ka & ~((1 << 21) - 1)
+        starts = {ka, base_2m + 0x80000, base_2m + text_offset}
+        occupied = [('DTB/tags', tags, tags + dtb.stat().st_size),
+                    ('initramfs', ra, ra + len(donor['ramdisk']))]
+        for start in sorted(starts):
+            end = start + size
+            for label, low, high in occupied:
+                if start < high and low < end:
+                    failures.append(f'{name}: ARM64 effective image range '
+                                    f'0x{start:x}-0x{end:x} could overlap '
+                                    f'{label} at 0x{low:x}-0x{high:x}; '
+                                    'refusing an unproven memory layout')
+        if (ka - text_offset) % (1 << 21):
+            print(f'{name}: donor header kernel address 0x{ka:x} is not aligned '
+                  f'for ARM64 text_offset 0x{text_offset:x}; LK must relocate it '
+                  '(device behavior unverified)')
+    except (ValueError, UnicodeError, struct.error, zlib.error) as exc:
+        failures.append(f'{name}: could not audit kernel/ramdisk memory layout: {exc}')
 
 
 def check_configs(mainline: Path, panel_expected: bool, failures: list):
@@ -339,7 +486,13 @@ def main(argv):
     if panel_expected:
         check_appended(mainline, 'panel', failures)
         check_dtb(mainline, 'panel', panel=True, failures=failures)
-    check_boot(boot_dir, donor, failures)
+    required = ['boot-m1-rootfs.img', 'boot-m1-debug.img']
+    if panel_expected:
+        required += ['boot-panel-rootfs.img', 'boot-panel-debug.img']
+    check_boot(boot_dir, donor, failures, required_images=required)
+    check_memory_layout(mainline, donor, 'm1', failures)
+    if panel_expected:
+        check_memory_layout(mainline, donor, 'panel', failures)
     check_configs(mainline, panel_expected, failures)
     for line in failures:
         print('FAIL:', line)
