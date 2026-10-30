@@ -92,7 +92,6 @@
 + MMC_SDHCI_MSM
 + MMC_CQHCI
 + EXT4_FS
-+ F2FS_FS
 + TMPFS
 + DEVTMPFS
 + DEVTMPFS_MOUNT
@@ -111,7 +110,6 @@
 + SERIAL_MSM_CONSOLE
 + SERIAL_OF_PLATFORM
 + PRINTK_TIME
-+ DYNAMIC_DEBUG
 + DEBUG_KERNEL
 + FRAMEBUFFER_CONSOLE
 + FRAMEBUFFER_CONSOLE_DETECT_PRIMARY
@@ -136,7 +134,6 @@
 
 # --- USB gadget: RNDIS is the network and the shell -----------------------------
 + USB_SUPPORT
-+ USB
 # msm8917.dtsi uses qcom,ci-hdrc with the 28nm femto USB PHY.
 + USB_CHIPIDEA
 + USB_CHIPIDEA_UDC
@@ -156,9 +153,6 @@
 + USB_CONFIGFS_RNDIS
 + USB_CONFIGFS_F_FS
 + USB_CONFIGFS_MASS_STORAGE
-+ USB_NET_DRIVERS
-+ USB_NET_CDCETHER
-+ USB_NET_CDC_NCM
 + PHY_QCOM_QUSB2
 + TYPEC
 + EXTCON
@@ -167,29 +161,12 @@
 # this driver the controller can defer forever and no USB shell appears.
 + EXTCON_USB_DUMMY
 
-# --- networking the initramfs and NetworkManager need ---------------------------
+# --- basic networking for the initramfs USB debug shell --------------------------
 + NET_CORE
 + NETDEVICES
-+ WIRELESS
-+ CFG80211
-+ MAC80211
-+ WLAN
-+ WCN36XX
-+ BT
-+ BT_RFCOMM
-+ BT_BNEP
-+ BT_HIDP
-+ BT_LE
-+ BT_LE_L2CAP_ECRED
-+ BT_HCIUART
-+ BT_HCIUART_SERDEV
-+ BT_HCIUART_H4
-+ BT_HCIUART_QCA
-+ BT_QCOMSMD
 + SERIAL_DEV_BUS
 + SERIAL_DEV_CTRL_TTYPORT
 + INET
-+ IPV6
 + PACKET
 + NAMESPACES
 + UTS_NS
@@ -219,15 +196,36 @@
 + SYSFS
 + PROC_FS
 + KALLSYMS
-+ KALLSYMS_ALL
 + MAGIC_SYSRQ
 + EARLY_PRINTK
 + LOCKUP_DETECTOR
 + BUG
 + SLUB_DEBUG
-+ FTRACE
-+ FUNCTION_TRACER
 + STACKTRACE
+
+# --- M1 size and boot constraints -----------------------------------------------
+# The bootloader's tags and ramdisk addresses sit only 30/32 MiB above RAM base.
+# M1 is an initramfs USB shell: PCI, USB host stacks, Wi-Fi/Bluetooth, IPv6,
+# advanced tracing and f2fs are later milestones or unnecessary here. Keeping
+# them built in makes the uncompressed ARM64 image overwrite tags/ramdisk.
+- PCI
+- USB
+- WIRELESS
+- CFG80211
+- MAC80211
+- WLAN
+- BT
+- IPV6
+- F2FS_FS
+- NETFILTER
+- BPF
+- BPF_SYSCALL
+- BPF_JIT
+- PERF_EVENTS
+- FTRACE
+- FUNCTION_TRACER
+- KALLSYMS_ALL
+- DYNAMIC_DEBUG
 
 # --- what this phone does not need at all --------------------------------------
 # None of these can bind (no matching node in the device tree), and because

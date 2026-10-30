@@ -179,6 +179,9 @@ class Fragment(unittest.TestCase):
         for symbol in ('EFI', 'CMDLINE_FORCE', 'MODULES'):
             self.assertIn(symbol, disabled, f'{symbol} should be disabled by name')
         self.assertFalse(enabled & disabled, 'a symbol is both enabled and disabled')
+        for symbol in ('PCI', 'USB', 'WIRELESS', 'BT', 'IPV6', 'F2FS_FS'):
+            self.assertIn(symbol, disabled, f'{symbol} would bloat the initial M1 kernel')
+            self.assertIn(symbol, config.FORBIDDEN_M1)
         self.assertIn('DEBUG_INFO_NONE', enabled,
                       'a DWARF-enabled Image.gz does not fit the BOOT partition')
         self.assertIn('DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT', disabled,

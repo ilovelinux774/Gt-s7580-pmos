@@ -352,8 +352,11 @@ The build checks more than the image extension:
 The generic arm64 defconfig normally enables many unrelated platforms and
 modules; before applying the J4+ fragment, this build removes unrelated platform
 menus and inherited `=m` drivers. Required J4+ drivers are then explicitly
-built in. A kernel too large for the 32 MiB BOOT partition or an estimated
-memory overlap fails verification instead of being presented as safe.
+built in. M1 deliberately omits USB host, PCI, Wi-Fi, Bluetooth, IPv6 and f2fs:
+they are not needed for the initial USB debug shell. The existing installation
+and its services are available again after a BOOT-only rollback. A kernel too
+large for the 32 MiB BOOT partition or an estimated memory overlap fails
+verification instead of being presented as safe.
 
 The separate `.github/workflows/build-mainline.yml` is registered on `main`, but
 must be dispatched on branch `pmos-j4primelte-20260927`. Set `panel_milestone`

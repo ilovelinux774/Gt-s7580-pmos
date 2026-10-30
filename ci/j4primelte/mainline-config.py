@@ -105,10 +105,6 @@ REQUIRED = {
     'USB_CONFIGFS_RNDIS': 'so the gadget can actually be assembled at runtime',
     # networking the userspace expects to find
     'NET': 'sockets',
-    'WIRELESS': '802.11 uapi',
-    'CFG80211': 'nl80211, which NetworkManager talks to',
-    'MAC80211': 'the stack wcn36xx needs',
-    'BT': 'bluetooth core (keyboard bring-up already works on this phone)',
     # postmortem and debug plumbing
     'PSTORE_RAM': 'ramoops, the only way to read a panic after a reflash',
     'DEBUG_FS': 'the debugfs the wifi and drm code expose state through',
@@ -140,6 +136,12 @@ FORBIDDEN_M1 = {
     'DRM_MSM': 'M1 does not take ownership of the display controller',
     'DRM_PANEL_SAMSUNG_S6D7AT0B01': 'the panel belongs to the later M2 build',
     'TOUCHSCREEN_S6SY761': 'touch belongs to a later milestone',
+    'PCI': 'not required for the M1 USB debug shell',
+    'USB': 'USB host stacks are not required for the USB gadget',
+    'WIRELESS': 'Wi-Fi is a later milestone',
+    'BT': 'Bluetooth is a later milestone',
+    'IPV6': 'the debug shell uses IPv4',
+    'F2FS_FS': 'the M1 debug shell does not mount f2fs',
 }
 
 # Must never be on. Some of these are downstream-only symbols that exist to make
