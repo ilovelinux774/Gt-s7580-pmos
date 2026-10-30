@@ -5,15 +5,16 @@ Why only the kernel: the J4+ runs postmarketOS with an LK boot loader that hands
 a ramdisk to the kernel, and that initramfs is what mounts /boot, finds the rootfs
 by UUID and starts init in pmOS's partition layout. The downstream armv7 ramdisk
 knows how to do that; a mainline defconfig ramdisk would not. So this tool takes
-a boot image from a finished postmarketOS build and replaces exactly one payload
-field, leaving the ramdisk byte for byte the same.
+a boot image from a finished postmarketOS build and replaces its kernel payload,
+leaving the ramdisk byte for byte the same. The kernel load address is updated
+to the alignment required by the ARM64 Image header; other addresses are kept.
 
 Layout of the legacy header (version 0) this phone uses, all little endian, all
 u32 unless noted:
 
     0   magic "ANDROID!"
     8   kernel_size
-   12   kernel_addr        0x80008000 on the J4+
+   12   kernel_addr        ARM64-aligned kernel address (donor used 0x80008000)
    16   ramdisk_size
    20   ramdisk_addr       0x82000000
    24   second_size        (the vendor "second" area; kept as is)
@@ -231,11 +232,11 @@ class BootImage:
         self.data[ID_OFFSET:ID_OFFSET + 32] = digest.ljust(32, b'\0')
 
     def repack(self, kernel: bytes, ramdisk=None, second=None,
-               cmdline: str = None) -> 'BootImage':
+               cmdline: str = None, kernel_addr=None) -> 'BootImage':
         out = BootImage(bytes(self.data))
         ramdisk = self.ramdisk if ramdisk is None else ramdisk
         second = self.second if second is None else second
-        out._build(kernel, ramdisk, second)
+        out._build(kernel, ramdisk, second, kernel_addr=kernel_addr)
         # _build starts from a fresh header page, so the cmdline has to be written
         # after it; the donor's arguments are carried over by the caller.
         if cmdline is not None:
@@ -243,18 +244,18 @@ class BootImage:
         out.set_id(kernel, ramdisk, second)
         return out
 
-    def _build(self, kernel: bytes, ramdisk: bytes, second: bytes):
+    def _build(self, kernel: bytes, ramdisk: bytes, second: bytes, kernel_addr=None):
         """Re-serialize the image: header page, then the three payloads.
 
-        Every field that is not derived from the payloads is carried over from the
-        donor, because LK reads the load addresses and os_version and has no way
-        to forgive a change there.
+        Preserve donor metadata and other load addresses. For an ARM64 kernel,
+        the caller may supply the address required by that Image's text_offset.
         """
         page = self.page_size
         # Preserve the donor's entire header page, including vendor padding.
         out = bytearray(self.data[:page])
         out[0:8] = MAGIC
-        struct.pack_into('<10I', out, 8, len(kernel), self.kernel_addr,
+        kernel_addr = self.kernel_addr if kernel_addr is None else kernel_addr
+        struct.pack_into('<10I', out, 8, len(kernel), kernel_addr,
                          len(ramdisk), self.ramdisk_addr,
                          len(second), self.second_addr,
                          self.tags_addr, page, 0, self.os_version)
@@ -275,7 +276,26 @@ class BootImage:
         self.kernel_size, self.ramdisk_size, self.second_size = \
             len(kernel), len(ramdisk), len(second)
         self.kernel, self.ramdisk, self.second = kernel, ramdisk, second
+        self.kernel_addr = kernel_addr
         self.cmdline = self._read_cmdline()
+
+
+def arm64_kernel_addr(donor_addr: int, kernel: bytes) -> int:
+    """Align the header address to the ARM64 Image's 2 MiB/text-offset rule."""
+    try:
+        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        header = decoder.decompress(kernel, 64)
+    except zlib.error as exc:
+        raise ValueError('cannot read ARM64 Image header from gzip') from exc
+    if len(header) < 64 or header[56:60] != b'ARM\x64':
+        raise ValueError('decompressed kernel does not have an ARM64 Image header')
+    offset = struct.unpack_from('<Q', header, 8)[0]
+    if offset >= 2 * 1024 * 1024 or offset % 4096:
+        raise ValueError('ARM64 text_offset is not a supported page-aligned offset')
+    address = (donor_addr & ~((1 << 21) - 1)) + offset
+    if not 0 <= address <= 0xffffffff:
+        raise ValueError('ARM64 load address does not fit the boot v0 header')
+    return address
 
 
 def build(base: BootImage, kernel: bytes, debug_shell: bool = False,
@@ -295,7 +315,9 @@ def build(base: BootImage, kernel: bytes, debug_shell: bool = False,
     if debug_shell:
         extra.append(DEBUG_FLAG)
     extra += split_args(cmdline_extra)
-    image = base.repack(kernel, cmdline=with_cmdline(base.cmdline, extra))
+    kernel_addr = arm64_kernel_addr(base.kernel_addr, kernel)
+    image = base.repack(kernel, cmdline=with_cmdline(base.cmdline, extra),
+                        kernel_addr=kernel_addr)
     # Re-read through the same parser: if the header we just wrote does not
     # describe the payloads we wrote, the packing is wrong and it must not ship.
     check = BootImage(bytes(image.data))
@@ -304,9 +326,9 @@ def build(base: BootImage, kernel: bytes, debug_shell: bool = False,
                                           'must be copied byte for byte'
     assert check.second == base.second, 'second area changed without being asked to'
     assert check.name == base.name, 'boot partition name changed'
-    assert (check.kernel_addr, check.ramdisk_addr, check.tags_addr,
-            check.page_size) == (base.kernel_addr, base.ramdisk_addr,
-                                 base.tags_addr, base.page_size)
+    assert check.kernel_addr == kernel_addr, 'ARM64 load address did not round-trip'
+    assert (check.ramdisk_addr, check.tags_addr, check.page_size) == \
+           (base.ramdisk_addr, base.tags_addr, base.page_size)
     return image
 
 
@@ -323,6 +345,7 @@ def report(image: BootImage, base: BootImage, base_path: Path, kernel_path: Path
         f'page size : {image.page_size}, header v{image.header_version}',
         f'load addrs: kernel 0x{image.kernel_addr:08x} '
         f'ramdisk 0x{image.ramdisk_addr:08x} tags 0x{image.tags_addr:08x}',
+        f'kernel addr: donor 0x{base.kernel_addr:08x} -> ARM64 0x{image.kernel_addr:08x}',
         f'cmdline   : {image.cmdline}',
         f'image     : {out_path} ({len(image.data)} bytes)',
     ]
@@ -357,8 +380,11 @@ def main(argv=None):
         raise SystemExit(str(exc))
     print(f'kernel payload: {dtb_at} B Image.gz + '
           f'{len(kernel) - dtb_at} B appended DTB')
-    image = build(base, kernel, debug_shell=args.debug_shell,
-                  cmdline_extra=args.cmdline_extra)
+    try:
+        image = build(base, kernel, debug_shell=args.debug_shell,
+                      cmdline_extra=args.cmdline_extra)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_bytes(bytes(image.data))
     text = report(image, base, args.base, args.kernel, args.out)

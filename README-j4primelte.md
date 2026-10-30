@@ -337,8 +337,9 @@ The build checks more than the image extension:
 
 - it verifies the pinned donor's full SHA-256, Android-v0 payload/size ID, page
   size and root UUID, and rejects a different donor;
-- it retains the donor ramdisk and boot-header load addresses and hashes the
-  correct Android-v0 payload/size ID. The J4+ DTB starts immediately at gzip
+- it retains the donor ramdisk, ramdisk/tags addresses and other metadata, sets
+  the kernel load address using the ARM64 Image's 2 MiB alignment and text offset,
+  and hashes the correct Android-v0 payload/size ID. The J4+ DTB starts at gzip
   EOF on an 8-byte boundary; optional gzip FNAME header bytes supply alignment
   without leaving a gap that a reference Qualcomm LK would misinterpret;
 - it independently reads each output, checks its boot ID, donor ramdisk and

@@ -418,8 +418,21 @@ def check_boot(boot_dir: Path, base: Path, failures: list, required_images=()):
             failures.append(f'{name}: ramdisk is not the donor ramdisk byte for byte')
         if img['second'] != donor['second']:
             failures.append(f'{name}: second payload changed')
-        if img['addresses'] != donor['addresses']:
-            failures.append(f'{name}: one or more donor header addresses changed')
+        if img['addresses'][1:] != donor['addresses'][1:]:
+            failures.append(f'{name}: donor ramdisk/tags or other header fields changed')
+        try:
+            header = zlib.decompress(img['kernel'], 16 + zlib.MAX_WBITS)[:64]
+            if len(header) < 64 or header[56:60] != b'ARM\x64':
+                raise ValueError('not an ARM64 Image')
+            offset = struct.unpack_from('<Q', header, 8)[0]
+            if offset >= 2 * 1024 * 1024 or offset % 4096:
+                raise ValueError('unsupported ARM64 text_offset')
+            expected_addr = (donor['addresses'][0] & ~((1 << 21) - 1)) + offset
+            if img['addresses'][0] != expected_addr:
+                failures.append(f'{name}: ARM64 kernel load address is not '
+                                f'0x{expected_addr:x} for text_offset 0x{offset:x}')
+        except (ValueError, zlib.error, struct.error) as exc:
+            failures.append(f'{name}: cannot verify ARM64 load address: {exc}')
         if len(data) > 32 * 1024 * 1024:
             failures.append(f'{name}: image exceeds the measured 32 MiB BOOT partition')
         if root_uuid(img['cmdline']) != donor_uuid or not donor_uuid:
@@ -476,10 +489,8 @@ def check_memory_layout(mainline: Path, base: Path, name: str, failures: list):
                                     f'0x{start:x}-0x{end:x} could overlap '
                                     f'{label} at 0x{low:x}-0x{high:x}; '
                                     'refusing an unproven memory layout')
-        if (ka - text_offset) % (1 << 21):
-            print(f'{name}: donor header kernel address 0x{ka:x} is not aligned '
-                  f'for ARM64 text_offset 0x{text_offset:x}; LK must relocate it '
-                  '(device behavior unverified)')
+        print(f'{name}: ARM64 header address would be 0x{base_2m + text_offset:x}; '
+              'actual Samsung LK placement remains unverified')
     except (ValueError, UnicodeError, struct.error, zlib.error) as exc:
         failures.append(f'{name}: could not audit kernel/ramdisk memory layout: {exc}')
 

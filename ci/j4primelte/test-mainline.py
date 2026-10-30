@@ -69,10 +69,10 @@ def fake_dtb(size: int = 4096) -> bytes:
     return DTB_MAGIC + struct.pack('>I', size) + b'\0' * (size - 8)
 
 
-def fake_arm64_image(size: int = 4096) -> bytes:
+def fake_arm64_image(size: int = 4096, text_offset: int = 0x80000) -> bytes:
     """Minimal independently readable ARM64 Image header for verifier tests."""
     image = bytearray(b'K' * size)
-    struct.pack_into('<QQQ', image, 8, 0x80000, size, 0)
+    struct.pack_into('<QQQ', image, 8, text_offset, size, 0)
     image[56:60] = b'ARM\x64'
     return bytes(image)
 
@@ -237,7 +237,7 @@ class BootPacking(unittest.TestCase):
 
     def test_kernel_swaps_and_ramdisk_survives(self):
         base = repack.BootImage(make_boot())
-        payload = append_dtb(gzip.compress(b'arm64 Image body' * 100), fake_dtb(8192))
+        payload = append_dtb(gzip.compress(fake_arm64_image()), fake_dtb(8192))
         out = repack.build(base, payload)
         self.assertEqual(out.kernel, payload)
         self.assertEqual(out.ramdisk, base.ramdisk)
@@ -256,7 +256,7 @@ class BootPacking(unittest.TestCase):
     def test_id_is_recomputed_over_the_payload(self):
         import hashlib
         base = repack.BootImage(make_boot())
-        payload = append_dtb(gzip.compress(b'k' * 4000), fake_dtb())
+        payload = append_dtb(gzip.compress(fake_arm64_image()), fake_dtb())
         out = repack.build(base, payload)
         # mkbootimg hashes each payload followed by its little-endian size.
         h = hashlib.sha1()
@@ -274,7 +274,7 @@ class BootPacking(unittest.TestCase):
 
     def test_bootargs_are_appended_once(self):
         base = repack.BootImage(make_boot())
-        payload = append_dtb(gzip.compress(b'k' * 4000), fake_dtb())
+        payload = append_dtb(gzip.compress(fake_arm64_image()), fake_dtb())
         out = repack.build(base, payload, debug_shell=True)
         tokens = out.cmdline.split()
         for flag in ('clk_ignore_unused', 'pd_ignore_unused', 'regulator_ignore_unused',
@@ -298,8 +298,22 @@ class BootPacking(unittest.TestCase):
             self.assertEqual(again.cmdline.encode(), text,
                              'cross-field bootargs must round-trip verbatim')
 
+    def test_arm64_kernel_address_uses_header_offset(self):
+        for offset, expected in ((0, 0x80000000), (0x80000, 0x80080000)):
+            body = fake_arm64_image(text_offset=offset)
+            payload = append_dtb(gzip.compress(body), fake_dtb())
+            base = repack.BootImage(make_boot())
+            out = repack.build(base, payload)
+            self.assertEqual(out.kernel_addr, expected)
+            self.assertEqual(repack.BootImage(bytes(out.data)).kernel_addr, expected)
+            self.assertEqual(out.ramdisk_addr, base.ramdisk_addr)
+            self.assertEqual(out.tags_addr, base.tags_addr)
+        invalid = append_dtb(gzip.compress(fake_arm64_image(text_offset=1)), fake_dtb())
+        with self.assertRaises(ValueError):
+            repack.build(repack.BootImage(make_boot()), invalid)
+
     def test_invalid_or_ambiguous_root_uuid_is_refused(self):
-        payload = append_dtb(gzip.compress(b'k' * 4000), fake_dtb())
+        payload = append_dtb(gzip.compress(fake_arm64_image()), fake_dtb())
         for command in ('console=ttyMSM0', 'pmos_root_uuid=abc',
                         'pmos_root_uuid=86e7262b-b628-4b89-8a6e-e96ef9b1aab6 '
                         'pmos_root_uuid=86e7262b-b628-4b89-8a6e-e96ef9b1aab6'):
@@ -358,7 +372,7 @@ class BootPacking(unittest.TestCase):
         # The BOOT partition is 32 MiB; rather than allocate that in a unit test,
         # shrink the limit and prove the packer honours it.
         base = repack.BootImage(make_boot(page=2048))
-        payload = append_dtb(gzip.compress(b'arm64 kernel' * 512), fake_dtb())
+        payload = append_dtb(gzip.compress(fake_arm64_image()), fake_dtb())
         self.assertLess(len(payload), repack.MAX_IMAGE)
         original = repack.MAX_IMAGE
         try:
@@ -453,7 +467,7 @@ class RepackCli(unittest.TestCase):
             return data, (root / 'report.txt').read_text(), repack.BootImage(data)
 
     def test_real_payload_packs_and_reports(self):
-        payload = append_dtb(gzip.compress(b'arm64 Image body' * 40), fake_dtb())
+        payload = append_dtb(gzip.compress(fake_arm64_image()), fake_dtb())
         data, report, img = self.run_cli(payload, debug=True)
         self.assertEqual(img.kernel, payload)
         self.assertEqual(img.ramdisk, repack.BootImage(make_boot()).ramdisk,
@@ -463,7 +477,7 @@ class RepackCli(unittest.TestCase):
             self.assertIn(token, img.cmdline.split())
         self.assertIn('copied byte for byte', report)
         self.assertIn('header v0', report)
-        self.assertIn('0x80008000', report, 'load addresses must be carried over')
+        self.assertIn('0x80080000', report, 'kernel address must match ARM64 text_offset')
         self.assertTrue(data[:8] == b'ANDROID!')
 
     def test_tree_bigger_than_a_page_is_still_found(self):
@@ -471,13 +485,13 @@ class RepackCli(unittest.TestCase):
         # where a DTB's *end* is, not its header: the real j4primelte tree is 43
         # KiB and was therefore refused by the tool that built it.
         tree = fake_dtb(43 * 1024 + 7)
-        payload = append_dtb(gzip.compress(b'arm64 kernel' * 512), tree)
+        payload = append_dtb(gzip.compress(fake_arm64_image()), tree)
         data, _report, img = self.run_cli(payload)
         self.assertEqual(img.kernel, payload)
         self.assertEqual(img.kernel[len(img.kernel) - len(tree):], tree)
 
     def test_tree_not_reaching_the_last_byte_is_refused(self):
-        payload = append_dtb(gzip.compress(b'arm64 kernel' * 512),
+        payload = append_dtb(gzip.compress(fake_arm64_image()),
                              fake_dtb(4096)) + b'trailer'
         with self.assertRaises(SystemExit) as ctx:
             self.run_cli(payload)
@@ -511,7 +525,7 @@ class RepackCli(unittest.TestCase):
         self.assertIn('gzip', str(ctx.exception))
 
     def test_repeated_bootargs_are_not_duplicated(self):
-        payload = append_dtb(gzip.compress(b'k' * 500), fake_dtb())
+        payload = append_dtb(gzip.compress(fake_arm64_image()), fake_dtb())
         _, _, img = self.run_cli(payload, extra=['--cmdline-extra', 'rootwait'])
         tokens = img.cmdline.split()
         self.assertEqual(tokens.count('rootwait'), 1,
@@ -922,6 +936,12 @@ class VerifyHelpers(unittest.TestCase):
             verify.check_boot(bootdir, root / 'donor.img', failures,
                               required_images=['boot-m1-debug.img'])
             self.assertEqual(failures, [])
+            damaged = bytearray(good.data)
+            struct.pack_into('<I', damaged, 12, 0x80008000)
+            path.write_bytes(damaged)
+            failures = []
+            verify.check_boot(bootdir, root / 'donor.img', failures)
+            self.assertTrue(any('kernel load address' in f for f in failures), failures)
             damaged = bytearray(good.data)
             damaged[576] ^= 1
             path.write_bytes(damaged)
