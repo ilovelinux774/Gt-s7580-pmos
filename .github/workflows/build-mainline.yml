@@ -1,0 +1,174 @@
+name: Build mainline arm64 boot image for J4+ SM-J415F (M1)
+
+# What this job is for, and what it deliberately is not:
+#
+#   * It builds the pinned msm89x7 mainline tree for arm64 and puts that kernel
+#     into a boot image by swapping ONLY the kernel field of a boot.img that a
+#     known-good #37 release produced. The pmOS ramdisk is carried over unchanged,
+#     because it is what mounts /boot and starts init in pmOS's partition
+#     layout - the mainline defconfig enables no Samsung-specific ramdisk driver
+#     and would not know what to do with it.
+#   * It never builds or flashes a rootfs. The M1 debug image requests an
+#     initramfs shell before mounting the installed rootfs; USB and UART are
+#     bring-up goals, not claimed to work on untested hardware.
+#   * The donor is the same phone's own boot image, so the page size, the load
+#     addresses and the cmdline length limits in ci/j4primelte/mainline-repack-boot.py
+#     match the target. A GT-S7580 boot.img is used for header parsing tests
+#     only and must never be treated as a donor.
+
+on:
+  workflow_dispatch:
+    inputs:
+      panel_milestone:
+        description: 'M2 as well: build the panel DTB and the .config that can drive it'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: j4primelte-mainline-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      GIT_TERMINAL_PROMPT: "0"
+      PYTHONUNBUFFERED: "1"
+      # The job installs its own toolchain below; build-mainline.sh must not
+      # try to apt-get a second time.
+      J4_MAINLINE_SKIP_APT: "1"
+      J4_MAINLINE_KERNEL_TREE: /home/runner/j4-mainline-kernel
+      J4_MAINLINE_BASE_BOOT: /home/runner/j4-mainline-donor/boot.img
+    steps:
+      - name: Require the J4+ working branch
+        run: |
+          test "$GITHUB_REF_NAME" = pmos-j4primelte-20260927 || { echo "Select the pmos-j4primelte-20260927 branch when running this workflow" >&2; exit 1; }
+
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Python for the staging and packing scripts
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the arm64 cross toolchain
+        run: |
+          # The build step pipes its output into artifacts/logs before the script
+          # gets a chance to create it, so this cannot live further down.
+          mkdir -p artifacts/logs artifacts/mainline artifacts/donor
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            bc bison flex git curl ca-certificates file kmod rsync xz-utils \
+            device-tree-compiler libelf-dev libssl-dev zlib1g-dev \
+            libncurses-dev python3-yaml
+          df -h
+          aarch64-linux-gnu-gcc --version | head -1
+          dtc --version
+
+      - name: Check every script before the long compile
+        run: |
+          bash -n ci/j4primelte/build-mainline.sh
+          bash ci/j4primelte/build-mainline.sh -n
+          python3 -m compileall -q ci/j4primelte
+          python3 ci/j4primelte/test-mainline.py
+          python3 ci/j4primelte/test-kernel-cache.py
+
+      - name: Fetch and verify the known-good J4+ donor
+        run: |
+          set -euo pipefail
+          source ci/j4primelte/mainline-sources.env
+          mkdir -p artifacts/donor "$HOME/j4-mainline-donor"
+          curl --fail --location --show-error --retry 3 --connect-timeout 20 \
+            "$J4_MAINLINE_DONOR_URL" -o "$J4_MAINLINE_BASE_BOOT"
+          python3 ci/j4primelte/donor-note.py "$J4_MAINLINE_BASE_BOOT" \
+            artifacts/donor/DONOR.txt \
+            --expect-sha256 "$J4_MAINLINE_DONOR_SHA256" \
+            --expect-root-uuid "$J4_MAINLINE_DONOR_ROOT_UUID"
+
+      - name: Clone, configure and build the mainline kernel
+        # J4_MAINLINE_PANEL is the only knob the script has for M2; passing a
+        # --panel argument instead would be silently ignored and produce an
+        # M1-only run.
+        env:
+          J4_MAINLINE_PANEL: ${{ inputs.panel_milestone && '1' || '0' }}
+        run: |
+          set -eu
+          bash ci/j4primelte/build-mainline.sh 2>&1 \
+            | tee artifacts/logs/mainline-build.log
+
+      - name: Verify the artifacts with the independent checker
+        # verify-mainline.py re-parses the packed images and the compiled DTBs
+        # from scratch (it does not trust the build log); its arguments are
+        # positional, and the third is the literal word "panel", which is what
+        # tells it an M2 variant existed and must be checked too.
+        run: |
+          set -eu
+          word=()
+          [ "${{ inputs.panel_milestone }}" = "true" ] && word=(panel)
+          python3 ci/j4primelte/verify-mainline.py artifacts/mainline \
+            "$J4_MAINLINE_BASE_BOOT" "${word[@]}" \
+            | tee artifacts/logs/mainline-verify.txt
+
+      - name: Collect diagnostics even on failure
+        if: always()
+        run: |
+          mkdir -p artifacts/logs
+          # The per-variant build logs and merged .configs already live in
+          # artifacts/logs; the ones the script could not write (a make that died
+          # before the redirect) are recovered from the output directories.
+          for out in "$HOME"/j4-mainline-out-*; do
+            [ -f "$out/.config" ] || continue
+            cp "$out/.config" "artifacts/logs/$(basename "$out").config"
+            [ -f "$out/kconfig.log" ] && cp "$out/kconfig.log" "artifacts/logs/" || true
+          done
+          for dtb in "$HOME"/j4-mainline-out-*/arch/arm64/boot/dts/qcom/msm8917-samsung-j4primelte*.dtb; do
+            [ -f "$dtb" ] || continue
+            dtc -I dtb -O dts "$dtb" > "artifacts/logs/$(basename "$dtb").dts" 2>/dev/null || true
+          done
+          git -C "$J4_MAINLINE_KERNEL_TREE" status --porcelain \
+            > artifacts/logs/kernel-tree-staging.txt 2>/dev/null || true
+          git diff --stat > artifacts/logs/worktree.txt
+          df -h > artifacts/logs/disk-space.txt
+          sudo chown -R "$(id -u):$(id -g)" artifacts || true
+
+      - name: Upload flashable boot images
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-mainline-boot-${{ github.run_number }}
+          path: artifacts/mainline/boot/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload kernel inputs and device trees
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-mainline-kernel-${{ github.run_number }}
+          path: |
+            artifacts/mainline/
+            artifacts/donor/DONOR.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-mainline-logs-${{ github.run_number }}
+          path: artifacts/logs/
+          if-no-files-found: warn
+          retention-days: 14
