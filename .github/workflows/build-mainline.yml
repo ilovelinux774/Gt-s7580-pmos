@@ -3,8 +3,8 @@ name: Build mainline arm64 boot image for J4+ SM-J415F (M1)
 # What this job is for, and what it deliberately is not:
 #
 #   * It builds the pinned msm89x7 mainline tree for arm64 and puts that kernel
-#     into a boot image by swapping ONLY the kernel field of a boot.img that a
-#     known-good #37 release produced. The pmOS ramdisk is carried over unchanged,
+#     into a boot image by replacing the kernel and aligning its ARM64 load
+#     address in the known-good #37 boot header. The pmOS ramdisk is unchanged,
 #     because it is what mounts /boot and starts init in pmOS's partition
 #     layout - the mainline defconfig enables no Samsung-specific ramdisk driver
 #     and would not know what to do with it.
