@@ -279,10 +279,31 @@ class BootPacking(unittest.TestCase):
         out = repack.build(base, payload, debug_shell=True)
         tokens = out.cmdline.split()
         for flag in ('clk_ignore_unused', 'pd_ignore_unused', 'regulator_ignore_unused',
-                     'rootwait', 'pmos.debug-shell'):
+                     'rootwait', 'pmos.debug-shell', 'pstore.compress=none'):
             self.assertEqual(tokens.count(flag), 1, f'{flag} in {out.cmdline}')
         self.assertIn('pmos_root_uuid=86e7262b-b628-4b89-8a6e-e96ef9b1aab6', tokens,
                       'the donor root marker has to survive or init never exits')
+
+    def test_pstore_compression_is_off_and_conflicts_are_rejected(self):
+        base = repack.BootImage(make_boot())
+        payload = append_dtb(gzip.compress(fake_arm64_image()), fake_dtb())
+        for debug in (False, True):
+            out = repack.build(base, payload, debug_shell=debug)
+            self.assertEqual([t for t in out.cmdline.split()
+                              if t.startswith('pstore.compress=')],
+                             ['pstore.compress=none'])
+        for args in ('pstore.compress=deflate', 'pstore.compress=',
+                     'pstore.compress=none pstore.compress=none'):
+            with self.subTest(args=args), self.assertRaisesRegex(ValueError, 'pstore'):
+                repack.build(base, payload, cmdline_extra=args)
+        existing = repack.BootImage(make_boot(cmdline=base.cmdline +
+                                             ' pstore.compress=none'))
+        self.assertEqual(repack.build(existing, payload).cmdline.split().count(
+                         'pstore.compress=none'), 1)
+        existing = repack.BootImage(make_boot(cmdline=base.cmdline +
+                                             ' pstore.compress=deflate'))
+        with self.assertRaisesRegex(ValueError, 'pstore'):
+            repack.build(existing, payload)
 
     def test_cmdline_uses_exact_android_v0_split(self):
         short = b'a' * 500 + b' tok tok'
@@ -1070,6 +1091,35 @@ class DeviceTree(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'kernel.*overlaps'):
             check.audit_reservations(tree, [('kernel', 0x85000000, 0x85001000)])
 
+    def test_ramoops_console_matches_rev06_and_missing_ftrace_is_rejected(self):
+        fdtput = shutil.which('fdtput')
+        if not fdtput or not shutil.which('fdtget'):
+            self.skipTest('fdtput/fdtget are not installed')
+        node = '/reserved-memory/ramoops@86000000'
+        check = verify.loader_checks
+        for source in (staging.DTS, staging.PANEL_DTS):
+            tree = self.out / ('ramoops-' + source + '.dtb')
+            good = self.compile(source)
+            tree.write_bytes(good)
+            self.assertEqual(check.require_ramoops_console_compat(tree),
+                             (0x86000000, 0x86040000), source)
+            # The failed M1 image omitted ftrace-size, shifting its mainline
+            # console to the vendor ftrace address 0x86080000.
+            subprocess.run([fdtput, '-d', str(tree), node, 'ftrace-size'],
+                           check=True)
+            with self.assertRaisesRegex(ValueError, 'ftrace-size'):
+                check.require_ramoops_console_compat(tree)
+            tree.write_bytes(good)
+            subprocess.run([fdtput, '-t', 's', str(tree), node, 'status',
+                            'disabled'], check=True)
+            with self.assertRaisesRegex(ValueError, 'disabled'):
+                check.require_ramoops_console_compat(tree)
+            tree.write_bytes(good)
+            subprocess.run([fdtput, '-t', 'x', str(tree), node, 'record-size',
+                            '20000'], check=True)
+            with self.assertRaisesRegex(ValueError, 'record-size'):
+                check.require_ramoops_console_compat(tree)
+
     def test_console_uart_is_enabled_and_first(self):
         text = self.decompile(self.compile(staging.DTS))
         self.assertRegex(text, r'stdout-path\s*=\s*"serial0')
@@ -1143,6 +1193,12 @@ class VerifyHelpers(unittest.TestCase):
             failures = []
             verify.check_boot(root / 'boot', root / 'donor.img', failures)
             self.assertEqual(failures, [])
+            bad_cmdline = good.with_cmdline(good.cmdline.replace(
+                'pstore.compress=none', 'pstore.compress=deflate'))
+            (root / 'boot' / 'boot-m1-rootfs.img').write_bytes(bytes(bad_cmdline.data))
+            failures = []
+            verify.check_boot(root / 'boot', root / 'donor.img', failures)
+            self.assertTrue(any('pstore.compress' in f for f in failures), failures)
             # A swapped-out ramdisk is the mistake this exists to catch.
             tampered = bytearray(good.data)
             start = repack.align(len(payload), good.page_size) + good.page_size

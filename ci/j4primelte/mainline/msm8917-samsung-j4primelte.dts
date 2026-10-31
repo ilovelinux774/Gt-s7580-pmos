@@ -173,15 +173,22 @@
 		};
 
 		/*
-		 * Downstream çekirdek de ramoops'u burada tutuyor: başarısız bir
-		 * mainline açılışından sonra #31'e dönünce /sys/fs/pstore'dan
-		 * çökme günlüğü okunabilir (bootloader belleği silmezse).
+		 * Match the vendor Rev06 dump and console buffer addresses so a
+		 * subsequent vendor-kernel boot can read mainline pstore records.
+		 * Both the 3.18 vendor ramoops and pinned mainline ramoops allocate
+		 * dump records before the console. Without ftrace-size, mainline
+		 * moves the console from 0x86040000 to 0x86080000, where the vendor
+		 * kernel expects ftrace instead. Later pmsg/ftrace allocation order
+		 * differs between the kernels, so only dump/console are matched.
+		 * Recovery also needs a compatible pstore backend and retained RAM;
+		 * neither is guaranteed on the physical device.
 		 */
 		ramoops@86000000 {
 			compatible = "ramoops";
 			reg = <0x0 0x86000000 0x0 0x100000>;
 			console-size = <0x40000>;
 			record-size = <0x40000>;
+			ftrace-size = <0x40000>;
 			pmsg-size = <0x40000>;
 		};
 

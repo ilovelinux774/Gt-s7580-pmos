@@ -501,6 +501,10 @@ def check_boot(boot_dir: Path, base: Path, failures: list, required_images=()):
                      'regulator_ignore_unused', 'rootwait', 'earlycon'):
             if flag not in img['cmdline'].split():
                 failures.append(f'{name}: required boot argument {flag} missing')
+        compression = [arg for arg in img['cmdline'].split()
+                       if arg.split('=', 1)[0] == 'pstore.compress']
+        if compression != ['pstore.compress=none']:
+            failures.append(f'{name}: pstore.compress must be none exactly once')
 
 
 def check_memory_layout(mainline: Path, base: Path, name: str, failures: list):
@@ -523,9 +527,12 @@ def check_memory_layout(mainline: Path, base: Path, name: str, failures: list):
         occupied = loader_checks.runtime_layout(raw, dtb.stat().st_size,
                                                 boot_size, len(donor['ramdisk']), page)
         loader_checks.require_loader_nodes(dtb)
+        dump_addr, console_addr = loader_checks.require_ramoops_console_compat(dtb)
         regions = loader_checks.audit_reservations(dtb, occupied)
         print(f'{name}: audited {len(regions)} active reservation tuples and '
               f'{len(occupied)} loader/kernel regions (recorded 2-GiB RAM model)')
+        print(f'{name}: ramoops dump 0x{dump_addr:x}, console 0x{console_addr:x} '
+              '(Rev06 vendor layout; physical RAM retention not tested)')
     except (OSError, ValueError, UnicodeError, struct.error, zlib.error) as exc:
         failures.append(f'{name}: could not audit loader memory layout: {exc}')
 

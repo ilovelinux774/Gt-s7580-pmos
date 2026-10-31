@@ -194,6 +194,35 @@ def require_loader_nodes(dtb: Path):
         raise ValueError('missing Samsung memshare client_4 / peripheral-size')
 
 
+def require_ramoops_console_compat(dtb: Path):
+    """Keep the mainline dump/console locations compatible with Rev06 3.18.
+
+    Pinned Linux 7.1.3 and the inspected vendor 3.18 both allocate dump
+    records first and then the console, but allocate pmsg/ftrace in different
+    orders. This validates only dump and console placement; it cannot establish
+    recovery compatibility, kernel progress, or RAM retention across a reset.
+    """
+    node = '/reserved-memory/ramoops@86000000'
+    if fdtget(dtb, node, 'compatible', 's') != 'ramoops':
+        raise ValueError('missing ramoops device')
+    status = fdtget(dtb, node, 'status', 's')
+    if status is not None and status not in ('okay', 'ok'):
+        raise ValueError('ramoops device is disabled')
+    regions = tuple_ranges(words(dtb, node, 'reg'), node)
+    if regions != [(0x86000000, 0x86100000)]:
+        raise ValueError('ramoops region differs from the Rev06 vendor DTB')
+    for name in ('record-size', 'console-size', 'pmsg-size', 'ftrace-size'):
+        if words(dtb, node, name) != [0x40000]:
+            raise ValueError(f'ramoops {name} differs from the Rev06 layout')
+    total = regions[0][1] - regions[0][0]
+    used_after_dumps = sum(words(dtb, node, name)[0] for name in
+                           ('console-size', 'pmsg-size', 'ftrace-size'))
+    dump_size = total - used_after_dumps
+    if dump_size != 0x40000 or regions[0][0] + dump_size != 0x86040000:
+        raise ValueError('ramoops dump/console addresses do not match the vendor')
+    return regions[0][0], regions[0][0] + dump_size
+
+
 def runtime_layout(image: bytes, tree_size: int, boot_size: int, ramdisk_size: int,
                    page_size: int):
     if len(image) < 64 or image[56:60] != b'ARM\x64':

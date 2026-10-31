@@ -53,12 +53,13 @@ HEADER_BYTES = EXTRA_CMDLINE_OFFSET + CMDLINE_REST
 MAX_IMAGE = 32 * 1024 * 1024                # the BOOT partition is 32 MiB
 IMAGE_NAME = b'j4primelte'
 
-# What the kernel needs on the command line to survive on a phone whose display
-# and modems were started by the bootloader and are not claimed by any mainline
-# driver yet. These are appended to the donor's existing command line,
-# including its console settings and pmos_root_uuid.
+# Preserve the bootloader's display/modem resources and donor boot arguments.
+# Mainline's raw-deflate pstore crash records are not decompressed by the
+# inspected 3.18 vendor backend (which expects zlib-wrapped deflate). Store
+# uncompressed panic records so the same-layout vendor reader can read them
+# if the phone retains RAM and recovery has a compatible pstore backend.
 MAINLINE_BOOTARGS = ('clk_ignore_unused pd_ignore_unused regulator_ignore_unused '
-                     'rootwait earlycon')
+                     'rootwait earlycon pstore.compress=none')
 # postmarketOS initramfs flag: drop to the telnet shell instead of mounting the
 # rootfs. The only way to look at a phone whose panel stays black.
 DEBUG_FLAG = 'pmos.debug-shell'
@@ -318,6 +319,10 @@ def build(base: BootImage, kernel: bytes, debug_shell: bool = False,
         raise ValueError('donor must include a nonempty kernel and initramfs')
     if not debug_shell and DEBUG_FLAG in split_args(base.cmdline):
         raise ValueError('rootfs image cannot be built from a debug-shell donor')
+    requested = split_args(base.cmdline) + split_args(cmdline_extra)
+    compression = [arg for arg in requested if arg.split('=', 1)[0] == 'pstore.compress']
+    if any(arg != 'pstore.compress=none' for arg in compression) or len(compression) > 1:
+        raise ValueError('pstore.compress must be absent or exactly none once')
     extra = split_args(MAINLINE_BOOTARGS)
     if debug_shell:
         extra.append(DEBUG_FLAG)
