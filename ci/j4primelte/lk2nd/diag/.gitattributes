@@ -1,0 +1,2 @@
+# Unified patch context lines carry a required leading space before tabs/empty lines.
+*.patch whitespace=-blank-at-eol,-space-before-tab

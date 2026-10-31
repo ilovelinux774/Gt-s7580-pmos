@@ -1,0 +1,131 @@
+diff --git a/platform/msm_shared/scm.c b/platform/msm_shared/scm.c
+index fea0679..067f1e3 100644
+--- a/platform/msm_shared/scm.c
++++ b/platform/msm_shared/scm.c
+@@ -1052,6 +1052,83 @@ int scm_halt_pmic_arbiter()
+  * Assumes all sanity checks have been performed on arguments.
+  */
+ 
++/*
++ * J415F EXPERIMENTAL diagnostic, not a confirmed XPU or boot fix.
++ *
++ * A Samsung T380/T385 MSM8917 mainline port reported a silent failure when
++ * the ARM32->AArch64 monitor handoff came from the 0x8f600000 loader region.
++ * Its LK workaround relocates both the parameter block and SMC instruction to
++ * low HLOS RAM. J415F has not yet shown that this is its failure mechanism.
++ * See https://github.com/akprof2000/samsung-t385-postmarketos/blob/main/lk2nd/0001-samsung-xpu-smc-stub.patch
++ * and https://github.com/sapphicdisaster/t380-linux/blob/main/documentation/bootloader_and_trustzone.md
++ *
++ * The addresses below lie inside the primary loader's original LK load buffer,
++ * which has already been relocated by lk2nd, and below the second Image at
++ * 0x80080000. Actual firmware access permissions remain hardware-untested.
++ * Called only from boot_linux after arch_disable_cache(UCACHE) and MMU-off.
++ */
++#define J4_HLOS_PARAM_ADDR 0x80055000u
++#define J4_HLOS_STUB_ADDR  0x80056000u
++#define J4_PMSG_ZONE_ADDR  0x860c0000u
++#define J4_PSTORE_SIG      0x43474244u
++#define J4_MARKER_MAX      192u
++
++/* Commit a bounded vendor-style persistent-RAM ring, signature last.
++ * This deliberately replaces the OLD VOLATILE pmsg ring, not BOOT/rootfs,
++ * dmesg or console. Recovery layout and RAM retention are unconfirmed.
++ * The companion diagnostic DTB reserves this quarter separately so that
++ * mainline ramoops cannot initialize it as ftrace and erase the marker.
++ */
++static void j4_diag_stage(const char *message)
++{
++	volatile uint32_t *header = (volatile uint32_t *)J4_PMSG_ZONE_ADDR;
++	volatile uint8_t *data = (volatile uint8_t *)(J4_PMSG_ZONE_ADDR + 12u);
++	uint32_t n = 0;
++
++	header[0] = 0;
++	__asm__ volatile("dsb sy" ::: "memory");
++	while (n < J4_MARKER_MAX && message[n]) {
++		data[n] = message[n];
++		n++;
++	}
++	header[1] = n;
++	header[2] = n;
++	__asm__ volatile("dsb sy" ::: "memory");
++	header[0] = J4_PSTORE_SIG;
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++/* Copy an ARM-state SMC stub to HLOS RAM. Arguments are literal words, so
++ * there is no compiler-dependent literal pool. Unlike the T385 example this
++ * returns safely on SMC failure and follows the original retry-on-1 policy.
++ * r4-r6/lr are saved/restored if the monitor returns, per the AAPCS. On a
++ * successful 32->64 handoff this function never returns. */
++static uint32_t j4_hlos_smc(uint32_t x0, uint32_t x1, uint32_t x2,
++			    uint32_t x3, uint32_t x4, uint32_t x5)
++{
++	volatile uint32_t *s = (volatile uint32_t *)J4_HLOS_STUB_ADDR;
++	s[0]  = 0xe92d4070u; /* push {r4,r5,r6,lr} */
++	s[1]  = 0xe59f0024u; /* ldr r0, [pc, #36] */
++	s[2]  = 0xe59f1024u; /* ldr r1, [pc, #36] */
++	s[3]  = 0xe59f2024u; /* ldr r2, [pc, #36] */
++	s[4]  = 0xe59f3024u; /* ldr r3, [pc, #36] */
++	s[5]  = 0xe59f4024u; /* ldr r4, [pc, #36] */
++	s[6]  = 0xe59f5024u; /* ldr r5, [pc, #36] */
++	s[7]  = 0xe3a06000u; /* mov r6, #0 */
++	s[8]  = 0xe1600070u; /* smc #0 */
++	s[9]  = 0xe3500001u; /* cmp r0, #1 */
++	s[10] = 0x0afffffcu; /* beq to s[8] */
++	s[11] = 0xe8bd8070u; /* pop {r4,r5,r6,pc} */
++	s[12] = x0;
++	s[13] = x1;
++	s[14] = x2;
++	s[15] = x3;
++	s[16] = x4;
++	s[17] = x5;
++	__asm__ volatile("dsb sy\n\tisb" ::: "memory");
++	return ((uint32_t (*)(void))J4_HLOS_STUB_ADDR)();
++}
++
+ void scm_elexec_call(paddr_t kernel_entry, paddr_t dtb_offset)
+ {
+ 	uint32_t svc_id = SCM_SVC_MILESTONE_32_64_ID;
+@@ -1061,30 +1138,36 @@ void scm_elexec_call(paddr_t kernel_entry, paddr_t dtb_offset)
+ 	static el1_system_param param __attribute__((aligned(0x1000)));
+ 	scmcall_arg scm_arg = {0};
+ 
++	j4_diag_stage("J4DIAG-HLOS-1 A0: lk2nd entered SCM handoff\n");
+ 	param.el1_x0 = dtb_offset;
+ 	param.el1_elr = kernel_entry;
+ 
+ 	/* Response Buffer = Null as no response expected */
+-	dprintf(INFO, "Jumping to kernel via monitor\n");
++	dprintf(INFO, "Jumping to kernel via monitor (J4 HLOS diagnostic)\n");
+ 
+ 	if (!is_scm_armv8_support())
+ 	{
+-		/* Command Buffer */
++		/* Keep the original legacy path; do not assume this ABI is modern. */
++		j4_diag_stage("J4DIAG-HLOS-1 A1: legacy SCM path\n");
+ 		cmd_buf = (void *)&param;
+ 		cmd_len = sizeof(el1_system_param);
+-
+ 		scm_call(svc_id, cmd_id, cmd_buf, cmd_len, NULL, 0);
+ 	}
+ 	else
+ 	{
++		el1_system_param *hlos = (el1_system_param *)J4_HLOS_PARAM_ADDR;
++		memset(hlos, 0, sizeof(*hlos));
++		hlos->el1_x0 = dtb_offset;
++		hlos->el1_elr = kernel_entry;
+ 		scm_arg.x0 = MAKE_SIP_SCM_CMD(SCM_SVC_MILESTONE_32_64_ID, SCM_SVC_MILESTONE_CMD_ID);
+ 		scm_arg.x1 = MAKE_SCM_ARGS(0x2, SMC_PARAM_TYPE_BUFFER_READ);
+-		scm_arg.x2 = (uint32_t ) &param;
++		scm_arg.x2 = J4_HLOS_PARAM_ADDR;
+ 		scm_arg.x3 = sizeof(el1_system_param);
+-
+-		scm_call2(&scm_arg, NULL);
++		j4_diag_stage("J4DIAG-HLOS-1 A1: ARMv8 HLOS SMC path\n");
++		j4_hlos_smc(scm_arg.x0, scm_arg.x1, scm_arg.x2, scm_arg.x3, 0, 0);
+ 	}
+ 
++	j4_diag_stage("J4DIAG-HLOS-1 R: SCM returned, no handoff\n");
+ 	/* Assert if execution ever reaches here */
+ 	dprintf(CRITICAL, "Failed to jump to kernel\n");
+ 	ASSERT(0);

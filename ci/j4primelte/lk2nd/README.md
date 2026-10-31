@@ -1,15 +1,17 @@
 # J4+ lk2nd + M1 debug BOOT (experimental)
 
-This is an **untested-on-phone** attempt to get the existing mainline M1 kernel
-past the J415F's Samsung bootloader. It is not evidence that the kernel, USB,
-Wi-Fi, display or rootfs boots. The three earlier M1 images failed on the phone.
+The first J415F `lk2nd-m1-debug.img` was **device-tested and failed**: Tux,
+then blue screen and reboot. It is not evidence that Linux, USB, Wi-Fi, display
+or rootfs boots, and must not be presented as working. The three earlier M1
+images also failed. A separate hardware-untested HLOS handoff diagnostic is
+documented in [diag/README.md](diag/README.md).
 
-The single `lk2nd-m1-debug.img` is intended to replace **only BOOT** using
-OrangeFox's image installer. It contains no rootfs image and requires no fastboot.
-It must not be flashed to recovery or any other partition. The debug flag asks
-the unchanged #37 initramfs to stop in a shell before its normal rootfs mount;
-this behavior and all hardware-side writes remain unverified on this candidate.
-Do not run `pmos_continue_boot` during this first test: normal continuation can
+The combined image replaces **only BOOT** using OrangeFox; it contains no
+rootfs image and requires no fastboot. It must not be flashed to recovery or any
+other partition. The debug flag asks the unchanged #37 initramfs to stop in a
+shell before its normal rootfs mount; early hooks and hardware-side effects
+remain unverified. Do not run `pmos_continue_boot` during a preservation test:
+normal continuation can
 mount, check, resize or write the existing filesystem. Replacing the rootfs in
 a later milestone would erase the existing LXQt, Wi-Fi and audio state.
 Special recovery-message paths in the pinned lk2nd source can write `misc` even

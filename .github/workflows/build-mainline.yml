@@ -10,10 +10,12 @@ name: Build mainline arm64 boot image for J4+ SM-J415F (M1)
 #   * It never builds or flashes a rootfs. The M1 debug image requests an
 #     initramfs shell before mounting the installed rootfs; USB and UART are
 #     bring-up goals, not claimed to work on untested hardware.
-#   * It also builds a single experimental combined BOOT image with the
-#     J4+-specific Geckyn lk2nd (1-MiB virtual split) and M1 debug image. It is
-#     not a separate lk2nd partition, and must be flashed as a whole via recovery.
-#     Neither this image nor the secondary bootloader has been phone-tested.
+#   * It can build an experimental combined BOOT image with the J4+-specific
+#     Geckyn lk2nd (1-MiB virtual split). A prior combined image FAILED its
+#     device test; no image here should be described as a working boot.
+#   * HLOS diagnostic-only mode reuses the exact kernel from that failed test,
+#     rebuilds patched lk2nd and emits one experimental diagnostic BOOT. It
+#     does not rebuild the kernel or prove the cause of the reboot.
 #   * The donor is the same phone's own boot image, so its page size and
 #     command-line layout match the target. Its header addresses are overridden
 #     by the inspected loader. A GT-S7580 boot.img is for parser tests only and
@@ -24,6 +26,10 @@ on:
     inputs:
       panel_milestone:
         description: 'M2 as well: build the panel DTB and the .config that can drive it'
+        type: boolean
+        default: false
+      hlos_diagnostic_only:
+        description: 'Fast HLOS diagnostic: reuse failed-test kernel, rebuild patched lk2nd (experimental)'
         type: boolean
         default: false
 
@@ -54,6 +60,10 @@ jobs:
       - name: Require the J4+ working branch
         run: |
           test "$GITHUB_REF_NAME" = pmos-j4primelte-20260927 || { echo "Select the pmos-j4primelte-20260927 branch when running this workflow" >&2; exit 1; }
+          if [ "${{ inputs.hlos_diagnostic_only }}" = "true" ] && [ "${{ inputs.panel_milestone }}" = "true" ]; then
+            echo 'HLOS diagnostic-only mode does not build the M2 panel variant' >&2
+            exit 1
+          fi
 
       - name: Checkout this branch
         uses: actions/checkout@v4
@@ -74,7 +84,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             gcc-arm-none-eabi binutils-arm-none-eabi libfdt-dev \
-            bc bison flex git curl ca-certificates file kmod rsync xz-utils \
+            bc bison flex git curl wget ca-certificates file kmod rsync xz-utils \
             device-tree-compiler libelf-dev libssl-dev zlib1g-dev \
             libncurses-dev python3-yaml
           df -h
@@ -87,6 +97,8 @@ jobs:
           bash -n ci/j4primelte/build-mainline.sh
           bash ci/j4primelte/build-mainline.sh -n
           bash ci/j4primelte/build-lk2nd.sh -n
+          bash ci/j4primelte/build-lk2nd-hlos-diag.sh -n
+          bash ci/j4primelte/reproduce-lk2nd-hlos-diag.sh -n
           bash -n ci/j4primelte/reproduce-lk2nd.sh
           python3 -m compileall -q ci/j4primelte
           python3 ci/j4primelte/test-mainline.py
@@ -105,7 +117,17 @@ jobs:
             --expect-sha256 "$J4_MAINLINE_DONOR_SHA256" \
             --expect-root-uuid "$J4_MAINLINE_DONOR_ROOT_UUID"
 
+      - name: Reconstruct the experimental HLOS diagnostic BOOT
+        if: ${{ inputs.hlos_diagnostic_only }}
+        # No kernel rebuild: extract SHA-verified inputs from the previous
+        # device-test-FAILED image, then build and emulate the patched LK.
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check 'unicorn==2.1.4'
+          bash ci/j4primelte/reproduce-lk2nd-hlos-diag.sh "$GITHUB_WORKSPACE/artifacts" 2>&1 | tee artifacts/logs/lk2nd-hlos-reconstruct.log
+
       - name: Clone, configure and build the mainline kernel
+        if: ${{ !inputs.hlos_diagnostic_only }}
         # J4_MAINLINE_PANEL is the only knob the script has for M2; passing a
         # --panel argument instead would be silently ignored and produce an
         # M1-only run.
@@ -117,6 +139,7 @@ jobs:
             | tee artifacts/logs/mainline-build.log
 
       - name: Verify the artifacts with the independent checker
+        if: ${{ !inputs.hlos_diagnostic_only }}
         # verify-mainline.py re-parses the packed images and the compiled DTBs
         # from scratch (it does not trust the build log); its arguments are
         # positional, and the third is the literal word "panel", which is what
@@ -130,6 +153,7 @@ jobs:
             | tee artifacts/logs/mainline-verify.txt
 
       - name: Build and verify the experimental lk2nd plus M1 debug BOOT
+        if: ${{ !inputs.hlos_diagnostic_only }}
         # Run after the standalone M1 checks. build-lk2nd.sh checks both Android
         # headers, the 1-MiB split, inputs, donor ramdisk, debug flag and size.
         # Hardware, the secure monitor and Linux execution are still untested.
@@ -159,7 +183,7 @@ jobs:
           df -h > artifacts/logs/disk-space.txt
           sudo chown -R "$(id -u):$(id -g)" artifacts || true
 
-      - name: Upload flashable boot images
+      - name: Upload experimental BOOT artifacts (not proven working)
         if: success()
         uses: actions/upload-artifact@v4
         with:
