@@ -10,6 +10,10 @@ name: Build mainline arm64 boot image for J4+ SM-J415F (M1)
 #   * It never builds or flashes a rootfs. The M1 debug image requests an
 #     initramfs shell before mounting the installed rootfs; USB and UART are
 #     bring-up goals, not claimed to work on untested hardware.
+#   * It also builds a single experimental combined BOOT image with the
+#     J4+-specific Geckyn lk2nd (1-MiB virtual split) and M1 debug image. It is
+#     not a separate lk2nd partition, and must be flashed as a whole via recovery.
+#     Neither this image nor the secondary bootloader has been phone-tested.
 #   * The donor is the same phone's own boot image, so its page size and
 #     command-line layout match the target. Its header addresses are overridden
 #     by the inspected loader. A GT-S7580 boot.img is for parser tests only and
@@ -61,7 +65,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install the arm64 cross toolchain
+      - name: Install arm64 and ARM32 cross toolchains
         run: |
           # The build step pipes its output into artifacts/logs before the script
           # gets a chance to create it, so this cannot live further down.
@@ -69,20 +73,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-none-eabi binutils-arm-none-eabi libfdt-dev \
             bc bison flex git curl ca-certificates file kmod rsync xz-utils \
             device-tree-compiler libelf-dev libssl-dev zlib1g-dev \
             libncurses-dev python3-yaml
           df -h
           aarch64-linux-gnu-gcc --version | head -1
+          arm-none-eabi-gcc --version | head -1
           dtc --version
 
       - name: Check every script before the long compile
         run: |
           bash -n ci/j4primelte/build-mainline.sh
           bash ci/j4primelte/build-mainline.sh -n
+          bash ci/j4primelte/build-lk2nd.sh -n
+          bash -n ci/j4primelte/reproduce-lk2nd.sh
           python3 -m compileall -q ci/j4primelte
           python3 ci/j4primelte/test-mainline.py
           python3 ci/j4primelte/test-kernel-cache.py
+          python3 ci/j4primelte/test-lk2nd.py
 
       - name: Fetch and verify the known-good J4+ donor
         run: |
@@ -119,6 +128,14 @@ jobs:
           python3 ci/j4primelte/verify-mainline.py artifacts/mainline \
             "$J4_MAINLINE_BASE_BOOT" "${word[@]}" \
             | tee artifacts/logs/mainline-verify.txt
+
+      - name: Build and verify the experimental lk2nd plus M1 debug BOOT
+        # Run after the standalone M1 checks. build-lk2nd.sh checks both Android
+        # headers, the 1-MiB split, inputs, donor ramdisk, debug flag and size.
+        # Hardware, the secure monitor and Linux execution are still untested.
+        run: |
+          set -euo pipefail
+          bash ci/j4primelte/build-lk2nd.sh
 
       - name: Collect diagnostics even on failure
         if: always()

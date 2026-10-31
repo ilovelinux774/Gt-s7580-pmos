@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Derived from geckyn/lk2nd at 7bc82f56; J415FXXU6BVJ1 outer DTB.
+// Loaded by Samsung aboot for lk2nd, NOT the separate mainline kernel DTB.
+
+/dts-v1/;
+
+/include/ "msm8917.dtsi"
+
+/ {
+	// This is used by the bootloader to find the correct DTB
+	qcom,msm-id = <0x12f 0x0 0x134 0x0 0x135 0x0>;
+	qcom,board-id = <8 6>;
+	qcom,pmic-id = <0x10019 0 0 0>;
+
+	j4primelte-generic {
+		model = "Samsung J4PRIMELTE SEA OPEN PROJECT Rev06";
+		compatible = "samsung,j4primelte", "qcom,msm8917-mtp", "qcom,msm8917", "qcom,mtp", "lk2nd,device";
+		lk2nd,match-bootloader = "J415*";
+		lk2nd,pstore = <0x86100000 0x100000>;
+	};
+
+	// Bootloader won't continue if it can't delete some nodes from below
+	soc {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0x0 0x0 0x0 0xffffffff>;
+
+		qcom,memshare {
+			qcom,client_4 {
+				qcom,peripheral-size = <0x6000000>;
+			};
+		};
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		sec_debug_region@0 {
+			compatible = "removed-dma-pool";
+			no-map;
+			reg = <0x0 0x85000000 0x0 0x800000>;
+		};
+
+		/* J415FXXU6BVJ1 aboot requires this when its klog flag is set. */
+		klog_region@0 {
+			no-map;
+			reg = <0x0 0x851ff000 0x0 0x201000>;
+		};
+
+		sec_debug_low_region@0 {
+			compatible = "removed-dma-pool";
+			no-map;
+			reg = <0x0 0x85000000 0x0 0x400000>;
+		};
+
+		lk_region@0 {
+			linux,reserve-contiguous-region;
+			linux,reserve-region;
+			linux,remove-completely;
+			no-map;
+			reg = <0x0 0x8f600000 0x0 0x300000>;
+			label = "lk_mem";
+		};
+
+		modem_shared_mem_region@0x93000000 {
+			reg = <0x0 0x93000000 0x0 0x6000000>;
+		};
+
+	};
+};
