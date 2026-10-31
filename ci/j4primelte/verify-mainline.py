@@ -35,6 +35,7 @@ def load(name: str, path: str):
 
 repack = load('j4_repack', str(HERE / 'mainline-repack-boot.py'))
 config = load('j4_config', str(HERE / 'mainline-config.py'))
+loader_checks = load('j4_loader_checks', str(HERE / 'mainline-loader-checks.py'))
 
 
 def gzip_is_truncated(blob: bytes) -> bool:
@@ -368,6 +369,28 @@ def check_appended(mainline: Path, name: str, failures: list):
           f'DTB offset {dtb_offset}, gzip trailer gap {len(stream.unused_data)} B')
 
 
+def check_wrapper(mainline: Path, name: str, failures: list):
+    payload = mainline / f'{name}-Image.gz-dtb'
+    original = mainline / f'{name}-original-Image.gz'
+    tree = mainline / f'{name}.dtb'
+    if not payload.is_file() or not tree.is_file():
+        return  # Other gates report these.
+    if not original.is_file():
+        failures.append(f'{name}: missing original Image.gz for shim comparison')
+        return
+    try:
+        blob = payload.read_bytes()
+        tree_size = tree.stat().st_size
+        wrapped = loader_checks.complete_gzip(blob[:-tree_size])
+        inner = loader_checks.complete_gzip(original.read_bytes())
+        report = loader_checks.validate_wrapper(wrapped, inner)
+        print(f'{name}: register-preserving shim -> 2 MiB aligned '
+              f'0x{report["inner_entry"]:x}; original Image SHA256 '
+              f'{report["inner_sha256"]}')
+    except (OSError, ValueError, zlib.error, struct.error) as exc:
+        failures.append(f'{name}: invalid ARM64 alignment shim: {exc}')
+
+
 def read_boot_independently(data: bytes):
     """Read a legacy boot.img without using the packer's parser or ID code."""
     if len(data) < 1632 or data[:8] != b'ANDROID!':
@@ -481,42 +504,30 @@ def check_boot(boot_dir: Path, base: Path, failures: list, required_images=()):
 
 
 def check_memory_layout(mainline: Path, base: Path, name: str, failures: list):
-    """Refuse layouts that collide under the donor or common Qualcomm load addresses.
+    """Check the exact-build loader model, including all DTB reservation tuples.
 
-    We cannot inspect this phone's proprietary LK implementation here, so passing
-    this conservative check is not evidence of how LK actually places the image.
-    It does catch a large built-in kernel that certainly risks overwriting the
-    tags or initramfs at the addresses inherited from the known-good donor.
+    The base, total RAM and SMEM entry ordering are inferred from the recorded
+    phone; this check and the private bootloader emulation are not a device boot.
     """
     payload = mainline / f'{name}-Image.gz-dtb'
     dtb = mainline / f'{name}.dtb'
     if not base or not base.is_file() or not payload.is_file() or not dtb.is_file():
-        return  # Missing artifacts are reported by the other gates.
+        return  # Missing artifacts are reported by other gates.
     try:
         donor = read_boot_independently(base.read_bytes())
         raw = zlib.decompress(payload.read_bytes(), 16 + zlib.MAX_WBITS)
-        if len(raw) < 64 or raw[56:60] != b'ARM\x64':
-            return  # The ARM64 gate reports this in detail.
-        text_offset, size = struct.unpack_from('<QQ', raw, 8)
-        if not size:
-            return
-        ka, ra, _sa, tags, _page, _ver, _os = donor['addresses']
-        base_2m = ka & ~((1 << 21) - 1)
-        starts = {ka, base_2m + 0x80000, base_2m + text_offset}
-        occupied = [('DTB/tags', tags, tags + dtb.stat().st_size),
-                    ('initramfs', ra, ra + len(donor['ramdisk']))]
-        for start in sorted(starts):
-            end = start + size
-            for label, low, high in occupied:
-                if start < high and low < end:
-                    failures.append(f'{name}: ARM64 effective image range '
-                                    f'0x{start:x}-0x{end:x} could overlap '
-                                    f'{label} at 0x{low:x}-0x{high:x}; '
-                                    'refusing an unproven memory layout')
-        print(f'{name}: ARM64 header address would be 0x{base_2m + text_offset:x}; '
-              'actual Samsung LK placement remains unverified')
-    except (ValueError, UnicodeError, struct.error, zlib.error) as exc:
-        failures.append(f'{name}: could not audit kernel/ramdisk memory layout: {exc}')
+        page = donor['addresses'][4]
+        align = lambda n: (n + page - 1) // page * page
+        boot_size = page + align(payload.stat().st_size) + \
+                    align(len(donor['ramdisk'])) + align(len(donor['second']))
+        occupied = loader_checks.runtime_layout(raw, dtb.stat().st_size,
+                                                boot_size, len(donor['ramdisk']), page)
+        loader_checks.require_loader_nodes(dtb)
+        regions = loader_checks.audit_reservations(dtb, occupied)
+        print(f'{name}: audited {len(regions)} active reservation tuples and '
+              f'{len(occupied)} loader/kernel regions (recorded 2-GiB RAM model)')
+    except (OSError, ValueError, UnicodeError, struct.error, zlib.error) as exc:
+        failures.append(f'{name}: could not audit loader memory layout: {exc}')
 
 
 def check_configs(mainline: Path, panel_expected: bool, failures: list):
@@ -548,9 +559,11 @@ def main(argv):
     panel_expected = len(argv) > 3 and argv[3] == 'panel'
     failures: list = []
     check_appended(mainline, 'm1', failures)
+    check_wrapper(mainline, 'm1', failures)
     check_dtb(mainline, 'm1', panel=False, failures=failures)
     if panel_expected:
         check_appended(mainline, 'panel', failures)
+        check_wrapper(mainline, 'panel', failures)
         check_dtb(mainline, 'panel', panel=True, failures=failures)
     required = ['boot-m1-rootfs.img', 'boot-m1-debug.img']
     if panel_expected:

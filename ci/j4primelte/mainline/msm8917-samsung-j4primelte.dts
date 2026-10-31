@@ -119,9 +119,51 @@
 	};
 
 	reserved-memory {
-		/* Samsung sec_debug günlükleri (downstream no-map) */
-		sec_klog@851ff000 {
-			reg = <0x0 0x851ff000 0x0 0x201000>;
+		/*
+		 * Samsung's J415FXXU6BVJ1 aboot unconditionally looks up
+		 * lk_region@0 and sec_debug_region@0 when its debug flags are
+		 * zero; with any flags set it looks for klog_region@0 instead.
+		 * The latter two are names for loader fixups, not independent
+		 * allocations: the vendor regions overlap. Keep disabled stubs
+		 * for the loader and reserve the whole debug area once. The
+		 * loader deletes one or the other stub before starting Linux.
+		 */
+		lk_region@0 {
+			reg = <0x0 0x8f600000 0x0 0x300000>;
+			no-map;
+		};
+
+		sec_debug_region@0 {
+			reg = <0x0 0x0 0x0 0x0>;
+			status = "disabled";
+		};
+
+		klog_region@0 {
+			reg = <0x0 0x0 0x0 0x0>;
+			status = "disabled";
+		};
+
+		sec-debug@85000000 {
+			reg = <0x0 0x85000000 0x0 0x800000>;
+			no-map;
+		};
+
+		/*
+		 * CP reserved-memory OFF: aboot deletes this node and client_4.
+		 * MBS 32 MiB: it rewrites the first reg tuple to 0x93000000 +
+		 * 0x02000000. CP 96 MiB: it retains this node without rewriting.
+		 * Do NOT copy the vendor's single 96 MiB tuple: it overlaps the
+		 * independently protected qseecom@95000000 region. These two
+		 * non-overlapping tuples, together with qseecom, cover the same
+		 * 96 MiB if CP reservation is enabled. This prevents conflicting
+		 * Linux reservations; it does not prove CP firmware is safe in
+		 * CP-on mode. The loader deletes both tuples when CP reservation
+		 * is off (the recorded mode). Mainline's early scan reserves each
+		 * tuple independently.
+		 */
+		modem_shared_mem_region@0x93000000 {
+			reg = <0x0 0x93000000 0x0 0x02000000>,
+			      <0x0 0x97800000 0x0 0x01800000>;
 			no-map;
 		};
 
@@ -339,6 +381,22 @@
 	vddio-supply = <&pm8937_l6>;
 };
 #endif
+
+/*
+ * Loader-only compatibility nodes, distinct from mainline's root /memshare.
+ * Samsung aboot deletes client_4 when CP reservation is off, or updates its
+ * size for the 32 MiB debug mode. Keep the placeholder disabled: M1 has no
+ * modem, and this is not a mainline Qualcomm memshare binding.
+ */
+&soc {
+	qcom,memshare {
+		status = "disabled";
+
+		qcom,client_4 {
+			qcom,peripheral-size = <0x06000000>;
+		};
+	};
+};
 
 &pm8937_resin {
 	linux,code = <KEY_VOLUMEDOWN>;

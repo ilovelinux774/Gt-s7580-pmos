@@ -25,8 +25,9 @@ set -euo pipefail
 if [ "${1:-}" = "-n" ] || [ "${1:-}" = "--dry-run" ]; then
     here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
     bash -n "${BASH_SOURCE[0]}"
-    for helper in mainline-config.py mainline-kernel.py mainline-payload.py \
-                  mainline-repack-boot.py verify-mainline.py donor-note.py test-mainline.py; do
+    for helper in mainline-config.py mainline-kernel.py mainline-wrap-arm64.py \
+                  mainline-payload.py mainline-repack-boot.py mainline-loader-checks.py \
+                  verify-mainline.py donor-note.py test-mainline.py; do
         python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$here/$helper"
     done
     echo "mainline build/pack pipeline parses OK"
@@ -174,11 +175,19 @@ build_variant() {
     test -s "$out/arch/arm64/boot/Image.gz"
     test -s "$dtb"
     cp "$dtb" "$MAIN/$name.dtb"
-    # Match the public J4+ ARM64 prebuilt: plain gzip, no optional FNAME,
-    # followed directly by the DTB. Reference Qualcomm LK uses the exact
-    # gzip end as the appended-DTB offset, even if that offset is unaligned.
+    # J415FXXU6BVJ1 aboot forces ARM64 Image to RAM+0x80000. The mainline
+    # Image declares text_offset=0, so use a tiny, register-preserving wrapper
+    # that branches to the original kernel at the next 2 MiB boundary.
+    # This repacks the Image; it does not rebuild or alter the original kernel.
+    local wrapped="$out/arch/arm64/boot/Image-j4-wrapped.gz"
+    # Keep the built original for the independent byte-for-byte verifier.
+    cp "$out/arch/arm64/boot/Image.gz" "$MAIN/$name-original-Image.gz"
+    python3 "$here/mainline-wrap-arm64.py" \
+        --image "$MAIN/$name-original-Image.gz" --out "$wrapped"
+    # The user's actual loader uses gzip EOF as the DTB offset, even if
+    # unaligned: keep the gzip plain and append the DTB with no extra gap.
     python3 "$here/mainline-payload.py" \
-        --image "$out/arch/arm64/boot/Image.gz" --dtb "$dtb" \
+        --image "$wrapped" --dtb "$dtb" \
         --out "$MAIN/$name-Image.gz-dtb"
     git -C "$KERNEL" show -s --format='%H %ci %s' HEAD > "$MAIN/$name-kernel-commit.txt" 2>/dev/null || \
         echo "$J4_MAINLINE_SHA (no git metadata)" > "$MAIN/$name-kernel-commit.txt"

@@ -3,18 +3,17 @@ name: Build mainline arm64 boot image for J4+ SM-J415F (M1)
 # What this job is for, and what it deliberately is not:
 #
 #   * It builds the pinned msm89x7 mainline tree for arm64 and puts that kernel
-#     into a boot image by replacing the kernel and aligning its ARM64 load
-#     address in the known-good #37 boot header. The pmOS ramdisk is unchanged,
-#     because it is what mounts /boot and starts init in pmOS's partition
-#     layout - the mainline defconfig enables no Samsung-specific ramdisk driver
-#     and would not know what to do with it.
+#     into a BOOT image using the unchanged known-good #37 pmOS ramdisk. The
+#     inspected Samsung loader overrides header addresses, so an ARM64 shim
+#     branches to the unmodified kernel at a 2 MiB boundary. The ramdisk is what
+#     finds the installed pmOS rootfs and starts init; no rootfs is built here.
 #   * It never builds or flashes a rootfs. The M1 debug image requests an
 #     initramfs shell before mounting the installed rootfs; USB and UART are
 #     bring-up goals, not claimed to work on untested hardware.
-#   * The donor is the same phone's own boot image, so the page size, the load
-#     addresses and the cmdline length limits in ci/j4primelte/mainline-repack-boot.py
-#     match the target. A GT-S7580 boot.img is used for header parsing tests
-#     only and must never be treated as a donor.
+#   * The donor is the same phone's own boot image, so its page size and
+#     command-line layout match the target. Its header addresses are overridden
+#     by the inspected loader. A GT-S7580 boot.img is for parser tests only and
+#     must never be treated as a donor. Loader/firmware behavior is not proven.
 
 on:
   workflow_dispatch:

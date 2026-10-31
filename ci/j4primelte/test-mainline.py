@@ -46,6 +46,7 @@ def load(module_name: str, filename: str):
 
 repack = load('j4_repack', 'mainline-repack-boot.py')
 payload_builder = load('j4_payload', 'mainline-payload.py')
+wrapper = load('j4_wrapper', 'mainline-wrap-arm64.py')
 config = load('j4_config', 'mainline-config.py')
 staging = load('j4_staging', 'mainline-kernel.py')
 verify = load('j4_verify', 'verify-mainline.py')
@@ -490,6 +491,80 @@ class PayloadPacking(unittest.TestCase):
         image[3] = 4  # FEXTRA is not parsed by the reference LK inflater.
         with self.assertRaises(ValueError):
             payload_builder.plain_gzip(bytes(image))
+
+
+class Arm64Wrapper(unittest.TestCase):
+    """Test the persistent shim without sharing the verifier's implementation."""
+
+    def test_branches_align_and_preserve_original(self):
+        original = fake_arm64_image(4096, text_offset=0)
+        wrapped = wrapper.wrap(original)
+        self.assertEqual(wrapped[0x180000:], original)
+        first, second = struct.unpack_from('<II', wrapped)
+        stub = struct.unpack_from('<I', wrapped, 0x40)[0]
+        self.assertEqual(first, 0xd503201f)  # nop
+        self.assertEqual(second >> 26, 0b000101)  # b, not bl
+        self.assertEqual(stub >> 26, 0b000101)
+        self.assertEqual(4 + (second & 0x03ffffff) * 4, 0x40)
+        self.assertEqual(0x40 + (stub & 0x03ffffff) * 4, 0x180000)
+        report = verify.loader_checks.validate_wrapper(wrapped, original)
+        self.assertEqual(report['inner_entry'], 0x80200000)
+        self.assertEqual(report['outer_size'], 0x180000 + len(original))
+
+    def test_tampering_and_incompatible_inner_images_are_rejected(self):
+        original = fake_arm64_image(4096, text_offset=0)
+        wrapped = wrapper.wrap(original)
+        for offset in (4, 0x40, 0x1000, 0x180000 + 100):
+            changed = bytearray(wrapped)
+            changed[offset] ^= 1
+            with self.assertRaises(ValueError):
+                verify.loader_checks.validate_wrapper(bytes(changed), original)
+        with self.assertRaises(ValueError):
+            wrapper.wrap(fake_arm64_image(4096, text_offset=0x80000))
+        with self.assertRaises(ValueError):
+            wrapper.wrap(b'not an Image')
+        bad = bytearray(original)
+        struct.pack_into('<Q', bad, 16, 12)
+        with self.assertRaises(ValueError):
+            wrapper.wrap(bytes(bad))
+
+    def test_independent_wrapper_gate_uses_archived_original(self):
+        raw = fake_arm64_image(4096, text_offset=0)
+        tree = fake_dtb()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'm1.dtb').write_bytes(tree)
+            (root / 'm1-original-Image.gz').write_bytes(gzip.compress(raw, mtime=0))
+            image = wrapper.wrap(raw)
+            path = root / 'm1-Image.gz-dtb'
+            path.write_bytes(append_dtb(gzip.compress(image, mtime=0), tree))
+            failures = []
+            verify.check_wrapper(root, 'm1', failures)
+            self.assertEqual(failures, [])
+            changed = bytearray(image)
+            changed[0x40] ^= 1
+            path.write_bytes(append_dtb(gzip.compress(bytes(changed), mtime=0), tree))
+            failures = []
+            verify.check_wrapper(root, 'm1', failures)
+            self.assertTrue(any('shim' in f for f in failures), failures)
+            (root / 'm1-original-Image.gz').unlink()
+            failures = []
+            verify.check_wrapper(root, 'm1', failures)
+            self.assertTrue(any('missing original' in f for f in failures), failures)
+
+    def test_wrapper_cli_refuses_trailing_or_concatenated_gzip(self):
+        original = gzip.compress(fake_arm64_image(4096, text_offset=0), mtime=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, out = root / 'in.gz', root / 'out.gz'
+            source.write_bytes(original)
+            self.assertEqual(wrapper.main(['--image', str(source), '--out', str(out)]), 0)
+            self.assertEqual(gzip.decompress(out.read_bytes())[0x180000:],
+                             gzip.decompress(original))
+            for invalid in (original + b'bad', original + original, original[:-5]):
+                source.write_bytes(invalid)
+                with self.assertRaises(SystemExit):
+                    wrapper.main(['--image', str(source), '--out', str(out)])
 
 
 class RepackCli(unittest.TestCase):
@@ -966,6 +1041,35 @@ class DeviceTree(unittest.TestCase):
                             'extcon = <0xffff>', text, count=1)
         self.assertTrue(any('extcon' in p for p in verify.check_usb(bad_extcon)))
 
+    def test_actual_loader_nodes_and_reservations_are_audited(self):
+        fdtput = shutil.which('fdtput')
+        if not fdtput or not shutil.which('fdtget'):
+            self.skipTest('fdtput/fdtget are not installed')
+        tree = self.out / 'audited.dtb'
+        good = self.compile(staging.DTS)
+        tree.write_bytes(good)
+        check = verify.loader_checks
+        check.require_loader_nodes(tree)
+        regions = check.audit_reservations(tree)
+        self.assertGreaterEqual(len(regions), 10)
+        # Changing only the second modem tuple must be detected; a first-reg-only
+        # parser used to miss its overlap with qseecom.
+        subprocess.run([fdtput, '-t', 'x', str(tree),
+                        '/reserved-memory/modem_shared_mem_region@0x93000000',
+                        'reg', '0', '93000000', '0', '2000000',
+                        '0', '95000000', '0', '1800000'], check=True)
+        with self.assertRaisesRegex(ValueError, 'overlap'):
+            check.audit_reservations(tree)
+        tree.write_bytes(good)
+        subprocess.run([fdtput, '-d', str(tree),
+                        '/soc/qcom,memshare/qcom,client_4',
+                        'qcom,peripheral-size'], check=True)
+        with self.assertRaisesRegex(ValueError, 'client_4'):
+            check.require_loader_nodes(tree)
+        tree.write_bytes(good)
+        with self.assertRaisesRegex(ValueError, 'kernel.*overlaps'):
+            check.audit_reservations(tree, [('kernel', 0x85000000, 0x85001000)])
+
     def test_console_uart_is_enabled_and_first(self):
         text = self.decompile(self.compile(staging.DTS))
         self.assertRegex(text, r'stdout-path\s*=\s*"serial0')
@@ -1086,26 +1190,21 @@ class VerifyHelpers(unittest.TestCase):
                               required_images=['boot-m1-rootfs.img'])
             self.assertTrue(any('missing required image' in f for f in failures), failures)
 
-    def test_memory_collision_with_donor_is_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            # Use the real phone's address pattern, including the tags region.
-            data = bytearray(make_boot())
-            struct.pack_into('<I', data, 32, 0x81e00000)
-            (root / 'donor.img').write_bytes(data)
-            tree = fake_dtb()
-            (root / 'm1.dtb').write_bytes(tree)
-            small = fake_arm64_image()
-            (root / 'm1-Image.gz-dtb').write_bytes(append_dtb(gzip.compress(small), tree))
-            failures = []
-            verify.check_memory_layout(root, root / 'donor.img', 'm1', failures)
-            self.assertEqual(failures, [])
-            large = bytearray(small)
-            struct.pack_into('<Q', large, 16, 0x04000000)
-            (root / 'm1-Image.gz-dtb').write_bytes(append_dtb(gzip.compress(large), tree))
-            failures = []
-            verify.check_memory_layout(root, root / 'donor.img', 'm1', failures)
-            self.assertTrue(any('overlap' in f for f in failures), failures)
+    def test_actual_loader_memory_collision_is_rejected(self):
+        small = fake_arm64_image()
+        regions = verify.loader_checks.runtime_layout(small, 4096, 14_000_000,
+                                                       6_330_036, 2048)
+        self.assertEqual(regions[0][1], 0x80080000)
+        self.assertEqual(regions[1][1], 0x83400000)
+        self.assertEqual(regions[2][1], 0x83600000)
+        large = bytearray(small)
+        struct.pack_into('<Q', large, 16, 0x04000000)
+        with self.assertRaisesRegex(ValueError, 'overlap'):
+            verify.loader_checks.runtime_layout(bytes(large), 4096, 14_000_000,
+                                                 6_330_036, 2048)
+        with self.assertRaisesRegex(ValueError, '2048'):
+            verify.loader_checks.runtime_layout(small, 4096, 14_000_000,
+                                                 6_330_036, 4096)
 
     def test_non_arm64_or_gapped_payload_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

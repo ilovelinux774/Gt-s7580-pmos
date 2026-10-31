@@ -6,15 +6,17 @@ a ramdisk to the kernel, and that initramfs is what mounts /boot, finds the root
 by UUID and starts init in pmOS's partition layout. The downstream armv7 ramdisk
 knows how to do that; a mainline defconfig ramdisk would not. So this tool takes
 a boot image from a finished postmarketOS build and replaces its kernel payload,
-leaving the ramdisk byte for byte the same. The kernel load address is updated
-to the alignment required by the ARM64 Image header; other addresses are kept.
+leaving the ramdisk byte for byte the same. The kernel header address is updated
+for the ARM64 Image header; other header addresses are kept. The inspected
+J415FXXU6BVJ1 loader overrides these fields at runtime, so the header values do
+not establish the actual load addresses. See mainline-wrap-arm64.py.
 
 Layout of the legacy header (version 0) this phone uses, all little endian, all
 u32 unless noted:
 
     0   magic "ANDROID!"
     8   kernel_size
-   12   kernel_addr        ARM64-aligned kernel address (donor used 0x80008000)
+   12   kernel_addr        chosen from Image header (loader overrides it)
    16   ramdisk_size
    20   ramdisk_addr       0x82000000
    24   second_size        (the vendor "second" area; kept as is)
@@ -348,7 +350,7 @@ def report(image: BootImage, base: BootImage, base_path: Path, kernel_path: Path
         f'ramdisk   : {image.ramdisk_size} bytes, '
         + ('copied byte for byte' if same else 'CHANGED (bug)'),
         f'page size : {image.page_size}, header v{image.header_version}',
-        f'load addrs: kernel 0x{image.kernel_addr:08x} '
+        f'header addrs (loader may override): kernel 0x{image.kernel_addr:08x} '
         f'ramdisk 0x{image.ramdisk_addr:08x} tags 0x{image.tags_addr:08x}',
         f'kernel addr: donor 0x{base.kernel_addr:08x} -> ARM64 0x{image.kernel_addr:08x}',
         f'cmdline   : {image.cmdline}',
