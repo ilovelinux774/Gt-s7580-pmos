@@ -55,7 +55,7 @@ DTB_MAGIC = bytes.fromhex('d00dfeed')
 
 
 def append_dtb(image: bytes, tree: bytes) -> bytes:
-    """Align inside the gzip header; no bytes may separate gzip and the DTB."""
+    """Use plain gzip with no bytes between gzip EOF and the DTB."""
     return payload_builder.combine(image, tree)
 
 
@@ -340,7 +340,7 @@ class BootPacking(unittest.TestCase):
         image = gzip.compress(b'k' * 20000)
         tree = fake_dtb(43 * 1024 + 7)
         payload = append_dtb(image, tree)
-        self.assertEqual(repack.find_appended_dtb(payload), len(image) + (-len(image)) % 8)
+        self.assertEqual(repack.find_appended_dtb(payload), len(image))
         with self.assertRaises(ValueError):
             repack.find_appended_dtb(payload + b'trailer')
         with self.assertRaises(ValueError):
@@ -402,8 +402,8 @@ class BootPacking(unittest.TestCase):
                 donor.main([str(path), '--expect-sha256', '00'])
 
 
-class PayloadAlignment(unittest.TestCase):
-    def test_every_gzip_remainder_places_dtb_at_reference_lk_offset(self):
+class PayloadPacking(unittest.TestCase):
+    def test_every_gzip_remainder_is_accepted_at_exact_reference_lk_offset(self):
         import random
         rng = random.Random(12345)
         seen = set()
@@ -414,13 +414,59 @@ class PayloadAlignment(unittest.TestCase):
             if remainder in seen:
                 continue
             seen.add(remainder)
-            aligned = payload_builder.align_gzip(image)
-            self.assertEqual(len(aligned) % 8, 0)
-            self.assertEqual(gzip.decompress(aligned), raw)
+            plain = payload_builder.plain_gzip(image)
+            self.assertEqual(plain, image)
+            self.assertEqual(plain[3], 0)
+            self.assertEqual(gzip.decompress(plain), raw)
             tree = fake_dtb()
-            self.assertEqual(verify.reference_lk_gzip_end(aligned + tree), len(aligned))
-            self.assertIn(aligned[3], (0, 8))
-        self.assertEqual(seen, set(range(8)), 'cover every possible gzip alignment')
+            combined = payload_builder.combine(image, tree)
+            self.assertEqual(combined, image + tree)
+            self.assertEqual(verify.reference_lk_gzip_end(combined), len(image))
+            self.assertEqual(repack.find_appended_dtb(combined), len(image))
+            repack.check_gzip_boundary(combined, len(image))
+        self.assertEqual(seen, set(range(8)), 'cover every gzip offset remainder')
+
+    def test_independent_verifier_accepts_all_eight_dtb_remainders(self):
+        import random
+        rng = random.Random(3110)
+        seen = set()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            tree = fake_dtb()
+            (out / 'm1.dtb').write_bytes(tree)
+            for n in range(1, 300):
+                raw = bytearray(fake_arm64_image(64 + n))
+                raw[64:] = bytes(rng.randrange(256) for _ in range(n))
+                image = gzip.compress(bytes(raw), mtime=0)
+                remainder = len(image) % 8
+                if remainder in seen:
+                    continue
+                seen.add(remainder)
+                (out / 'm1-Image.gz-dtb').write_bytes(image + tree)
+                failures = []
+                verify.check_appended(out, 'm1', failures)
+                self.assertEqual(failures, [], f'remainder {remainder}: {failures}')
+            self.assertEqual(seen, set(range(8)))
+
+    def test_optional_fname_is_removed_without_changing_the_payload(self):
+        raw = fake_arm64_image()
+        plain = gzip.compress(raw, mtime=0)
+        named = plain[:3] + b'\x08' + plain[4:10] + b'jjjjj\0' + plain[10:]
+        self.assertEqual(gzip.decompress(named), raw)
+        self.assertEqual(payload_builder.plain_gzip(named), plain)
+        combined = payload_builder.combine(named, fake_dtb())
+        self.assertEqual(combined[:len(plain)], plain)
+        repack.check_gzip_boundary(combined, len(plain))
+        with self.assertRaises(ValueError):
+            repack.check_gzip_boundary(named + fake_dtb(), len(named))
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            tree = fake_dtb()
+            (out / 'm1.dtb').write_bytes(tree)
+            (out / 'm1-Image.gz-dtb').write_bytes(named + tree)
+            failures = []
+            verify.check_appended(out, 'm1', failures)
+            self.assertTrue(any('optional header fields' in s for s in failures), failures)
 
     def test_external_zero_padding_is_rejected_by_independent_verifier(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -443,7 +489,7 @@ class PayloadAlignment(unittest.TestCase):
         image = bytearray(gzip.compress(b'kernel', mtime=0))
         image[3] = 4  # FEXTRA is not parsed by the reference LK inflater.
         with self.assertRaises(ValueError):
-            payload_builder.align_gzip(bytes(image))
+            payload_builder.plain_gzip(bytes(image))
 
 
 class RepackCli(unittest.TestCase):
@@ -497,19 +543,23 @@ class RepackCli(unittest.TestCase):
             self.run_cli(payload)
         self.assertIn('DTB', str(ctx.exception))
 
-    def test_misaligned_tree_is_refused(self):
-        # This pipeline aligns the DTB while preserving an exact gzip EOF.
-        # An unaligned tree is rejected even if its magic happens to be present.
-        image = b'\x1f\x8b\x08' + b'k' * 101      # len 104, a multiple of 8
-        payload = image + b'\0' * (8 + 1) + fake_dtb(4096)
-        with self.assertRaises(SystemExit):
-            self.run_cli(payload)
+    def test_unaligned_tree_at_gzip_end_is_accepted(self):
+        # TeamWin's J4+ ARM64 reference has its first DTB at offset 1 mod 8.
+        image = next(gzip.compress(fake_arm64_image(n), mtime=0)
+                     for n in range(200, 2000)
+                     if len(gzip.compress(fake_arm64_image(n), mtime=0)) % 8 == 1)
+        tree = fake_dtb(4096)
+        payload = image + tree
+        self.assertEqual(repack.find_appended_dtb(payload), len(image))
+        _data, _report, img = self.run_cli(payload)
+        self.assertEqual(img.kernel, payload)
 
-    def test_tree_four_byte_but_not_eight_byte_aligned_is_refused(self):
-        image = b'\x1f\x8b\x08' + b'k' * 101  # 104 bytes
+    def test_aligned_tree_with_a_gap_is_refused(self):
+        image = next(gzip.compress(fake_arm64_image(n), mtime=0)
+                     for n in range(200, 2000)
+                     if len(gzip.compress(fake_arm64_image(n), mtime=0)) % 8 == 4)
         payload = image + b'\0' * 4 + fake_dtb(4096)
-        self.assertEqual((len(image) + 4) % 4, 0)
-        self.assertNotEqual((len(image) + 4) % 8, 0)
+        self.assertEqual((len(image) + 4) % 8, 0)
         with self.assertRaises(SystemExit):
             self.run_cli(payload)
 
@@ -523,6 +573,36 @@ class RepackCli(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             self.run_cli(b'\x00' * 4096 + DTB_MAGIC)
         self.assertIn('gzip', str(ctx.exception))
+
+    def test_build_script_post_pack_gate_checks_every_remainder_and_rejects_gap(self):
+        # Exercise the actual Python heredoc in build-mainline.sh, not a copy of
+        # its logic: this final CI gate must not reintroduce alignment rules.
+        import random
+        script = (HERE / 'build-mainline.sh').read_text()
+        gate = script.split('python3 - "$OUT/$name" <<\'PY\'\n', 1)[1].split('\nPY\n', 1)[0]
+        rng = random.Random(3912)
+        seen = set()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'gate-boot.img'
+            for n in range(1, 300):
+                raw = bytearray(fake_arm64_image(64 + n))
+                raw[64:] = bytes(rng.randrange(256) for _ in range(n))
+                image = gzip.compress(bytes(raw), mtime=0)
+                remainder = len(image) % 8
+                if remainder in seen:
+                    continue
+                seen.add(remainder)
+                tree = fake_dtb()
+                path.write_bytes(make_boot(kernel=image + tree))
+                result = subprocess.run([sys.executable, '-c', gate, str(path)],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                path.write_bytes(make_boot(kernel=image + b'\0' + tree))
+                result = subprocess.run([sys.executable, '-c', gate, str(path)],
+                                        capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0,
+                                    f'CI gate accepted a gap at remainder {remainder}')
+            self.assertEqual(seen, set(range(8)))
 
     def test_repeated_bootargs_are_not_duplicated(self):
         payload = append_dtb(gzip.compress(fake_arm64_image()), fake_dtb())
@@ -826,6 +906,54 @@ class DeviceTree(unittest.TestCase):
         self.assertEqual(verify.status_of_compatible(panel, '"qcom,mdss"'), 'okay')
         self.assertIsNone(verify.status_of_compatible(m1, '"qcom,no-such-driver"'))
 
+    def test_rev06_loader_ids_and_missing_properties_are_checked(self):
+        fdtput = shutil.which('fdtput')
+        if not fdtput or not shutil.which('fdtget'):
+            self.skipTest('fdtput/fdtget are not installed')
+        for source in (staging.DTS, staging.PANEL_DTS):
+            tree = self.out / ('ids-' + source + '.dtb')
+            tree.write_bytes(self.compile(source))
+            self.assertEqual(verify.check_loader_ids(tree), [], source)
+            # Check the actual compiled root properties, not just source text.
+            subprocess.run([fdtput, '-t', 'x', str(tree), '/',
+                            'qcom,msm-id', '12f', '0'], check=True)
+            self.assertTrue(any('qcom,msm-id' in s
+                                for s in verify.check_loader_ids(tree)))
+            subprocess.run([fdtput, '-t', 'x', str(tree), '/',
+                            'qcom,board-id', '8', '5'], check=True)
+            self.assertTrue(any('qcom,board-id' in s
+                                for s in verify.check_loader_ids(tree)))
+            subprocess.run([fdtput, '-d', str(tree), '/', 'qcom,pmic-id'], check=True)
+            self.assertTrue(any('qcom,pmic-id' in s
+                                for s in verify.check_loader_ids(tree)))
+
+    def test_rev06_ids_match_the_device_tested_donor_when_available(self):
+        donor_path = Path(os.environ.get('J4_MAINLINE_BASE_BOOT',
+                          '/home/user/j4-mainline-donors/boot-37-KNOWN-GOOD-rollback.img'))
+        if not donor_path.is_file() or not shutil.which('fdtget'):
+            self.skipTest('known-good donor or fdtget is unavailable')
+        blob = repack.BootImage(donor_path.read_bytes()).kernel
+        offset, matches = 0, 0
+        while True:
+            offset = blob.find(DTB_MAGIC, offset)
+            if offset < 0:
+                break
+            if offset + 40 > len(blob):
+                break
+            size = struct.unpack_from('>I', blob, offset + 4)[0]
+            if size < 40 or offset + size > len(blob):
+                offset += 4
+                continue
+            path = self.out / f'donor-{offset}.dtb'
+            path.write_bytes(blob[offset:offset + size])
+            got = subprocess.run(['fdtget', '-t', 'x', str(path), '/', 'qcom,board-id'],
+                                 capture_output=True, text=True)
+            if got.returncode == 0 and got.stdout.split() == ['8', '6']:
+                matches += 1
+                self.assertEqual(verify.check_loader_ids(path), [])
+            offset += size
+        self.assertEqual(matches, 1, 'donor should contain exactly one Rev06 DTB')
+
     def test_usb_verifier_catches_a_wrong_phy_or_extcon(self):
         text = self.decompile(self.compile(staging.DTS))
         self.assertEqual(verify.check_usb(text), [])
@@ -979,7 +1107,7 @@ class VerifyHelpers(unittest.TestCase):
             verify.check_memory_layout(root, root / 'donor.img', 'm1', failures)
             self.assertTrue(any('overlap' in f for f in failures), failures)
 
-    def test_non_arm64_or_misaligned_payload_fails(self):
+    def test_non_arm64_or_gapped_payload_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             tree = fake_dtb()
@@ -994,7 +1122,8 @@ class VerifyHelpers(unittest.TestCase):
             (root / 'm1-Image.gz-dtb').write_bytes(payload)
             failures = []
             verify.check_appended(root, 'm1', failures)
-            self.assertTrue(any('aligned' in f for f in failures), failures)
+            self.assertTrue(any('gap' in f or 'reference LK gzip end' in f
+                                for f in failures), failures)
 
     def test_workflow_uses_pinned_donor_not_a_run_database_id(self):
         workflow = (HERE.parent.parent / '.github/workflows/build-mainline.yml').read_text()

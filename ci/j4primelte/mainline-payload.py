@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Build an LK-compatible, 8-byte-aligned Image.gz + DTB payload.
+"""Build a plain Image.gz with the J4+ DTB appended directly at gzip EOF.
 
-Qualcomm LK variants commonly find an appended DTB at the exact position returned
-by their gzip decompressor, not by searching past zero padding. Therefore alignment
-bytes must be *inside* the gzip header rather than between gzip and DTB. The FNAME
-field is understood by both standard gzip and the reference Qualcomm LK inflater.
-Actual Samsung bootloader behavior remains unverified until a device test.
+The public TeamWin j4primelte ARM64 prebuilt uses a plain gzip header (no FNAME)
+and concatenates FDTs directly after the stream, even when the first FDT is not
+8-byte-aligned. No zero padding is inserted after the gzip stream: reference
+Qualcomm LK variants use the gzip end as the appended-DTB offset.
+
+This format is grounded in a same-model reference, not a proof that every Samsung
+bootloader accepts a new mainline DTB. Hardware testing is still necessary.
 """
 import argparse
 import struct
@@ -19,7 +21,7 @@ def complete_gzip(blob: bytes) -> bytes:
         raise ValueError('kernel is not a complete gzip stream')
     flags = blob[3]
     if flags not in (0, 8):
-        raise ValueError(f'unsupported gzip flags 0x{flags:02x}; LK supports FNAME only')
+        raise ValueError(f'unsupported gzip flags 0x{flags:02x}')
     if flags == 8:
         end = blob.find(b'\0', 10, min(len(blob), 266))
         if end < 0:
@@ -34,20 +36,22 @@ def complete_gzip(blob: bytes) -> bytes:
     return data
 
 
-def align_gzip(image: bytes) -> bytes:
-    """Align the complete gzip stream by inserting an optional FNAME field."""
+def plain_gzip(image: bytes) -> bytes:
+    """Strip FNAME if present, preserving the compressed stream and payload.
+
+    The failed M1 used FNAME solely to force alignment. A standard plain gzip
+    matches the same-model ARM64 reference instead and needs no such field.
+    """
     original = complete_gzip(image)
-    extra = (-len(image)) % 8
-    if not extra:
+    if image[3] == 0:
         return image
-    if image[3] != 0:
-        raise ValueError('cannot add alignment to a gzip with existing optional fields')
+    end = image.find(b'\0', 10, min(len(image), 266))
+    # complete_gzip() has already verified that the terminator exists.
     header = bytearray(image[:10])
-    header[3] = 8  # FNAME, whose NUL terminator counts toward the alignment.
-    filename = b'j' * (extra - 1) + b'\0'
-    result = bytes(header) + filename + image[10:]
-    if len(result) % 8 or complete_gzip(result) != original:
-        raise ValueError('gzip alignment changed the decompressed kernel')
+    header[3] = 0
+    result = bytes(header) + image[end + 1:]
+    if complete_gzip(result) != original:
+        raise ValueError('removing gzip filename changed the kernel')
     return result
 
 
@@ -56,8 +60,7 @@ def combine(image: bytes, dtb: bytes) -> bytes:
         raise ValueError('device tree has no valid FDT header')
     if struct.unpack_from('>I', dtb, 4)[0] != len(dtb):
         raise ValueError('device tree totalsize does not match its file length')
-    image = align_gzip(image)
-    return image + dtb
+    return plain_gzip(image) + dtb
 
 
 def main(argv=None):
@@ -73,9 +76,9 @@ def main(argv=None):
         raise SystemExit(str(exc)) from exc
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_bytes(payload)
-    aligned_size = len(payload) - len(dtb)
-    print(f'{len(image)} B original gzip + {aligned_size - len(image)} B gzip '
-          f'header alignment + {len(dtb)} B DTB; no gap after gzip')
+    gzip_size = len(payload) - len(dtb)
+    print(f'{gzip_size} B plain gzip + {len(dtb)} B DTB; '
+          f'no gap after gzip, DTB offset mod 8 = {gzip_size % 8}')
     return 0
 
 

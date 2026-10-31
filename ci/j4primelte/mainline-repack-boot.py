@@ -19,11 +19,11 @@ u32 unless noted:
    20   ramdisk_addr       0x82000000
    24   second_size        (the vendor "second" area; kept as is)
    28   second_addr
-   32   tags_addr          0x1e000000, where LK puts the appended tree
+   32   tags_addr          0x81e00000 in the #37 donor
    36   page_size          2048 here
    40   header_version
    44   os_version
-   48   name[16]           "j4primelte"
+   48   name[16]           unset in the #37 donor
    64   cmdline[512]
   576   id[32]             SHA-1(payload || le32(size), for each payload), padded
   608   extra_cmdline[1024]
@@ -53,8 +53,8 @@ IMAGE_NAME = b'j4primelte'
 
 # What the kernel needs on the command line to survive on a phone whose display
 # and modems were started by the bootloader and are not claimed by any mainline
-# driver yet. These are appended to whatever the donor image carried, which
-# includes Samsung's own androidboot.*, lcd_id and vmalloc= arguments.
+# driver yet. These are appended to the donor's existing command line,
+# including its console settings and pmos_root_uuid.
 MAINLINE_BOOTARGS = ('clk_ignore_unused pd_ignore_unused regulator_ignore_unused '
                      'rootwait earlycon')
 # postmarketOS initramfs flag: drop to the telnet shell instead of mounting the
@@ -68,25 +68,31 @@ DTB_WINDOW = 1 << 20
 
 
 def find_appended_dtb(payload: bytes) -> int:
-    """Offset of the DTB that trails an Image.gz-dtb payload.
+    """Find the single DTB at actual gzip EOF, without assuming alignment.
 
-    Looking for the magic near the end is not enough: the tree is tens of
-    kilobytes, so its header sits far from the last byte. The totalsize in the DTB
-    header has to account for exactly the bytes that follow the kernel, which is
-    what makes a truncated or duplicated append detectable at all.
+    The J4+ ARM64 TeamWin prebuilt has a DTB at an unaligned gzip EOF. A magic
+    byte search alone could match compressed data or conceal an intervening gap,
+    so use the gzip decoder's consumed length and verify the DTB's totalsize.
     """
-    low = max(0, len(payload) - DTB_WINDOW)
-    offset = payload.rfind(DTB_MAGIC)
-    while offset >= low:
-        if offset % 8 == 0 and offset + 8 <= len(payload):
-            totalsize = struct.unpack_from('>I', payload, offset + 4)[0]
-            if totalsize == len(payload) - offset and totalsize > 0x10:
-                return offset
-        offset = payload.rfind(DTB_MAGIC, low, offset)
-    raise ValueError(
-        f'no appended DTB found in the last {DTB_WINDOW // 1024} KiB of the '
-        'payload: an arm64 kernel that boots with no device tree hangs before the '
-        'console, so this is refused rather than packed')
+    if len(payload) < 18 or payload[:3] != b'\x1f\x8b\x08':
+        raise ValueError('kernel is not gzip; cannot locate appended DTB')
+    dec = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        dec.decompress(payload)
+        dec.flush()
+    except zlib.error as exc:
+        raise ValueError('invalid gzip kernel; cannot locate appended DTB') from exc
+    if not dec.eof:
+        raise ValueError('truncated gzip kernel; cannot locate appended DTB')
+    offset = len(payload) - len(dec.unused_data)
+    remaining = len(payload) - offset
+    if (remaining < 40 or remaining > DTB_WINDOW or
+            payload[offset:offset + 4] != DTB_MAGIC):
+        raise ValueError('no appended DTB exactly at gzip EOF')
+    totalsize = struct.unpack_from('>I', payload, offset + 4)[0]
+    if totalsize != remaining:
+        raise ValueError('appended DTB totalsize differs from trailing payload')
+    return offset
 
 
 def check_gzip_boundary(payload: bytes, dtb_at: int):
@@ -94,10 +100,9 @@ def check_gzip_boundary(payload: bytes, dtb_at: int):
     image = payload[:dtb_at]
     if len(image) < 18 or image[:3] != b'\x1f\x8b\x08':
         raise ValueError('kernel is not gzip')
-    if image[3] not in (0, 8):
-        raise ValueError('gzip has optional fields unsupported by reference LK')
-    if image[3] == 8 and image.find(b'\0', 10, min(len(image), 266)) < 0:
-        raise ValueError('gzip filename is missing or exceeds reference LK limits')
+    if image[3] != 0:
+        raise ValueError('expected a plain gzip header without optional fields, '
+                         'matching the J4+ ARM64 reference')
     decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
     try:
         decoder.decompress(image)

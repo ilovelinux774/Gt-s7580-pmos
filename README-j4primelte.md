@@ -304,11 +304,13 @@ reconnecting to the phone at `172.16.42.1`.
 
 ## Mainline arm64 kernel (M1): experimental BOOT-only bring-up
 
-This is a **hardware-untested** port. The first target is a pmOS initramfs
-shell over USB (RNDIS/telnet, optionally ACM) or the BLSP1 UART. A successful
-compile or format check does **not** establish that Samsung LK boots this
-particular ARM64 kernel, that the phone's USB controller probes, or that a shell
-will appear. Panel, touch, Wi-Fi, audio and GPU remain later milestones.
+This is an **experimental** port: the first M1 image halted at DTB handling on
+the phone, and the revised candidate has not yet been tested on the phone. The
+first target is a pmOS initramfs shell over USB (RNDIS/telnet, optionally ACM)
+or the BLSP1 UART. A successful compile or format check does **not** establish
+that Samsung LK boots this ARM64 kernel, that the phone's USB controller probes,
+or that a shell will appear. Panel, touch, Wi-Fi, audio and GPU remain later
+milestones.
 
 The pipeline builds no rootfs and flashes nothing. Its donor is the published,
 known-good `boot-37-KNOWN-GOOD-rollback.img` from release `j4-39`: the download,
@@ -339,11 +341,14 @@ The build checks more than the image extension:
   size and root UUID, and rejects a different donor;
 - it retains the donor ramdisk, ramdisk/tags addresses and other metadata, sets
   the kernel load address using the ARM64 Image's 2 MiB alignment and text offset,
-  and hashes the correct Android-v0 payload/size ID. The J4+ DTB starts at gzip
-  EOF on an 8-byte boundary; optional gzip FNAME header bytes supply alignment
-  without leaving a gap that a reference Qualcomm LK would misinterpret;
+  and hashes the correct Android-v0 payload/size ID. The J4+ DTB starts exactly
+  at gzip EOF, without a gap or an assumed alignment. The gzip header has no
+  optional FNAME, matching the public TeamWin J4+ ARM64 prebuilt format;
 - it independently reads each output, checks its boot ID, donor ramdisk and
   UUID, actual ARM64 kernel header, gzip stream, DTB and required bootargs;
+- it checks the compiled DTB's root `qcom,msm-id`, `qcom,board-id` and
+  `qcom,pmic-id` against the known-good donor's Rev06 identification. This is a
+  compatibility candidate, not proof of Samsung LK's exact matching rules;
 - it audits CONFIG_COMPAT, gzip initramfs, RPM/SMD, ChipIdea UDC, the actual
   `qcom,usb-hs-28nm-femtophy`, dummy extcon, RNDIS and ACM as built-ins;
 - it checks that the compiled DTB connects the USB controller to its PHY and
@@ -376,7 +381,7 @@ J4_MAINLINE_KERNEL_TREE=$HOME/j4-mainline-kernel python3 ci/j4primelte/test-main
 Build M1 with the exact pinned donor and the ARM64 cross compiler installed:
 
 ```sh
-J4_MAINLINE_BASE_BOOT=$HOME/j4-mainline-donor/boot.img bash ci/j4primelte/build-mainline.sh
+J4_MAINLINE_BASE_BOOT=$HOME/j4-mainline-donors/boot-37-KNOWN-GOOD-rollback.img bash ci/j4primelte/build-mainline.sh
 ```
 
 Verify the completed artifacts independently:

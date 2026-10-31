@@ -3,8 +3,8 @@
 #
 # This is the mainline twin of ci/j4primelte/build-kernel.sh, and it deliberately
 # produces no rootfs: the phone keeps the postmarketOS userspace it already has,
-# and the boot image reuses that job's initramfs as a donor. See
-# mainline-repack-boot.py for why swapping only the kernel is safe.
+# and the boot image reuses that job's initramfs as a donor. Packing preserves
+# the donor ramdisk, but device boot and normal rootfs use remain unproven.
 #
 #   J4_MAINLINE_BASE_BOOT   SHA-256-pinned, known-good #37 donor boot.img
 #   J4_MAINLINE_PANEL=1     also build the M2 panel variant
@@ -174,9 +174,9 @@ build_variant() {
     test -s "$out/arch/arm64/boot/Image.gz"
     test -s "$dtb"
     cp "$dtb" "$MAIN/$name.dtb"
-    # Qualcomm LK's gzip decompressor can return the exact gzip end as the
-    # appended-DTB offset. Align *inside* the gzip FNAME header instead of
-    # inserting zero bytes between the gzip stream and the device tree.
+    # Match the public J4+ ARM64 prebuilt: plain gzip, no optional FNAME,
+    # followed directly by the DTB. Reference Qualcomm LK uses the exact
+    # gzip end as the appended-DTB offset, even if that offset is unaligned.
     python3 "$here/mainline-payload.py" \
         --image "$out/arch/arm64/boot/Image.gz" --dtb "$dtb" \
         --out "$MAIN/$name-Image.gz-dtb"
@@ -233,6 +233,7 @@ for variant in "${variants[@]}"; do
         python3 - "$OUT/$name" <<'PY'
 import struct
 import sys
+import zlib
 from pathlib import Path
 data = Path(sys.argv[1]).read_bytes()
 size, addr, rsize, raddr, ssize, saddr, tags, page, ver = struct.unpack_from('<9I', data, 8)
@@ -241,11 +242,17 @@ assert 0 < size < len(data) and rsize > 0, 'empty kernel or ramdisk payload'
 align = lambda n: (n + page - 1) // page * page
 assert len(data) >= page + align(size) + align(rsize) + align(ssize), 'truncated'
 assert len(data) <= 32 * 1024 * 1024, 'boot image over the 32 MiB BOOT partition'
-# The tree is tens of KiB, so its magic is nowhere near the last byte: use the
-# DTB's own totalsize, which must account for exactly the tail of the kernel.
+# Locate the DTB by gzip EOF, not a magic search or an alignment assumption.
+# The J4+ ARM64 reference puts the first FDT at offset 1 mod 8.
 kern = data[page:page + size]
-at = kern.rfind(bytes.fromhex('d00dfeed'))
-assert at >= 0 and at % 4 == 0, 'no DTB header in the kernel payload'
+assert len(kern) >= 18 and kern[:4] == b'\x1f\x8b\x08\x00', 'not plain gzip'
+stream = zlib.decompressobj(16 + zlib.MAX_WBITS)
+stream.decompress(kern)
+stream.flush()
+assert stream.eof, 'truncated gzip kernel'
+at = len(kern) - len(stream.unused_data)
+assert len(kern) - at >= 40 and kern[at:at + 4] == bytes.fromhex('d00dfeed'), \
+    'no DTB header exactly at gzip EOF'
 assert struct.unpack_from('>I', kern, at + 4)[0] == len(kern) - at, \
     'the appended DTB does not reach the end of the kernel payload'
 print(f'{sys.argv[1]}: {len(data)} B, kernel {size} B, ramdisk {rsize} B, ok')

@@ -39,9 +39,16 @@
 	compatible = "samsung,j4primelte", "qcom,msm8917";
 	chassis-type = "handset";
 
-	/* Samsung aboot DTB'yi bunlarla seçer (downstream: <303 0>, <8 6>) */
-	qcom,msm-id = <QCOM_ID_MSM8917 0>;
+	/*
+	 * Copy the complete Rev06 identification from the working J4+ DTB.
+	 * The previous M1 omitted two SoC alternatives and the PMIC ID.
+	 * These fields are needed for Qualcomm bootloader DTB matching; the
+	 * exact matching rules in Samsung's proprietary aboot are unknown.
+	 */
+	qcom,msm-id = <QCOM_ID_MSM8917 0>, <QCOM_ID_MSM8217 0>,
+		      <QCOM_ID_MSM8617 0>;
 	qcom,board-id = <8 6>;
+	qcom,pmic-id = <0x10019 0 0 0>;
 
 	aliases {
 		/*

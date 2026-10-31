@@ -209,6 +209,33 @@ def check_console(text: str):
     return None
 
 
+def check_loader_ids(dtb: Path):
+    """Check exact root-node IDs against the device-tested Rev06 donor.
+
+    Use fdtget rather than searching decompiled text, so a same-named property
+    in an unrelated child node cannot satisfy this critical loader guard.
+    """
+    fdtget = shutil.which('fdtget')
+    if not fdtget:
+        return ['fdtget is required to check root DTB identification']
+    expected = {
+        'qcom,msm-id': [303, 0, 308, 0, 309, 0],
+        'qcom,board-id': [8, 6],
+        'qcom,pmic-id': [0x10019, 0, 0, 0],
+    }
+    failures = []
+    for prop, want in expected.items():
+        proc = subprocess.run([fdtget, '-t', 'x', str(dtb), '/', prop],
+                              capture_output=True, text=True)
+        try:
+            got = [int(x, 16) for x in proc.stdout.split()] if proc.returncode == 0 else None
+        except ValueError:
+            got = None
+        if got != want:
+            failures.append(f'root {prop} is {got}; Rev06 donor uses {want}')
+    return failures
+
+
 def check_dtb(mainline: Path, name: str, panel: bool, failures: list):
     dtb = mainline / f'{name}.dtb'
     if not dtb.is_file():
@@ -221,12 +248,8 @@ def check_dtb(mainline: Path, name: str, panel: bool, failures: list):
     for expected in ('Samsung Galaxy J4+ (SM-J415F)', 'samsung,j4primelte'):
         if expected not in text:
             failures.append(f'{name}: device tree does not say "{expected}"')
-    board = property_ints(text, 'qcom,board-id')
-    if board != [8, 6]:
-        failures.append(f'{name}: qcom,board-id is {board}, LK picks the tree with '
-                        '<8 6> for this board')
-    if property_ints(text, 'qcom,msm-id') is None:
-        failures.append(f'{name}: no qcom,msm-id; the loader matches on it')
+    for problem in check_loader_ids(dtb):
+        failures.append(f'{name}: {problem}')
     if '"ramoops"' not in text:
         failures.append(f'{name}: no ramoops reserved region, a panic before the '
                         'shell would leave nothing behind')
@@ -308,12 +331,13 @@ def check_appended(mainline: Path, name: str, failures: list):
         failures.append(f'{name}: trailing bytes are not the built DTB')
         return
     dtb_offset = len(blob) - len(tree)
-    if dtb_offset % 8:
-        failures.append(f'{name}: appended DTB is not 8-byte aligned')
     compressed = blob[:dtb_offset]
-    if not compressed.startswith(b'\x1f\x8b\x08'):
-        failures.append(f'{name}: kernel is not a gzip stream')
+    if len(compressed) < 18 or not compressed.startswith(b'\x1f\x8b\x08'):
+        failures.append(f'{name}: kernel is not a complete gzip stream')
         return
+    if compressed[3] != 0:
+        failures.append(f'{name}: gzip has optional header fields; the J4+ '
+                        'ARM64 reference uses plain gzip')
     try:
         stream = zlib.decompressobj(16 + zlib.MAX_WBITS)
         image = stream.decompress(compressed) + stream.flush()
