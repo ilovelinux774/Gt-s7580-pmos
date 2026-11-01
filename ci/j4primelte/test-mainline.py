@@ -1091,6 +1091,48 @@ class DeviceTree(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'kernel.*overlaps'):
             check.audit_reservations(tree, [('kernel', 0x85000000, 0x85001000)])
 
+    def test_rev06_firmware_pools_are_reserved_and_mutations_are_rejected(self):
+        fdtput = shutil.which('fdtput')
+        if not fdtput or not shutil.which('fdtget'):
+            self.skipTest('fdtput/fdtget are not installed')
+        check = verify.loader_checks
+        for source in (staging.DTS, staging.PANEL_DTS):
+            tree = self.out / ('firmware-' + source + '.dtb')
+            good = self.compile(source)
+            tree.write_bytes(good)
+            check.require_firmware_reservations(tree)
+            variant = 'panel' if source == staging.PANEL_DTS else 'm1'
+            artifact = self.out / (variant + '.dtb')
+            artifact.write_bytes(good)
+            failures = []
+            verify.check_dtb(self.out, variant, variant == 'panel', failures)
+            self.assertEqual(failures, [], source)
+            for node in check.REV06_FIRMWARE_RESERVATIONS:
+                mutations = [
+                    ['-d', str(tree), node, 'no-map'],
+                    ['-t', 's', str(tree), node, 'status', 'disabled'],
+                    ['-t', 'x', str(tree), node, 'reg', '0', '80000000', '0', '1000'],
+                    ['-r', str(tree), node],
+                ]
+                for command in mutations:
+                    tree.write_bytes(good)
+                    subprocess.run([fdtput] + command, check=True)
+                    with self.assertRaises(ValueError, msg=f'{source}: {command}'):
+                        check.require_firmware_reservations(tree)
+                    artifact.write_bytes(tree.read_bytes())
+                    failures = []
+                    verify.check_dtb(self.out, variant, variant == 'panel', failures)
+                    self.assertTrue(any('firmware reservation audit failed' in item
+                                        for item in failures), failures)
+            # An extra active pool in the modem range is not allowed.
+            tree.write_bytes(good)
+            overlap = '/reserved-memory/overlap@86801000'
+            subprocess.run([fdtput, '-c', str(tree), overlap], check=True)
+            subprocess.run([fdtput, '-t', 'x', str(tree), overlap, 'reg',
+                            '0', '86801000', '0', '1000'], check=True)
+            with self.assertRaisesRegex(ValueError, 'overlap'):
+                check.require_firmware_reservations(tree)
+
     def test_ramoops_console_matches_rev06_and_missing_ftrace_is_rejected(self):
         fdtput = shutil.which('fdtput')
         if not fdtput or not shutil.which('fdtget'):

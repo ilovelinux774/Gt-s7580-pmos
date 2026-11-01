@@ -27,7 +27,9 @@ SRC="${J4_LK2ND_SOURCE:-$HOME/j4-lk2nd-geckyn}"
 PREFIX="${J4_LK2ND_TOOLCHAIN_PREFIX:-arm-none-eabi-}"
 JOBS="${J4_LK2ND_JOBS:-$(nproc)}"
 REV='7bc82f56d1339b1d081c48ad3c664ec6119257af'
-OUT="$MAIN/boot/lk2nd-hlos-diagnostic.img"
+NAME="${J4_LK2ND_DIAG_NAME:-lk2nd-hlos-diagnostic.img}"
+[[ "$NAME" =~ ^[a-z0-9-]+\.img$ ]] || { echo 'J4_LK2ND_DIAG_NAME must be a simple lower-case .img filename' >&2; exit 1; }
+OUT="$MAIN/boot/$NAME"
 SAVED="$MAIN/lk2nd-hlos-diagnostic"
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || { echo 'J4_LK2ND_JOBS must be positive' >&2; exit 1; }
 for tool in git make dtc fdtget fdtput python3 "${PREFIX}gcc" "${PREFIX}ld" "${PREFIX}objcopy" aarch64-linux-gnu-as aarch64-linux-gnu-ld aarch64-linux-gnu-objcopy; do

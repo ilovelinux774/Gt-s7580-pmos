@@ -149,6 +149,38 @@
 		};
 
 		/*
+		 * Keep the fixed firmware ranges from this phone's recorded Rev06
+		 * downstream device tree out of Linux's normal RAM map, even while
+		 * the corresponding mainline remoteproc/video nodes are disabled.
+		 * Disabling a driver does not itself reserve memory that firmware
+		 * may already own or protect. The actual J415F firmware permissions
+		 * and their relationship to the observed reboot remain unproven.
+		 *
+		 * The generic dtsi's mpss/adsp/wcnss/venus pools remain disabled.
+		 * Before enabling those drivers in M4, replace/reconcile these static
+		 * pools instead of enabling an overlapping second reservation.
+		 */
+		modem-fw@86800000 {
+			reg = <0x0 0x86800000 0x0 0x5a00000>;
+			no-map;
+		};
+
+		adsp-fw@8c200000 {
+			reg = <0x0 0x8c200000 0x0 0x1800000>;
+			no-map;
+		};
+
+		wcnss-fw@8da00000 {
+			reg = <0x0 0x8da00000 0x0 0x700000>;
+			no-map;
+		};
+
+		venus-fw@8fc00000 {
+			reg = <0x0 0x8fc00000 0x0 0x400000>;
+			no-map;
+		};
+
+		/*
 		 * CP reserved-memory OFF: aboot deletes this node and client_4.
 		 * MBS 32 MiB: it rewrites the first reg tuple to 0x93000000 +
 		 * 0x02000000. CP 96 MiB: it retains this node without rewriting.

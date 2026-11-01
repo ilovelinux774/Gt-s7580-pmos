@@ -194,6 +194,33 @@ def require_loader_nodes(dtb: Path):
         raise ValueError('missing Samsung memshare client_4 / peripheral-size')
 
 
+# Fixed no-map firmware ranges observed in the owner's downstream Rev06 DTB.
+# Their runtime ownership/protection and any relationship to the reboot are
+# unknown. These static pools must be reconciled with dynamic remoteproc pools
+# before enabling modem, DSP, Wi-Fi firmware or video in a later milestone.
+REV06_FIRMWARE_RESERVATIONS = {
+    '/reserved-memory/modem-fw@86800000': (0x86800000, 0x8c200000),
+    '/reserved-memory/adsp-fw@8c200000': (0x8c200000, 0x8da00000),
+    '/reserved-memory/wcnss-fw@8da00000': (0x8da00000, 0x8e100000),
+    '/reserved-memory/venus-fw@8fc00000': (0x8fc00000, 0x90000000),
+}
+
+
+def require_firmware_reservations(dtb: Path):
+    """Check the conservative fixed pools without claiming firmware behavior."""
+    for node, expected in REV06_FIRMWARE_RESERVATIONS.items():
+        props = properties(dtb, node)
+        if props is None or 'no-map' not in props:
+            raise ValueError(f'{node}: missing firmware reservation or no-map')
+        status = fdtget(dtb, node, 'status', 's')
+        if status is not None and status not in ('okay', 'ok'):
+            raise ValueError(f'{node}: firmware reservation is disabled')
+        if tuple_ranges(words(dtb, node, 'reg'), node) != [expected]:
+            raise ValueError(f'{node}: firmware reservation range changed')
+    # Refuse accidental simultaneous use of dynamic/duplicate reservations.
+    audit_reservations(dtb)
+
+
 def require_ramoops_console_compat(dtb: Path):
     """Keep the mainline dump/console locations compatible with Rev06 3.18.
 

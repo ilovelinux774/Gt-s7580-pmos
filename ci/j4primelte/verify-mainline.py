@@ -251,6 +251,10 @@ def check_dtb(mainline: Path, name: str, panel: bool, failures: list):
             failures.append(f'{name}: device tree does not say "{expected}"')
     for problem in check_loader_ids(dtb):
         failures.append(f'{name}: {problem}')
+    try:
+        loader_checks.require_firmware_reservations(dtb)
+    except (OSError, ValueError, UnicodeError, struct.error) as exc:
+        failures.append(f'{name}: firmware reservation audit failed: {exc}')
     if '"ramoops"' not in text:
         failures.append(f'{name}: no ramoops reserved region, a panic before the '
                         'shell would leave nothing behind')

@@ -1,9 +1,15 @@
 # J415F experimental HLOS handoff diagnostic
 
-**Not a proven fix.** The previous J415F lk2nd M1 image displayed Tux, then a
-blue screen and rebooted. Neither Linux entry nor the cause has been shown.
-The Samsung T380/T385 reports motivate an HLOS-memory SCM experiment, but do
-not establish the J415F XPU policy. The previous image is marked device-failed.
+**Not a proven fix.** Both the earlier J415F lk2nd M1 image and the published
+HLOS diagnostic displayed lk2nd's Tux, then a blue screen and rebooted on the
+phone. Both device tests failed; do not retry those images. Neither Linux entry
+nor the cause has been shown. The Samsung T380/T385 reports motivate an
+HLOS-memory SCM experiment but do not establish J415F XPU policy.
+
+A subsequent, untested DTS correction reserves four fixed no-map firmware
+ranges found in the recorded J415F Rev06 downstream tree. This avoids treating
+those areas as ordinary RAM if the same memory map is passed to Linux; it does
+not establish that Linux was reached or that the ranges caused the reboot.
 
 This combined **BOOT-only** diagnostic retains geckyn's 1-MiB in-memory split,
 uses the same original mainline kernel and unchanged #37 debug initramfs, and
@@ -43,15 +49,19 @@ a hardware test.
 
 ## Reproduction
 
-The manual Actions workflow has an `hlos_diagnostic_only` switch. That quick
-mode downloads the **failed** release image solely as a SHA-pinned source of
-the unchanged mainline kernel, DTBs and debug initramfs; it **does not rebuild
-the mainline kernel**. It rebuilds the patched lk2nd using the pinned geckyn
-revision, verifies both Android headers, checks the DTB semantic delta, tests
-real compiled ARM/ARM64 marker code with Unicorn 2.1.4, and emits only the new
-`lk2nd-hlos-diagnostic.img` in its boot artifact. A previous failed BOOT is not
-an output or flash target. On a local Linux host with dependencies installed,
-`reproduce-lk2nd-hlos-diag.sh` performs the same reconstruction.
+The old `hlos_diagnostic_only` quick mode and its reconstruction script are
+retired: the resulting HLOS image failed its device test and its old DTB lacks
+the Rev06 firmware reservations. Their historical implementation is retained in
+repository commit `90e1b3a`; it must not be offered as a new phone test.
+
+The normal Actions path builds the pinned mainline kernel and updated DTS,
+checks the compiled firmware reservations, then builds the patched lk2nd and
+wrapper with Unicorn tests. Its `lk2nd-firmware-ram-diagnostic.img` is a new
+experimental BOOT image, not a proven fix. On a Linux build host, run
+`build-mainline.sh`, `verify-mainline.py`, `build-lk2nd.sh`, then
+`build-lk2nd-hlos-diag.sh` with the same checked donor and artifact directory.
+No rootfs is built or replaced. Any image remains untested until the owner tests
+it; absent markers still cannot locate the failure.
 
 Synthetic tests cover cached/lazy SCM-detection branches, the original legacy
 path, relocated modern parameters and SMC instructions, simulated interrupt
