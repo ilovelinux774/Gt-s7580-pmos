@@ -29,8 +29,11 @@ REQUIRED_Y = ('COMPAT COMPAT_BINFMT_ELF BUILD_ARM64_APPENDED_DTB_IMAGE BUILD_ARM
               'SEC_J4PRIMELTE_PROJECT MACH_J4PRIMELTE_SEA_OPEN SYSVIPC '
               'DEVPTS_MULTIPLE_INSTANCES DEVTMPFS DEVTMPFS_MOUNT BLK_DEV_INITRD '
               'RD_GZIP BINFMT_ELF BINFMT_SCRIPT EXT4_FS USB_G_ANDROID USB_MSM_OTG '
-              'PRONTO_WLAN BT_HCI_SMD MSM_KGSL FIRMWARE_IN_KERNEL '
+              'PRONTO_WLAN BT_HCI_SMD MSM_KGSL FW_LOADER FIRMWARE_IN_KERNEL '
               'TOUCHSCREEN_SEC_INCELL_TS').split()
+REQUIRED_EXTRA = ('CONFIG_EXTRA_FIRMWARE="a300_pm4.fw a300_pfp.fw"',
+                  'CONFIG_EXTRA_FIRMWARE_DIR="firmware"',
+                  'CONFIG_LOCALVERSION="-j4-medusa64-gpufw-debug"')
 REQUIRED_NOT_Y = ('ANDROID_PARANOID_NETWORK SECURITY_SELINUX DM_VERITY FRAMEBUFFER_CONSOLE').split()
 
 
@@ -46,6 +49,9 @@ def validate_config(path):
     for option in REQUIRED_NOT_Y:
         if f'CONFIG_{option}=y' in lines:
             raise ValueError(f'unexpected CONFIG_{option}=y in the final kernel config')
+    for line in REQUIRED_EXTRA:
+        if line not in lines:
+            raise ValueError(f'missing required GPU firmware config: {line}')
 
 
 def fdtget(path, node, prop, kind='x'):

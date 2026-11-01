@@ -277,6 +277,7 @@ jobs:
         run: |
           bash -n ci/j4primelte/build-medusa64-kernel.sh
           python3 ci/j4primelte/test-medusa64.py 2>&1 | tee artifacts/logs/medusa64-tests.log
+          python3 ci/j4primelte/test-medusa64-firmware.py 2>&1 | tee artifacts/logs/medusa64-gpufw-tests.log
 
       - name: Fetch pinned touchscreen firmware and known-good donor
         run: |
@@ -289,22 +290,27 @@ jobs:
       - name: Build downstream ARM64 kernel for J4+
         run: bash ci/j4primelte/build-medusa64-kernel.sh 2>&1 | tee artifacts/logs/medusa64-build.log
 
-      - name: Package exactly the recorded Rev06 DTB and donor initramfs
+      - name: Package and verify the firmware-enabled debug BOOT
         run: |
           cp "$J4_MEDUSA64_OUT/.config" artifacts/medusa64/kernel.config
           cp "$J4_MEDUSA64_OUT/arch/arm64/boot/Image.gz" artifacts/medusa64/Image.gz
           cp "$J4_MEDUSA64_OUT/arch/arm64/boot/dts/samsung/msm8917/msm8917-sec-j4primelte-sea-open-r06.dtb" artifacts/medusa64/rev06.dtb
-          python3 ci/j4primelte/medusa64-repack.py --donor _medusa64/donor.img --image-gz artifacts/medusa64/Image.gz --dtb artifacts/medusa64/rev06.dtb --config artifacts/medusa64/kernel.config --out artifacts/medusa64/medusa64-debug-UNTESTED.img --report artifacts/medusa64/PACKING.json
+          cp "$J4_MEDUSA64_OUT/j4-gpu-firmware/LICENSE.qcom.txt" "$J4_MEDUSA64_OUT/j4-gpu-firmware/NOTICE.qcom.txt" artifacts/medusa64/
+          python3 ci/j4primelte/medusa64-repack.py --donor _medusa64/donor.img --image-gz artifacts/medusa64/Image.gz --dtb artifacts/medusa64/rev06.dtb --config artifacts/medusa64/kernel.config --out artifacts/medusa64/medusa64-gpufw-debug-UNTESTED.img --report artifacts/medusa64/PACKING.json
           objcopy -I ihex -O binary "$J4_MEDUSA64_TOUCH_Q" _medusa64/touch-Q.bin
-          python3 ci/j4primelte/verify-medusa64.py --image artifacts/medusa64/medusa64-debug-UNTESTED.img --donor _medusa64/donor.img --image-gz artifacts/medusa64/Image.gz --dtb artifacts/medusa64/rev06.dtb --config artifacts/medusa64/kernel.config --touch-q-bin _medusa64/touch-Q.bin --report artifacts/medusa64/INDEPENDENT-VERIFY.json
-          printf '%s\n' 'UNTESTED BOOT-only debug image. Do not flash without separate review and user approval.' 'Linux 3.18 downstream, not mainline. GPU, USB and compatibility with the existing rootfs are unproven.' 'No rootfs or /vendor image is built. The donor initramfs is copied byte for byte.' > artifacts/medusa64/NOT-DEVICE-TESTED.txt
-          (cd artifacts/medusa64 && sha256sum DONOR.txt Image.gz rev06.dtb kernel.config medusa64-debug-UNTESTED.img PACKING.json INDEPENDENT-VERIFY.json NOT-DEVICE-TESTED.txt > SHA256SUMS)
+          python3 ci/j4primelte/verify-medusa64.py --image artifacts/medusa64/medusa64-gpufw-debug-UNTESTED.img --donor _medusa64/donor.img --image-gz artifacts/medusa64/Image.gz --dtb artifacts/medusa64/rev06.dtb --config artifacts/medusa64/kernel.config --touch-q-bin _medusa64/touch-Q.bin --gpu-pm4 "$J4_MEDUSA64_OUT/firmware/a300_pm4.fw" --gpu-pfp "$J4_MEDUSA64_OUT/firmware/a300_pfp.fw" --report artifacts/medusa64/INDEPENDENT-VERIFY.json
+          "$J4_MEDUSA64_TOOLCHAIN_TREE/bin/aarch64-linux-android-objcopy" -O binary -R .note -R .note.gnu.build-id -R .comment -S "$J4_MEDUSA64_OUT/vmlinux" _medusa64/vmlinux-recovered.Image
+          cmp _medusa64/vmlinux-recovered.Image "$J4_MEDUSA64_OUT/arch/arm64/boot/Image"
+          gzip -dc artifacts/medusa64/Image.gz | cmp - _medusa64/vmlinux-recovered.Image
+          python3 ci/j4primelte/verify-medusa64-firmware.py --vmlinux "$J4_MEDUSA64_OUT/vmlinux" --config artifacts/medusa64/kernel.config --image-gz artifacts/medusa64/Image.gz --pm4 "$J4_MEDUSA64_OUT/firmware/a300_pm4.fw" --pfp "$J4_MEDUSA64_OUT/firmware/a300_pfp.fw" --report artifacts/medusa64/BUILTIN-FW-VERIFY.json
+          printf '%s\n' 'THIS firmware-enabled BOOT is NOT DEVICE-TESTED. Do not flash without separate review and user approval.' 'The earlier Medusa image reached a debug shell; this rebuild and GPU initialization remain untested.' 'No rootfs or /vendor image is built. The donor initramfs is copied byte for byte.' > artifacts/medusa64/NOT-DEVICE-TESTED.txt
+          (cd artifacts/medusa64 && sha256sum DONOR.txt Image.gz rev06.dtb kernel.config medusa64-gpufw-debug-UNTESTED.img PACKING.json INDEPENDENT-VERIFY.json BUILTIN-FW-VERIFY.json LICENSE.qcom.txt NOTICE.qcom.txt NOT-DEVICE-TESTED.txt > SHA256SUMS)
 
       - name: Upload untested ARM64 build and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: j4-medusa64-debug-UNTESTED-${{ github.run_number }}
+          name: j4-medusa64-gpufw-debug-UNTESTED-${{ github.run_number }}
           path: |
             artifacts/medusa64/
             artifacts/logs/medusa64-*.log

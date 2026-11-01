@@ -1,10 +1,12 @@
 # J4+ SM-J415F: Project Medusa ARM64 experiment
 
-**Status: experimental, not proven to boot.** This is the old downstream
-Project Medusa Linux **3.18.120** kernel, not mainline and not an automatic GPU
-acceleration fix. The first artifact is a debug-shell BOOT image, not a full
-postmarketOS/rootfs image. The normal procedure uses OrangeFox, not fastboot;
-no flashing should be attempted without separate review and owner approval.
+**Status: experimental firmware-enabled rebuild, not device-tested.** The
+previous Medusa BOOT reached the initramfs debug shell on the recorded phone;
+this rebuild has not been tested. It is the old downstream Project Medusa Linux
+**3.18.120** kernel, not mainline and not an automatic GPU acceleration fix.
+The artifact is a debug-shell BOOT image, not a full postmarketOS/rootfs
+image. Use OrangeFox, not fastboot; no flashing should be attempted without
+separate review and owner approval.
 
 The previously tested M1 firmware-RAM image `063e5792...` failed on the phone:
 lk2nd/Tux, brief solid blue with no text, then reboot. **Do not retry it.** A
@@ -77,6 +79,27 @@ partition (for example on a recovery reboot); recovery itself may write. This
 workflow does not modify `/vendor` or make a
 rootfs image, but it cannot guarantee runtime code has no persistent effects.
 Replacing the existing rootfs would erase the live LXQt, Wi-Fi and audio state.
+
+## Firmware-enabled debug build
+
+The owner identified p47 as the existing ARMv7 downstream pmOS rootfs, mounted
+it `ro,noload`, searched for `a300*.fw*` and reported no matches. The donor
+debug initramfs also has none. A dirty ext4 journal was not replayed, so that
+rootfs view may be stale or incomplete. First opening `/dev/kgsl-3d0` runs GPU
+initialization and requests `a300_pm4.fw` and `a300_pfp.fw`; do not open the
+GPU merely to inspect its device node.
+
+This build includes both files in the kernel through `CONFIG_EXTRA_FIRMWARE`,
+so the firmware loader can find them in the debug initramfs and after a future
+switch of root, without changing p47 or `/vendor`. Their bytes come from pinned
+linux-firmware commit `9a0a0548a7bb02d052318ed8f5333005773878f2` and match
+Project Medusa's publicly available MSM8917 vendor tree. The release must
+include the accompanying `LICENSE.qcom.txt` and `NOTICE.qcom.txt` and comply
+with them. The workflow verifies each firmware SHA-256 and checks the linked
+ELF `.builtin_fw` table, then ensures its objcopy matches the packaged kernel.
+This is a static check: boot, GPU start, firmware compatibility on this specific
+phone, rendering and desktop acceleration are untested. The rebuilt BOOT image
+is new; the earlier debug-shell success does not count as a test of it.
 
 ## Graphics
 

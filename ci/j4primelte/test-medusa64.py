@@ -120,12 +120,16 @@ class Packaging(unittest.TestCase):
 
     def test_config_required_and_unwanted_flags(self):
         cfg = self.folder / 'config'
-        lines = [f'CONFIG_{x}=y' for x in m.REQUIRED_Y]
+        lines = [f'CONFIG_{x}=y' for x in m.REQUIRED_Y] + list(m.REQUIRED_EXTRA)
         cfg.write_text('\n'.join(lines) + '\n')
         m.validate_config(cfg)
         cfg.write_text('\n'.join(lines[1:]) + '\n')
         with self.assertRaises(ValueError): m.validate_config(cfg)
         cfg.write_text('\n'.join(lines + ['CONFIG_ANDROID_PARANOID_NETWORK=y']) + '\n')
+        with self.assertRaises(ValueError): m.validate_config(cfg)
+        cfg.write_text('\n'.join(lines[:-1]) + '\n')
+        with self.assertRaises(ValueError): m.validate_config(cfg)
+        cfg.write_text('\n'.join(x for x in lines if not x.startswith('CONFIG_EXTRA_FIRMWARE=')) + '\n')
         with self.assertRaises(ValueError): m.validate_config(cfg)
 
 
@@ -138,26 +142,31 @@ class IndependentVerification(unittest.TestCase):
         self.donor = fixture.make_boot(page=2048, name=b'',
                                        cmdline='pmos_root_uuid=' + m.ROOT_UUID)
         self.touch = bytes(range(251)) * (120144 // 251) + bytes(range(120144 % 251))
-        raw = bytearray(4096) + self.touch
+        self.pm4 = b'\x9d' * 9220
+        self.pfp = b'\x8e' * 1156
+        raw = bytearray(4096) + self.touch + self.pm4 + self.pfp
         struct.pack_into('<QQQ', raw, 8, 0x80000, len(raw), 0)
         raw[56:60] = b'ARM\x64'
         self.gz = gzip.compress(bytes(raw), mtime=0)
         self.image, _ = m.build(self.donor, self.gz, self.dtb.read_bytes(),
                                 donor_sha=m.sha(self.donor),
                                 ramdisk_sha=m.sha(m.r.BootImage(self.donor).ramdisk))
-        self.config = '\n'.join(f'CONFIG_{x}=y' for x in m.REQUIRED_Y) + '\n'
-        self.constants = {k: getattr(v, k) for k in ('DONOR_SHA', 'RAMDISK_SHA', 'TOUCH_Q_SHA')}
+        self.config = '\n'.join([f'CONFIG_{x}=y' for x in m.REQUIRED_Y] + list(m.REQUIRED_EXTRA)) + '\n'
+        self.constants = {k: getattr(v, k) for k in ('DONOR_SHA', 'RAMDISK_SHA', 'TOUCH_Q_SHA', 'GPU_PM4_SHA', 'GPU_PFP_SHA')}
         v.DONOR_SHA = v.sha(self.donor)
         v.RAMDISK_SHA = v.sha(m.r.BootImage(self.donor).ramdisk)
         v.TOUCH_Q_SHA = v.sha(self.touch)
+        v.GPU_PM4_SHA = v.sha(self.pm4)
+        v.GPU_PFP_SHA = v.sha(self.pfp)
 
     def tearDown(self):
         for k, value in self.constants.items(): setattr(v, k, value)
         self.tmp.cleanup()
 
-    def verify(self, image=None, touch=None):
+    def verify(self, image=None, touch=None, pm4=None, pfp=None):
         return v.verify(self.image if image is None else image, self.donor, self.gz,
-                        self.dtb, self.config, self.touch if touch is None else touch)
+                        self.dtb, self.config, self.touch if touch is None else touch,
+                        self.pm4 if pm4 is None else pm4, self.pfp if pfp is None else pfp)
 
     def test_independent_parser_accepts_valid_fixture(self):
         result = self.verify()
@@ -169,6 +178,8 @@ class IndependentVerification(unittest.TestCase):
         damaged[576] ^= 1
         with self.assertRaises(ValueError): self.verify(image=bytes(damaged))
         with self.assertRaises(ValueError): self.verify(touch=b'wrong')
+        with self.assertRaises(ValueError): self.verify(pm4=b'wrong')
+        with self.assertRaises(ValueError): self.verify(pfp=b'wrong')
 
 
 class Staging(unittest.TestCase):
