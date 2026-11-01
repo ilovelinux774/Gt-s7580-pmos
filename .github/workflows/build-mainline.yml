@@ -33,6 +33,10 @@ on:
         description: 'Retired failed diagnostic; leave false and use the full build'
         type: boolean
         default: false
+      medusa64_diagnostic:
+        description: 'Build an untested BOOT-only Project Medusa ARM64 Rev06 diagnostic instead of mainline'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -44,6 +48,7 @@ concurrency:
 
 jobs:
   build:
+    if: ${{ !inputs.medusa64_diagnostic }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     defaults:
@@ -175,7 +180,7 @@ jobs:
           for out in "$HOME"/j4-mainline-out-*; do
             [ -f "$out/.config" ] || continue
             cp "$out/.config" "artifacts/logs/$(basename "$out").config"
-            [ -f "$out/kconfig.log" ] && cp "$out/kconfig.log" "artifacts/logs/" || true
+            if [ -f "$out/kconfig.log" ]; then cp "$out/kconfig.log" "artifacts/logs/" || true; fi
           done
           for dtb in "$HOME"/j4-mainline-out-*/arch/arm64/boot/dts/qcom/msm8917-samsung-j4primelte*.dtb; do
             [ -f "$dtb" ] || continue
@@ -214,5 +219,94 @@ jobs:
         with:
           name: j4primelte-mainline-logs-${{ github.run_number }}
           path: artifacts/logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Kept in this already-dispatchable workflow to avoid touching other files on
+  # main. This job builds downstream Medusa, never mainline, when selected.
+  medusa64:
+    if: ${{ inputs.medusa64_diagnostic }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      GIT_TERMINAL_PROMPT: "0"
+      PYTHONUNBUFFERED: "1"
+      J4_MEDUSA64_KERNEL_TREE: ${{ github.workspace }}/_medusa64/kernel
+      J4_MEDUSA64_TOOLCHAIN_TREE: ${{ github.workspace }}/_medusa64/toolchain
+      J4_MEDUSA64_OUT: ${{ github.workspace }}/_medusa64/out
+      J4_MEDUSA64_TOUCH_Q: ${{ github.workspace }}/_medusa64/touch-Q.ihex
+      J4_MEDUSA64_JOBS: "2"
+    steps:
+      - name: Require the approved J4+ branch and exclusive build mode
+        run: |
+          test "$GITHUB_REF_NAME" = pmos-j4primelte-20260927 || { echo 'Select the pmos-j4primelte-20260927 branch' >&2; exit 1; }
+          if [[ "${{ inputs.panel_milestone }}" == true || "${{ inputs.hlos_diagnostic_only }}" == true ]]; then echo 'Select Medusa64 by itself' >&2; exit 1; fi
+
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout pinned Medusa ARM64 kernel
+        uses: actions/checkout@v4
+        with:
+          repository: ProjectMedusaAndroid/android_kernel_samsung_msm8917_64
+          ref: a5ca5d08ebbb559944e6661f54e7decdcd167bd6
+          path: _medusa64/kernel
+          persist-credentials: false
+
+      - name: Checkout pinned Medusa AArch64 GCC
+        uses: actions/checkout@v4
+        with:
+          repository: ProjectMedusaAndroid/aarch64-gcc-4.9-brillo-m10-release
+          ref: 42f42a5b9afe816b5b5dd93ed9ea5642bdf3d0e4
+          path: _medusa64/toolchain
+          persist-credentials: false
+
+      - name: Install build and verification dependencies
+        run: |
+          mkdir -p artifacts/medusa64 artifacts/logs _medusa64
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential bc bison flex git wget ca-certificates python2 python3 libssl-dev libelf-dev libncurses-dev cpio file device-tree-compiler kmod rsync
+          df -h
+
+      - name: Test staging and single-DTB packing
+        run: |
+          bash -n ci/j4primelte/build-medusa64-kernel.sh
+          python3 ci/j4primelte/test-medusa64.py 2>&1 | tee artifacts/logs/medusa64-tests.log
+
+      - name: Fetch pinned touchscreen firmware and known-good donor
+        run: |
+          source ci/j4primelte/medusa64-sources.env
+          wget -q -O "$J4_MEDUSA64_TOUCH_Q" "$J4_MEDUSA64_TOUCH_Q_URL"
+          printf '%s  %s\n' "$J4_MEDUSA64_TOUCH_Q_IHEX_SHA256" "$J4_MEDUSA64_TOUCH_Q" | sha256sum -c -
+          wget -q -O _medusa64/donor.img "$J4_MEDUSA64_DONOR_URL"
+          python3 ci/j4primelte/donor-note.py _medusa64/donor.img artifacts/medusa64/DONOR.txt --expect-sha256 "$J4_MEDUSA64_DONOR_SHA256" --expect-root-uuid "$J4_MEDUSA64_ROOT_UUID"
+
+      - name: Build downstream ARM64 kernel for J4+
+        run: bash ci/j4primelte/build-medusa64-kernel.sh 2>&1 | tee artifacts/logs/medusa64-build.log
+
+      - name: Package exactly the recorded Rev06 DTB and donor initramfs
+        run: |
+          cp "$J4_MEDUSA64_OUT/.config" artifacts/medusa64/kernel.config
+          cp "$J4_MEDUSA64_OUT/arch/arm64/boot/Image.gz" artifacts/medusa64/Image.gz
+          cp "$J4_MEDUSA64_OUT/arch/arm64/boot/dts/samsung/msm8917/msm8917-sec-j4primelte-sea-open-r06.dtb" artifacts/medusa64/rev06.dtb
+          python3 ci/j4primelte/medusa64-repack.py --donor _medusa64/donor.img --image-gz artifacts/medusa64/Image.gz --dtb artifacts/medusa64/rev06.dtb --config artifacts/medusa64/kernel.config --out artifacts/medusa64/medusa64-debug-UNTESTED.img --report artifacts/medusa64/PACKING.json
+          objcopy -I ihex -O binary "$J4_MEDUSA64_TOUCH_Q" _medusa64/touch-Q.bin
+          python3 ci/j4primelte/verify-medusa64.py --image artifacts/medusa64/medusa64-debug-UNTESTED.img --donor _medusa64/donor.img --image-gz artifacts/medusa64/Image.gz --dtb artifacts/medusa64/rev06.dtb --config artifacts/medusa64/kernel.config --touch-q-bin _medusa64/touch-Q.bin --report artifacts/medusa64/INDEPENDENT-VERIFY.json
+          printf '%s\n' 'UNTESTED BOOT-only debug image. Do not flash without separate review and user approval.' 'Linux 3.18 downstream, not mainline. GPU, USB and compatibility with the existing rootfs are unproven.' 'No rootfs or /vendor image is built. The donor initramfs is copied byte for byte.' > artifacts/medusa64/NOT-DEVICE-TESTED.txt
+          (cd artifacts/medusa64 && sha256sum DONOR.txt Image.gz rev06.dtb kernel.config medusa64-debug-UNTESTED.img PACKING.json INDEPENDENT-VERIFY.json NOT-DEVICE-TESTED.txt > SHA256SUMS)
+
+      - name: Upload untested ARM64 build and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4-medusa64-debug-UNTESTED-${{ github.run_number }}
+          path: |
+            artifacts/medusa64/
+            artifacts/logs/medusa64-*.log
           if-no-files-found: warn
           retention-days: 14
