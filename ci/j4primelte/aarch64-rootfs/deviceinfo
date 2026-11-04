@@ -1,0 +1,15 @@
+# Rootfs-only metadata for the J4+ Medusa ARM64 bring-up. This does not
+# define or generate a kernel/BOOT image.
+deviceinfo_format_version="0"
+deviceinfo_name="Samsung Galaxy J4+ SM-J415F (AArch64 rootfs test)"
+deviceinfo_manufacturer="Samsung"
+deviceinfo_codename="samsung-j4primelte"
+deviceinfo_year="2018"
+deviceinfo_arch="aarch64"
+deviceinfo_chassis="handset"
+deviceinfo_external_storage="true"
+deviceinfo_screen_width="720"
+deviceinfo_screen_height="1480"
+deviceinfo_no_framebuffer="true"
+deviceinfo_flash_method="none"
+deviceinfo_usb_network_function="rndis.usb0"
