@@ -51,6 +51,10 @@ on:
         description: 'Required with kernel_tarball_url: sha256 of that tarball'
         type: string
         default: ''
+      require_soc:
+        description: 'Reject trees without msm8917/msm8937 board support (turn off only to test generic builds)'
+        type: boolean
+        default: true
       selftest_only:
         description: 'Skip the kernel entirely; exercise repack-boot and the audits on the donor image'
         type: boolean
@@ -110,6 +114,10 @@ jobs:
             echo "NOTICE: branch overridden to ${{ inputs.kernel_ref }}; commit pin dropped" >&2
           fi
           echo "allow_audit_fail=${{ inputs.allow_audit_fail }}" >> "$GITHUB_ENV"
+          if [ "${{ inputs.require_soc }}" = "false" ]; then
+            echo "J4_REQUIRE_SOC=0" >> "$GITHUB_ENV"
+            echo "NOTICE: SoC support check disabled; a generic tree can pass" >&2
+          fi
           # A tarball lets a local (unpublished) 5.10 tree be tested without
           # pushing a multi-gigabyte fork anywhere. It must be pinned by sha256:
           # a kernel built from "whatever that URL holds today" is not testable.
@@ -132,6 +140,56 @@ jobs:
           fi
           echo "J4_DRY_RUN=$dry" >> "$GITHUB_ENV"
           echo "dry run: $dry"
+
+      - name: Build host tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev rsync zip unzip xz-utils cpio \
+            device-tree-compiler gcc libc6-dev python3
+          gcc -O2 -Wall -Wextra -Werror -o repack-boot "$J4_DIR/repack-boot.c"
+          ./repack-boot inspect "$J4_DIR/../../boot.img" >/dev/null 2>&1 || true
+          echo "repack-boot built"
+
+      - name: Self-test the packing tools on the donor
+        run: |
+          set -euo pipefail
+          # A synthetic "kernel" keeps this independent of the real build and of
+          # any downloaded donor: it proves inspect/repack/build still agree
+          # with each other on every run, which is what protects the phone.
+          head -c 65536 /dev/urandom > /tmp/fake-kernel
+          head -c 32768 /dev/urandom > /tmp/fake-ramdisk
+          ./repack-boot build --kernel /tmp/fake-kernel --ramdisk /tmp/fake-ramdisk \
+            --out /tmp/synth.img --page-size 2048 --kernel-addr 0x8000 \
+            --ramdisk-addr 0x2000000 --tags-addr 0x100 --cmdline 'selftest'
+          ./repack-boot inspect /tmp/synth.img
+          ./repack-boot repack /tmp/synth.img --kernel-new /tmp/fake-ramdisk \
+            --out /tmp/synth2.img --force >/dev/null
+          ./repack-boot inspect /tmp/synth2.img
+          # Refusals must stay refusals.
+          if ./repack-boot build --kernel /tmp/fake-kernel --ramdisk /tmp/fake-ramdisk \
+               --out /tmp/synth.img 2>/dev/null; then
+            echo "::error title=Self-test::build overwrote an existing image without --force"
+            exit 1
+          fi
+          if ./repack-boot repack /tmp/synth.img --kernel-new /tmp/nonexistent \
+               --out /tmp/synth3.img 2>/dev/null; then
+            echo "::error title=Self-test::repack accepted a missing kernel"
+            exit 1
+          fi
+          echo "self-test passed"
+
+      - name: Self-test only (skips kernel, donor and repack)
+        if: ${{ inputs.selftest_only }}
+        run: |
+          echo "selftest_only requested; stopping before the kernel build"
+          {
+            echo '## J4+ 5.10 bring-up: self-test only'
+            echo
+            echo 'repack-boot build/inspect/repack and the refusal paths passed.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
       - name: Obtain the kernel tree (git pin or pinned tarball)
         run: |
@@ -217,56 +275,6 @@ jobs:
           chmod +x tc/bin/* 2>/dev/null || true
           ./tc/bin/aarch64-linux-android-gcc -dumpmachine | tee /dev/stderr | grep -q aarch64 \
             || { echo "toolchain is not aarch64" >&2; exit 1; }
-
-      - name: Build host tools
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            bc bison flex libssl-dev libelf-dev rsync zip unzip xz-utils cpio \
-            device-tree-compiler gcc libc6-dev python3
-          gcc -O2 -Wall -Wextra -Werror -o repack-boot "$J4_DIR/repack-boot.c"
-          ./repack-boot inspect "$J4_DIR/../../boot.img" >/dev/null 2>&1 || true
-          echo "repack-boot built"
-
-      - name: Self-test the packing tools on the donor
-        run: |
-          set -euo pipefail
-          # A synthetic "kernel" keeps this independent of the real build and of
-          # any downloaded donor: it proves inspect/repack/build still agree
-          # with each other on every run, which is what protects the phone.
-          head -c 65536 /dev/urandom > /tmp/fake-kernel
-          head -c 32768 /dev/urandom > /tmp/fake-ramdisk
-          ./repack-boot build --kernel /tmp/fake-kernel --ramdisk /tmp/fake-ramdisk \
-            --out /tmp/synth.img --page-size 2048 --kernel-addr 0x8000 \
-            --ramdisk-addr 0x2000000 --tags-addr 0x100 --cmdline 'selftest'
-          ./repack-boot inspect /tmp/synth.img
-          ./repack-boot repack /tmp/synth.img --kernel-new /tmp/fake-ramdisk \
-            --out /tmp/synth2.img --force >/dev/null
-          ./repack-boot inspect /tmp/synth2.img
-          # Refusals must stay refusals.
-          if ./repack-boot build --kernel /tmp/fake-kernel --ramdisk /tmp/fake-ramdisk \
-               --out /tmp/synth.img 2>/dev/null; then
-            echo "::error title=Self-test::build overwrote an existing image without --force"
-            exit 1
-          fi
-          if ./repack-boot repack /tmp/synth.img --kernel-new /tmp/nonexistent \
-               --out /tmp/synth3.img 2>/dev/null; then
-            echo "::error title=Self-test::repack accepted a missing kernel"
-            exit 1
-          fi
-          echo "self-test passed"
-
-      - name: Self-test only (skips kernel, donor and repack)
-        if: ${{ inputs.selftest_only }}
-        run: |
-          echo "selftest_only requested; stopping before the kernel build"
-          {
-            echo '## J4+ 5.10 bring-up: self-test only'
-            echo
-            echo 'repack-boot build/inspect/repack and the refusal paths passed.'
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit 0
 
       - name: Fetch the donor boot image
         run: |
