@@ -106,9 +106,14 @@ jobs:
             echo "DEFCONFIG=${defconfig:-$J4_K510_DEFCONFIG}"
           # Absolute, because build-kernel.sh runs from the workspace root but
           # takes paths as arguments elsewhere.
+          # J4_K510_FRAGMENT may hold several files (space separated, later wins).
           if [ -n "$J4_K510_FRAGMENT" ]; then
-            echo "FRAGMENT=$PWD/$J4_K510_FRAGMENT" >> "$GITHUB_ENV"
-            test -f "$J4_K510_FRAGMENT" || { echo "fragment missing: $J4_K510_FRAGMENT" >&2; exit 1; }
+            abs=""
+            for f in $J4_K510_FRAGMENT; do
+              test -f "$f" || { echo "::error title=Pinned fragment missing::$f"; exit 1; }
+              abs="$abs $PWD/$f"
+            done
+            echo "FRAGMENT=$(echo $abs)" >> "$GITHUB_ENV"
           fi
             echo "DONOR_URL=$J4_K510_DONOR_URL"
             echo "DONOR_SHA256=$J4_K510_DONOR_SHA256"
