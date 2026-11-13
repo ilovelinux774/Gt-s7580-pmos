@@ -132,6 +132,14 @@ fi
 # Re-resolve dependencies now, so the .config we audit is the one we build.
 make -C "$tree" O="$out" "${make_args[@]}" olddefconfig
 
+if [[ ${J4_K510_CONFIG_ONLY:-0} == 1 ]]; then
+	echo "=== config-only requested; stopping before compile"
+	cp "$out/.config" "$out/config.full"
+	echo "=== audit (systemd)"
+	python3 "$HERE/config-audit.py" "$out/config.full" --mode systemd || true
+	exit 0
+fi
+
 echo "=== build"
 make -C "$tree" O="$out" "${make_args[@]}" -j"$jobs"
 # Mainline builds dtbs in the default target; vendor trees often do not.

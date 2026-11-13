@@ -366,14 +366,27 @@ jobs:
           if [ "$rc" -ne 0 ]; then
             # Say where it broke and why, on the run itself. Without this the
             # only evidence is a step that went red.
-            phase=$(grep -oE '^=== .*' build.log | tail -1 || true)
-            echo "::error title=Kernel build failed ($phase)::build-kernel.sh exited $rc; first errors below"
-            grep -m 5 -E 'error:|Error [0-9]+|fatal:|No rule to make|not found' build.log \
+            phase=$(grep -oE '^=== [a-z][a-z ()-]*' build.log | tail -1 || true)
+            echo "::error title=Kernel build failed${phase:+ at '$phase'}::build-kernel.sh exited $rc"
+
+            # A config audit failure is the most informative case: name the
+            # symbols. They are printed as "FAIL CONFIG_X want=.. got=..".
+            if grep -q 'required symbol(s) missing' build.log; then
+              echo "::error title=Config audit blocked the build::the kernel compiled, but systemd would refuse to boot with it"
+              grep -E '^  FAIL ' build.log | head -10 | while IFS= read -r line; do
+                echo "::error title=Missing symbol::$line"
+              done
+            fi
+
+            grep -m 5 -E 'error:|Error [0-9]+|fatal:|No rule to make|undefined reference' build.log \
               | while IFS= read -r line; do
                   echo "::error title=First error::$line"
                 done
-            echo "--- last 25 lines ---"
-            tail -n 25 build.log
+            for marker in '=== audit (hard)' '=== audit (systemd)' '=== collect' '=== configure' '=== build'; do
+              grep -qFx "$marker" build.log && echo "reached: $marker"
+            done
+            echo "--- last 30 lines ---"
+            tail -n 30 build.log
             exit 1
           fi
 
