@@ -72,7 +72,23 @@ branch before it is on `main`).
 | `verify-tree.sh` | rejects a tree that is not the pin, and separately **rejects a tree with no msm8917/8937 support** | run in CI: it correctly rejected the current CAF pin |
 | `config-audit.py` | checks a `.config` against systemd's documented requirements; `hard`/`systemd`/`userspace` severities, alias-aware, `--json` | run against the real 3.18 config (above) and in CI |
 | `repack-boot.c` | v0 Android boot image `inspect` / `build` / `repack` | self-tested in CI on every run, including the refusal paths |
-| `build-kernel.sh` | defconfig → force the exact symbols systemd needs → build → dtbs → append DTB → audit | not yet run against a suitable tree |
+| `fragment-audit.py` | checks every fragment symbol against the tree's own Kconfig **before** compiling, because `scripts/config` accepts nonsense and `olddefconfig` then drops it silently | run on the real tree: found that the fragment's `DRM_PANEL_SAMSUNG_S6D7AT0B01` does not exist there |
+| `build-kernel.sh` | defconfig → fragments → force the exact symbols systemd needs → build → dtbs → append DTB → audit | not yet run to completion (no `flex`/`bison` in this sandbox) |
+
+### What `fragment-audit.py` already caught
+
+The fragment carried over from the mainline work asks for
+`DRM_PANEL_SAMSUNG_S6D7AT0B01` — the generated panel driver that exists on
+`pmos-j4primelte-20260927` together with its own Kconfig entry. The pinned tree
+does not have that symbol; it has `DRM_PANEL_SAMSUNG_S6D7AA0`, the same
+controller family. Without this check, the build would have succeeded and the
+phone would have booted with no panel driver, with nothing in any log saying so.
+
+`ci/j4primelte/k510/mainline/k510-overrides.fragment` enables the in-tree driver
+and declares the substitution explicitly (`! SUPERSEDES ...`), so the difference
+is visible in the repository rather than buried in a typo. 272 directives,
+21602 symbols in the tree, zero unknown — verified locally against a real clone
+of the pinned commit.
 
 `repack-boot repack` is the operation bring-up needs: it copies **every** header
 field from the phone's own known-good boot image and swaps only the kernel

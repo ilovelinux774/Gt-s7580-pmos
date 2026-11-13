@@ -240,9 +240,36 @@ jobs:
           if [ "$rc" -ne 0 ]; then
             # Put the reason on the run itself, so it is readable without
             # downloading a log or an artifact.
+            matched=0
             while IFS= read -r line; do
               echo "::error title=Tree rejected::$line"
+              matched=1
             done < <(grep -E 'VERIFY FAIL|VERDICT|^ +Point|no board defconfig|ambiguous' tree-report.txt | head -5)
+            if [ "$matched" -eq 0 ]; then
+              # An unexplained non-zero exit used to leave nothing readable.
+              # Say so, with the last lines of the report, rather than failing
+              # with no annotation at all.
+              tail -n 8 tree-report.txt | while IFS= read -r line; do
+                [ -n "$line" ] && echo "::error title=Tree check failed (rc=$rc)::$line"
+              done
+            fi
+            exit 1
+          fi
+
+      - name: Audit the config fragment against the tree
+        run: |
+          set -euo pipefail
+          if [ -z "${FRAGMENT:-}" ]; then
+            echo "no fragment pinned"; exit 0
+          fi
+          set +e
+          python3 "$J4_DIR/fragment-audit.py" kernel $FRAGMENT 2>&1 | tee fragment-report.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            grep -E 'not in this tree|cannot parse' fragment-report.txt | head -5 | while IFS= read -r l; do
+              echo "::error title=Fragment symbol missing::$l"
+            done
             exit 1
           fi
 
@@ -391,6 +418,7 @@ jobs:
           name: j4-k510-${{ github.run_id }}
           path: |
             selftest-report.txt
+            fragment-report.txt
             tree-report.txt
             donor-report.txt
             boot-k510.img

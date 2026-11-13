@@ -1,0 +1,19 @@
+# Applied after mainline/j4mainline.fragment, which is kept verbatim.
+#
+# Everything here exists because the pinned tree and the fragment disagree, and
+# the disagreement was found by fragment-audit.py rather than by a phone that
+# quietly had no display.
+
+# The J4+ panel is an S6D7AT0B01 (see androidboot cmdline:
+# ss_dsi_panel_S6D7AT0B01_PM6003XB1_HDP). The fragment asks for
+# DRM_PANEL_SAMSUNG_S6D7AT0B01, which is the generated driver carried on branch
+# pmos-j4primelte-20260927 (ci/j4primelte/mainline/panel-samsung-s6d7at0b01.c)
+# together with its own Kconfig entry. The pinned mainline tree has no such
+# symbol; it has DRM_PANEL_SAMSUNG_S6D7AA0, the same controller family.
+#
+# So: use the in-tree driver. If it does not drive this panel, the next step is
+# to bring the generated driver over as a patch, not to invent a symbol name.
++ DRM_PANEL_SAMSUNG_S6D7AA0
+# The line above is the declaration that makes the earlier unknown symbol
+# explicit instead of silent.
+! SUPERSEDES DRM_PANEL_SAMSUNG_S6D7AT0B01

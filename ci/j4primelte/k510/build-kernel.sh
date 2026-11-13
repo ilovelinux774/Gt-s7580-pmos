@@ -36,10 +36,14 @@ cross=$toolchain/bin/$prefix
 echo "compiler: ${cross}gcc ($(${cross}gcc -dumpversion 2>/dev/null))"
 [[ -f $tree/arch/arm64/configs/$defconfig ]] \
 	|| { echo "defconfig not found: arch/arm64/configs/$defconfig" >&2; exit 1; }
+# Space-separated list; later files win, which is how an overrides fragment
+# re-points something the first one got wrong.
 fragment=${J4_K510_FRAGMENT:-}
 if [[ -n $fragment ]]; then
-	[[ -f $fragment ]] || { echo "fragment not found: $fragment" >&2; exit 1; }
-	echo "fragment: $fragment"
+	for f in $fragment; do
+		[[ -f $f ]] || { echo "fragment not found: $f" >&2; exit 1; }
+		echo "fragment: $f"
+	done
 fi
 mkdir -p "$out"
 
@@ -99,8 +103,9 @@ fi
 if [[ -n $fragment ]]; then
 	# Accept both "+ SYMBOL" (the format in ci/j4primelte/mainline/) and
 	# "+SYMBOL"; an unknown symbol is reported, never silently dropped.
+	for f in $fragment; do
 	while read -r op sym rest; do
-		[[ -z ${op:-} || $op == \#* ]] && continue
+		[[ -z ${op:-} || $op == \#* || $op == \!* ]] && continue
 		if [[ $op != [+-@] ]]; then
 			sym=${op#?}
 			op=${op:0:1}
@@ -112,7 +117,8 @@ if [[ -n $fragment ]]; then
 			@) "$cfg" --file "$out/.config" --set-str "$sym" "$rest" 2>/dev/null \
 				|| echo "  fragment: CONFIG_$sym is not in this tree" ;;
 		esac
-	done < "$fragment"
+	done < "$f"
+	done
 fi
 
 # Re-resolve dependencies now, so the .config we audit is the one we build.
