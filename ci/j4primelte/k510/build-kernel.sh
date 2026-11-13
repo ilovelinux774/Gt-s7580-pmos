@@ -173,11 +173,12 @@ if [[ -z $dtb && -n $board_dts ]]; then
 		exit 1
 	}
 	inc=(-I "$tree/include" -I "$tree/arch/arm64/boot/dts/qcom")
-	echo "=== compile board DTS: $board_dts"
+	echo "=== board dtb: cpp"
 	cpp -nostdinc -undef -x assembler-with-cpp "${inc[@]}" "$board_dts" -o "$out/j4-board.dts" \
-		|| { echo "cpp failed on $board_dts" >&2; exit 1; }
-	dtc -I dts -O dtb -o "$out/j4-board.dtb" "$out/j4-board.dts" \
-		|| { echo "dtc failed on $board_dts" >&2; exit 1; }
+		|| { echo "FAILED PHASE: board dtb (cpp) on $board_dts" >&2; exit 1; }
+	echo "=== board dtb: dtc"
+	dtc -I dts -O dtb -o "$out/j4-board.dtb" "$out/j4-board.dts" 2> "$out/dtc.log" \
+		|| { echo "FAILED PHASE: board dtb (dtc)" >&2; cat "$out/dtc.log" >&2; exit 1; }
 	dtb="$out/j4-board.dtb"
 	echo "board DTB: $(stat -c%s "$dtb") bytes"
 fi

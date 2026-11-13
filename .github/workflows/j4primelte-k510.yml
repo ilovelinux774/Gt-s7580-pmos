@@ -398,6 +398,18 @@ jobs:
             for marker in '=== audit (hard)' '=== audit (systemd)' '=== collect' '=== configure' '=== build'; do
               grep -qFx "$marker" build.log && echo "reached: $marker"
             done
+            # Which phase actually failed, spelled out.
+            if grep -q 'FAILED PHASE:' build.log; then
+              grep -m 3 'FAILED PHASE:' build.log | while IFS= read -r line; do
+                echo "::error title=Phase failed::$line"
+              done
+            fi
+            # dtc/cpp messages for the board device tree.
+            if [ -s out/dtc.log ]; then
+              head -n 12 out/dtc.log | while IFS= read -r line; do
+                echo "::error title=dtc::$line"
+              done
+            fi
             echo "--- last 30 lines ---"
             tail -n 30 build.log
             exit 1
@@ -507,5 +519,7 @@ jobs:
             out/config.full
             out/config-audit.json
             out/kernel.payload
+            out/dtc.log
+            out/j4-board.dts
           if-no-files-found: warn
           retention-days: 14
