@@ -354,12 +354,28 @@ jobs:
         run: |
           set -euo pipefail
           export J4_K510_JOBS="$(nproc)"
+          export J4_K510_ALLOW_AUDIT_FAIL="$( [ "$allow_audit_fail" = true ] && echo 1 || echo 0 )"
           export J4_K510_CROSS_COMPILE="$CROSS_PREFIX"
           export J4_K510_FRAGMENT="${FRAGMENT:-}"
-          export J4_K510_ALLOW_AUDIT_FAIL="$( [ "$allow_audit_fail" = true ] && echo 1 || echo 0 )"
           tc_dir=$PWD/tc
           [ -n "$TOOLCHAIN_URL" ] || tc_dir=/usr
+          set +e
           "$J4_DIR/build-kernel.sh" kernel "$PWD/out" "$tc_dir" "$DEFCONFIG" 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            # Say where it broke and why, on the run itself. Without this the
+            # only evidence is a step that went red.
+            phase=$(grep -oE '^=== .*' build.log | tail -1 || true)
+            echo "::error title=Kernel build failed ($phase)::build-kernel.sh exited $rc; first errors below"
+            grep -m 5 -E 'error:|Error [0-9]+|fatal:|No rule to make|not found' build.log \
+              | while IFS= read -r line; do
+                  echo "::error title=First error::$line"
+                done
+            echo "--- last 25 lines ---"
+            tail -n 25 build.log
+            exit 1
+          fi
 
       - name: Repack the donor with the new kernel
         if: env.J4_DRY_RUN != 'true'
