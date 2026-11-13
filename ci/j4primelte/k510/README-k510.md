@@ -173,6 +173,29 @@ That last one is the exact failure mode this pipeline exists to prevent: a
 kernel that builds perfectly, boots maybe, and cannot run systemd for a reason
 nothing in the build output mentions.
 
+## Device tree: advisory, never blocking
+
+The pinned tree has no `j4primelte` device tree, so `mainline/msm8917-samsung-j4primelte.dts`
+is compiled by its **own early workflow step** into `board-dtb/j4-board.dtb`, which
+is then appended to the kernel payload (`Image.gz-dtb`, what Samsung's loader expects).
+
+That step is deliberately non-fatal. If `cpp` or `dtc` fails, the run prints a
+warning, sets `DTB_APPENDED=no` in the job summary, and the kernel build carries
+on. Rationale: this is a test build. A kernel image with no DTB is still a
+useful artifact (it is exactly what the first green run produced); a failed
+20-minute compile because the optional device tree would not compile is not.
+
+What the DTB decides in practice:
+
+| | with DTB | without DTB |
+|---|---|---|
+| Boots on this phone | maybe | only if the bootloader supplies one |
+| Screen / panel | as configured in the DTS (M1: simple-framebuffer, no MDSS nodes) | bootloader's framebuffer state survives |
+| USB, eMMC, keys, ramoops | from the DTS nodes | nothing describes them |
+
+So "no DTB" is not cosmetic for a boot test - but it is not a build failure
+either, and the artifact now states which kind it is (`DTB_APPENDED`).
+
 ## Testing on the phone (no UART, no pstore)
 
 1. Keep the known-good 3.18 `boot.img` next to you. Flashing is reversible: the

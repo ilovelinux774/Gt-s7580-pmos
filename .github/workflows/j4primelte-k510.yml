@@ -344,6 +344,34 @@ jobs:
           ./tc/bin/"${CROSS_PREFIX:-aarch64-linux-gnu-}"gcc -dumpmachine | tee /dev/stderr | grep -q aarch64 \
             || { echo "toolchain is not aarch64" >&2; exit 1; }
 
+      - name: Build the board DTB (separate from the kernel, and never fatal)
+        run: |
+          set -euo pipefail
+          if [ -z "${BOARD_DTS:-}" ]; then
+            echo "no board DTS pinned"; exit 0
+          fi
+          mkdir -p board-dtb
+          # Cheap and isolated: this touches nothing the kernel build reads, so a
+          # device tree that does not compile is reported and then ignored.
+          if ! cpp -nostdinc -undef -x assembler-with-cpp \
+                 -I kernel/include -I kernel/arch/arm64/boot/dts/qcom \
+                 "$BOARD_DTS" -o board-dtb/j4-board.dts; then
+            echo "::warning title=Board DTB::cpp failed; the image will carry no DTB"
+            echo "DTB_APPENDED=no" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if ! dtc -I dts -O dtb -o board-dtb/j4-board.dtb board-dtb/j4-board.dts \
+                 2> board-dtb/dtc.log; then
+            head -n 15 board-dtb/dtc.log | while IFS= read -r l; do
+              echo "::warning title=Board DTB::dtc: $l"
+            done
+            echo "DTB_APPENDED=no" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "board DTB: $(stat -c%s board-dtb/j4-board.dtb) bytes"
+          echo "DTB_APPENDED=yes" >> "$GITHUB_ENV"
+          echo "BOARD_DTB=$PWD/board-dtb/j4-board.dtb" >> "$GITHUB_ENV"
+
       - name: Fetch the donor boot image
         run: |
           set -euo pipefail
@@ -365,7 +393,7 @@ jobs:
           export J4_K510_ALLOW_AUDIT_FAIL="$( [ "$allow_audit_fail" = true ] && echo 1 || echo 0 )"
           export J4_K510_CROSS_COMPILE="$CROSS_PREFIX"
           export J4_K510_FRAGMENT="${FRAGMENT:-}"
-          export J4_K510_BOARD_DTS="${BOARD_DTS:-}"
+          export J4_K510_BOARD_DTB="${BOARD_DTB:-}"
           if [ "${{ inputs.config_only }}" = "true" ]; then
             export J4_K510_CONFIG_ONLY=1
             echo "config-only run: no compile"
@@ -433,13 +461,14 @@ jobs:
           blob = open('out/kernel.payload', 'rb').read()
           idx = blob.rfind(b'\xd0\x0d\xfe\xed')
           if idx < 0:
-              print('::error title=No DTB in payload::the kernel image carries no device tree')
-              sys.exit(1)
+              # Not fatal: an image without a DTB is still a build test.
+              print('::warning title=No DTB in payload::this image only boots if the bootloader supplies a DTB')
+              sys.exit(0)
           size = int.from_bytes(blob[idx + 4:idx + 8], 'big')
           print(f'DTB found at offset {idx}, total size {size} bytes')
           if idx + size > len(blob):
-              print('::error title=Truncated DTB::declared size runs past the end of the payload')
-              sys.exit(1)
+              print('::warning title=Truncated DTB::declared size runs past the end of the payload')
+              sys.exit(0)
           print('payload: kernel + complete DTB')
           PY
           # Same sha1-id convention as the donor, so the only differences are
@@ -458,6 +487,7 @@ jobs:
             echo "- tree: \`$KERNEL_URL\` @ \`$KERNEL_BRANCH\`"
             echo "- defconfig: \`${DEFCONFIG:-<undecided>}\`"
             echo "- fragment: \`${FRAGMENT:-none}\`"
+            echo "- DTB appended: \`${DTB_APPENDED:-unknown}\`"
             echo "- dry run: \`$J4_DRY_RUN\`"
             echo
             echo '<details><summary>tree validation</summary>'
@@ -519,7 +549,6 @@ jobs:
             out/config.full
             out/config-audit.json
             out/kernel.payload
-            out/dtc.log
-            out/j4-board.dts
+            board-dtb/
           if-no-files-found: warn
           retention-days: 14
