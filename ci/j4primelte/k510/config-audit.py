@@ -34,6 +34,12 @@ REQUIRED = {
     'CONFIG_EPOLL':              ('y', 'hard', 'systemd core'),
     'CONFIG_UNIX':               ('any', 'hard', 'AF_UNIX sockets'),
     'CONFIG_SYSFS':              ('y', 'hard', 'sysfs'),
+    # --- autonomous RNDIS gadget for early-boot USB diagnostics -----------
+    'CONFIG_USB_GADGET':         ('y', 'hard', 'USB device-mode gadget framework'),
+    'CONFIG_USB_CHIPIDEA_UDC':   ('y', 'hard', 'MSM8917 ChipIdea USB device controller'),
+    'CONFIG_USB_CHIPIDEA_MSM':  ('y', 'hard', 'Qualcomm ChipIdea glue/PHY integration'),
+    'CONFIG_USB_ETH':            ('y', 'hard', 'built-in g_ether binds without initramfs setup'),
+    'CONFIG_USB_ETH_RNDIS':      ('y', 'hard', 'RNDIS USB Ethernet enumeration'),
     # --- systemd's own "required" list -----------------------------------
     'CONFIG_DEVTMPFS_MOUNT':     ('y', 'systemd', 'mount devtmpfs on /dev before /usr is up'),
     'CONFIG_PROC_FS':            ('y', 'systemd', 'procfs'),

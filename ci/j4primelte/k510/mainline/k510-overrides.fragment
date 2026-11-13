@@ -30,3 +30,10 @@
 # This file is applied after the mainline fragment, so this wins.
 + BPF_SYSCALL
 + CGROUP_BPF
+
+# The donor initramfs configures RNDIS using the downstream android_usb path,
+# which upstream mainline does not provide. Build the generic g_ether gadget in
+# so it binds automatically when the ChipIdea UDC appears; configfs function
+# support alone would still need userspace to create and bind a gadget.
++ USB_ETH
++ USB_ETH_RNDIS

@@ -200,21 +200,35 @@ the proprietary bootloader accepts the board match. The next phone test is the
 actual acceptance check; only after the bootloader gets past the FDT handoff can
 we learn anything about kernel bring-up or userspace.
 
-## Testing on the phone (no UART, no pstore)
+### Screen and USB diagnostics
+
+The M1 DTS intentionally keeps a simple framebuffer and omits the panel driver.
+A Samsung logo that remains visible is therefore not proof that boot hung; it
+may simply be the bootloader's framebuffer left on screen. The first artifact
+also enabled configfs RNDIS functions but did not instantiate a gadget, so it
+could not guarantee USB enumeration. The diagnostic build now enables built-in
+`USB_ETH` + `USB_ETH_RNDIS` (`g_ether`), which should bind automatically when the
+MSM8917 ChipIdea UDC probes. The config audit now requires those symbols and the
+controller integration to be built in. Host-visible USB enumeration tests the
+kernel UDC/gadget path; an IP address still depends on userspace configuring the
+network interface and DHCP.
+
+## Testing on the phone (no UART; pstore is best-effort)
 
 1. Keep the known-good 3.18 `boot.img` next to you. Flashing is reversible: the
    BOOT partition is the only thing that changes.
 2. Flash `boot-k510.img` to BOOT only. Do **not** touch SYSTEM: the rootfs stays
    the working OpenRC armv7 install.
-3. Watch what happens:
-   * **Nothing at all / stuck on the boot logo** → the kernel never reached
-     userspace. The donor's ramdisk would have produced USB RNDIS within a few
-     seconds on 3.18, so no USB gadget means failure before the initramfs.
-   * **`172.16.42.1` appears on your host's USB interface** → the kernel booted
-     and the initramfs is running. That already proves the kernel works on this
-     board; everything after it is userspace.
-   * **Screen output** → note the last line verbatim; that is the most useful
-     single piece of data this test can produce.
+3. Record the screen from power-on and observe USB on the host:
+   * **Samsung logo remains** → expected with the M1 simple-framebuffer; it does
+     not by itself prove a hang.
+   * **A USB device/interface enumerates** → the UDC and built-in gadget driver
+     bound. A missing `172.16.42.1` after that points to initramfs network setup,
+     not FDT selection.
+   * **No USB enumeration** → note the timing and screen behavior; possible
+     causes include an early kernel stop, UDC/PHY/DT failure, or host/cable
+     behavior. A missing pstore record is not enough to distinguish these.
+   * **Any new screen text** → record the last line verbatim.
 4. Boot back into the 3.18 image afterwards. A failed 5.10 attempt costs one
    flash cycle and tells you exactly which of the three cases above happened.
 
