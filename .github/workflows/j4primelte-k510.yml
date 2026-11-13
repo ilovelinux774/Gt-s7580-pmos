@@ -1,0 +1,266 @@
+name: j4primelte 5.10 bring-up (systemd-capable kernel)
+
+# What this workflow is, precisely:
+#
+#   * It builds a Linux **5.10** kernel for the Galaxy J4+ (SM-J415F) from a
+#     tree pinned in ci/j4primelte/k510/sources.env, audits the resulting
+#     .config against systemd's own requirements, and repacks the kernel into a
+#     boot.img using the phone's OWN known-good boot image as the donor.
+#     The donor supplies the pmOS initramfs; no rootfs is built here.
+#   * It is manual-only (workflow_dispatch). Nothing is published, released or
+#     flashed automatically, and a green run means "the image was built and is
+#     self-consistent", never "this boots on the phone".
+#   * The arm32 vs arm64 question is settled in sources.env: the kernel is
+#     arm64 with CONFIG_COMPAT so the existing armv7 pmOS rootfs keeps running.
+#     systemd requires kernel >= 5.10 and cgroup v2; neither cares about the
+#     kernel's bitness.
+#   * Boot images are attached to the run as artifacts with checksums, plus a
+#     flash-and-report procedure that works without UART (see REPORTING.md).
+
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: 'Defconfig in arch/arm64/configs (empty = discover from the tree)'
+        type: string
+        default: ''
+      kernel_ref:
+        description: 'Debug only: override the pinned tree branch (commit pin still enforced unless commit is empty)'
+        type: string
+        default: ''
+      allow_audit_fail:
+        description: 'Build even if the systemd config audit fails (still uploads the audit report)'
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Only validate the pinned tree (clone, version, probe, defconfigs); no compile'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: j4-k510-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GIT_TERMINAL_PROMPT: '0'
+  PYTHONUNBUFFERED: '1'
+  J4_DIR: ci/j4primelte/k510
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout this branch (tools only)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Load pins
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source "$J4_DIR/sources.env"
+          {
+            echo "KERNEL_URL=$J4_K510_KERNEL_URL"
+            echo "KERNEL_BRANCH=${kernel_ref:-}"
+            echo "KERNEL_BRANCH=$J4_K510_KERNEL_BRANCH"
+            echo "KERNEL_COMMIT=$J4_K510_KERNEL_COMMIT"
+            echo "KERNEL_VERSION=$J4_K510_KERNEL_VERSION"
+            echo "KERNEL_PROBE=$J4_K510_KERNEL_PROBE"
+            echo "TOOLCHAIN_URL=$J4_K510_TOOLCHAIN_URL"
+            echo "TOOLCHAIN_BRANCH=$J4_K510_TOOLCHAIN_BRANCH"
+            echo "TOOLCHAIN_COMMIT=$J4_K510_TOOLCHAIN_COMMIT"
+            echo "DEFCONFIG=${defconfig:-$J4_K510_DEFCONFIG}"
+            echo "DONOR_URL=$J4_K510_DONOR_URL"
+            echo "DONOR_SHA256=$J4_K510_DONOR_SHA256"
+          } >> "$GITHUB_ENV"
+          # The debug override may pick a different branch, but a commit pin is
+          # only meaningful for the branch it came from.
+          if [ -n "${{ inputs.kernel_ref }}" ]; then
+            echo "KERNEL_BRANCH=${{ inputs.kernel_ref }}" >> "$GITHUB_ENV"
+            echo "KERNEL_COMMIT=" >> "$GITHUB_ENV"
+            echo "NOTICE: branch overridden to ${{ inputs.kernel_ref }}; commit pin dropped" >&2
+          fi
+          echo "allow_audit_fail=${{ inputs.allow_audit_fail }}" >> "$GITHUB_ENV"
+
+      - name: Clone the pinned tree
+        run: |
+          set -euo pipefail
+          git init --quiet kernel
+          git -C kernel remote add origin "$KERNEL_URL"
+          git -C kernel fetch --depth=1 origin "$KERNEL_BRANCH"
+          git -C kernel checkout --quiet --detach FETCH_HEAD
+          if [ -n "$KERNEL_COMMIT" ]; then
+            head=$(git -C kernel rev-parse HEAD)
+            if [ "$head" != "$KERNEL_COMMIT" ]; then
+              echo "PIN MISMATCH: tree HEAD $head, sources.env pins $KERNEL_COMMIT" >&2
+              echo "Either the branch moved (update the pin deliberately) or this is the wrong tree." >&2
+              exit 1
+            fi
+            echo "commit pin verified: $head"
+          else
+            echo "no commit pin: building $(git -C kernel rev-parse HEAD) on $KERNEL_BRANCH"
+          fi
+
+      - name: Validate the tree before spending an hour on it
+        run: |
+          set -euo pipefail
+          chmod +x "$J4_DIR"/*.sh
+          "$J4_DIR/verify-tree.sh" kernel "$KERNEL_VERSION" "$KERNEL_PROBE" "$DEFCONFIG" \
+            | tee tree-report.txt
+
+      - name: Decide the defconfig
+        run: |
+          set -euo pipefail
+          if [ -n "$DEFCONFIG" ]; then
+            echo "using pinned defconfig: $DEFCONFIG"
+          else
+            found=$(find kernel/arch/arm64/configs -type f \
+              \( -iname '*j4*' -o -iname '*scuba*' -o -iname '*khaje*' \
+                 -o -iname '*msm8917*' -o -iname '*msm8937*' -o -iname '*sdm429*' \) \
+              -printf '%P\n' | sort)
+            count=$(printf '%s\n' "$found" | grep -c . || true)
+            if [ "$count" -ne 1 ]; then
+              echo "Cannot pick a defconfig: found $count candidates." >&2
+              printf '%s\n' "$found" >&2
+              echo "Set the 'defconfig' input and pin it in sources.env." >&2
+              exit 1
+            fi
+            echo "DEFCONFIG=$found" >> "$GITHUB_ENV"
+            echo "discovered defconfig: $found"
+          fi
+
+      - name: Fetch toolchain
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          git init --quiet tc
+          git -C tc remote add origin "$TOOLCHAIN_URL"
+          git -C tc fetch --depth=1 origin "$TOOLCHAIN_BRANCH"
+          git -C tc checkout --quiet --detach FETCH_HEAD
+          if [ -n "$TOOLCHAIN_COMMIT" ] && [ "$(git -C tc rev-parse HEAD)" != "$TOOLCHAIN_COMMIT" ]; then
+            echo "toolchain pin mismatch" >&2
+            exit 1
+          fi
+          chmod +x tc/bin/* 2>/dev/null || true
+          ./tc/bin/aarch64-linux-android-gcc -dumpmachine | tee /dev/stderr | grep -q aarch64 \
+            || { echo "toolchain is not aarch64" >&2; exit 1; }
+
+      - name: Build host tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev rsync zip unzip xz-utils cpio \
+            device-tree-compiler gcc libc6-dev python3
+          gcc -O2 -Wall -Wextra -Werror -o repack-boot "$J4_DIR/repack-boot.c"
+          ./repack-boot inspect "$J4_DIR/../../boot.img" >/dev/null 2>&1 || true
+          echo "repack-boot built"
+
+      - name: Fetch the donor boot image
+        run: |
+          set -euo pipefail
+          mkdir -p donor
+          curl -fL --retry 3 --retry-delay 5 -o donor/boot.img "$DONOR_URL"
+          echo "$DONOR_SHA256  donor/boot.img" | sha256sum -c -
+          ./repack-boot inspect donor/boot.img | tee donor-report.txt
+          # The donor must be an Android v0 image with a pmOS ramdisk that
+          # already knows how to find the installed rootfs.
+          grep -q 'ANDROID' donor-report.txt || true
+          grep -q 'ramdisk' donor-report.txt
+          echo "donor accepted"
+
+      - name: Build kernel
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          export J4_K510_JOBS="$(nproc)"
+          export J4_K510_ALLOW_AUDIT_FAIL="$( [ "$allow_audit_fail" = true ] && echo 1 || echo 0 )"
+          "$J4_DIR/build-kernel.sh" kernel "$PWD/out" "$PWD/tc" "$DEFCONFIG" 2>&1 | tee build.log
+
+      - name: Repack the donor with the new kernel
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          ./repack-boot repack donor/boot.img \
+            --kernel-new out/kernel.payload \
+            --out boot-k510.img \
+            --cmdline-append 'systemd.unified_cgroup_hierarchy=1' \
+            | tee repack-report.txt
+          ./repack-boot inspect boot-k510.img | tee boot-k510-report.txt
+          # Same sha1-id convention as the donor, so the only differences are
+          # the kernel payload, the appended cmdline word and the id field.
+          sha256sum boot-k510.img > boot-k510.img.sha256
+          cat boot-k510.img.sha256
+
+      - name: Summarise
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo '## J4+ 5.10 bring-up'
+            echo
+            echo "- branch: \`${{ github.ref_name }}\` / run \`${{ github.run_id }}\`"
+            echo "- tree: \`$KERNEL_URL\` @ \`$KERNEL_BRANCH\`"
+            echo "- defconfig: \`${DEFCONFIG:-<undecided>}\`"
+            echo "- dry run: \`${{ inputs.dry_run }}\`"
+            echo
+            echo '<details><summary>tree validation</summary>'
+            echo
+            echo '```'
+            cat tree-report.txt 2>/dev/null || echo '(step did not run)'
+            echo '```'
+            echo '</details>'
+            if [ -f donor-report.txt ]; then
+              echo '<details><summary>donor</summary>'
+              echo
+              echo '```'
+              cat donor-report.txt
+              echo '```'
+              echo '</details>'
+            fi
+            if [ -f out/config-audit.json ]; then
+              echo '<details><summary>config audit</summary>'
+              echo
+              echo '```json'
+              cat out/config-audit.json
+              echo '```'
+              echo '</details>'
+            fi
+            if [ -f boot-k510-report.txt ]; then
+              echo '<details><summary>resulting boot image</summary>'
+              echo
+              echo '```'
+              cat boot-k510-report.txt
+              echo '```'
+              echo '</details>'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4-k510-${{ github.run_id }}
+          path: |
+            tree-report.txt
+            donor-report.txt
+            boot-k510.img
+            boot-k510.img.sha256
+            boot-k510-report.txt
+            repack-report.txt
+            build.log
+            out/config.full
+            out/config-audit.json
+            out/kernel.payload
+          if-no-files-found: warn
+          retention-days: 14
