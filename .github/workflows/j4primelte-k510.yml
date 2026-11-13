@@ -163,10 +163,10 @@ jobs:
           ./repack-boot build --kernel /tmp/fake-kernel --ramdisk /tmp/fake-ramdisk \
             --out /tmp/synth.img --page-size 2048 --kernel-addr 0x8000 \
             --ramdisk-addr 0x2000000 --tags-addr 0x100 --cmdline 'selftest'
-          ./repack-boot inspect /tmp/synth.img
+          ./repack-boot inspect /tmp/synth.img | tee selftest-report.txt
           ./repack-boot repack /tmp/synth.img --kernel-new /tmp/fake-ramdisk \
-            --out /tmp/synth2.img --force >/dev/null
-          ./repack-boot inspect /tmp/synth2.img
+            --out /tmp/synth2.img --force | tee -a selftest-report.txt
+          ./repack-boot inspect /tmp/synth2.img | tee -a selftest-report.txt
           # Refusals must stay refusals.
           if ./repack-boot build --kernel /tmp/fake-kernel --ramdisk /tmp/fake-ramdisk \
                --out /tmp/synth.img 2>/dev/null; then
@@ -330,6 +330,14 @@ jobs:
             cat tree-report.txt 2>/dev/null || echo '(step did not run)'
             echo '```'
             echo '</details>'
+            if [ -f selftest-report.txt ]; then
+              echo '<details><summary>packing self-test (passed)</summary>'
+              echo
+              echo '```'
+              cat selftest-report.txt
+              echo '```'
+              echo '</details>'
+            fi
             if [ -f donor-report.txt ]; then
               echo '<details><summary>donor</summary>'
               echo
@@ -362,6 +370,7 @@ jobs:
         with:
           name: j4-k510-${{ github.run_id }}
           path: |
+            selftest-report.txt
             tree-report.txt
             donor-report.txt
             boot-k510.img
