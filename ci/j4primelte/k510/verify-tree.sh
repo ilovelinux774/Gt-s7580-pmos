@@ -46,6 +46,26 @@ if [[ $arm32 == no ]] && (( arm32_dts == 0 )); then
 	echo "      That is expected (and fine): CONFIG_COMPAT runs an armv7 rootfs on it."
 fi
 
+# --- SoC support ----------------------------------------------------------
+# A generic arm64 tree builds a kernel that has never heard of this phone. Make
+# that verdict explicit, because it is the difference between "our pin is
+# wrong" and "this tree can never work here".
+soc_hits=$(find "$tree/arch/arm64" \( -path '*/boot/dts/*' -o -path '*/configs/*' \) \
+	\( -iname '*8917*' -o -iname '*8937*' -o -iname '*scuba*' -o -iname '*khaje*' -o -iname '*sdm429*' \) \
+	2>/dev/null | wc -l)
+echo "SoC support hits (arch/arm64 dts+configs): $soc_hits"
+if (( soc_hits == 0 )); then
+	cat >&2 <<-'EOF'
+	VERDICT: this tree has no msm8917/msm8937 board support.
+	         It will compile, but it will not know this phone, its panel, its
+	         touchscreen or its regulators. That is not a pin problem: the tree
+	         itself is the wrong base.
+	         Point J4_K510_KERNEL_URL/BRANCH/COMMIT (or the tarball inputs) at a
+	         5.10 tree that actually carries this SoC.
+	EOF
+	[[ ${J4_REQUIRE_SOC:-1} == 1 ]] && exit 1
+fi
+
 # --- board defconfigs -----------------------------------------------------
 configs_dir=$tree/arch/arm64/configs
 [[ -d $configs_dir ]] || fail "no arch/arm64/configs"

@@ -43,6 +43,18 @@ on:
         description: 'Only validate the pinned tree (clone, version, probe, defconfigs); no compile'
         type: boolean
         default: true
+      kernel_tarball_url:
+        description: 'Build from this tarball (e.g. a GitHub release asset made from your local 5.10 tree) instead of the pinned git tree'
+        type: string
+        default: ''
+      kernel_tarball_sha256:
+        description: 'Required with kernel_tarball_url: sha256 of that tarball'
+        type: string
+        default: ''
+      selftest_only:
+        description: 'Skip the kernel entirely; exercise repack-boot and the audits on the donor image'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -98,6 +110,18 @@ jobs:
             echo "NOTICE: branch overridden to ${{ inputs.kernel_ref }}; commit pin dropped" >&2
           fi
           echo "allow_audit_fail=${{ inputs.allow_audit_fail }}" >> "$GITHUB_ENV"
+          # A tarball lets a local (unpublished) 5.10 tree be tested without
+          # pushing a multi-gigabyte fork anywhere. It must be pinned by sha256:
+          # a kernel built from "whatever that URL holds today" is not testable.
+          if [ -n "${{ inputs.kernel_tarball_url }}" ]; then
+            if [ -z "${{ inputs.kernel_tarball_sha256 }}" ]; then
+              echo "kernel_tarball_url requires kernel_tarball_sha256" >&2
+              exit 1
+            fi
+            echo "KERNEL_TARBALL_URL=${{ inputs.kernel_tarball_url }}" >> "$GITHUB_ENV"
+            echo "KERNEL_TARBALL_SHA256=${{ inputs.kernel_tarball_sha256 }}" >> "$GITHUB_ENV"
+            echo "NOTICE: building from tarball, git pins do not apply" >&2
+          fi
           # A dispatch honours its dry_run input; a push builds for real, which
           # is the only way to get a boot image out of a branch that is not the
           # default branch yet.
@@ -109,31 +133,53 @@ jobs:
           echo "J4_DRY_RUN=$dry" >> "$GITHUB_ENV"
           echo "dry run: $dry"
 
-      - name: Clone the pinned tree
+      - name: Obtain the kernel tree (git pin or pinned tarball)
         run: |
           set -euo pipefail
-          git init --quiet kernel
-          git -C kernel remote add origin "$KERNEL_URL"
-          git -C kernel fetch --depth=1 origin "$KERNEL_BRANCH"
-          git -C kernel checkout --quiet --detach FETCH_HEAD
-          if [ -n "$KERNEL_COMMIT" ]; then
-            head=$(git -C kernel rev-parse HEAD)
-            if [ "$head" != "$KERNEL_COMMIT" ]; then
-              echo "PIN MISMATCH: tree HEAD $head, sources.env pins $KERNEL_COMMIT" >&2
-              echo "Either the branch moved (update the pin deliberately) or this is the wrong tree." >&2
-              exit 1
-            fi
-            echo "commit pin verified: $head"
+          mkdir -p kernel
+          if [ -n "${KERNEL_TARBALL_URL:-}" ]; then
+            echo "source: tarball"
+            curl -fL --retry 3 --retry-delay 5 -o /tmp/kernel.tar "$KERNEL_TARBALL_URL"
+            echo "$KERNEL_TARBALL_SHA256  /tmp/kernel.tar" | sha256sum -c -
+            tar -xf /tmp/kernel.tar -C kernel --strip-components=1
+            head=$(git -C kernel rev-parse HEAD 2>/dev/null || true)
+            echo "tarball HEAD (if it carries .git): ${head:-none}"
           else
-            echo "no commit pin: building $(git -C kernel rev-parse HEAD) on $KERNEL_BRANCH"
+            echo "source: git"
+            git init --quiet kernel
+            git -C kernel remote add origin "$KERNEL_URL"
+            git -C kernel fetch --depth=1 origin "$KERNEL_BRANCH"
+            git -C kernel checkout --quiet --detach FETCH_HEAD
+            if [ -n "$KERNEL_COMMIT" ]; then
+              head=$(git -C kernel rev-parse HEAD)
+              if [ "$head" != "$KERNEL_COMMIT" ]; then
+                echo "::error title=Pin mismatch::tree HEAD $head but sources.env pins $KERNEL_COMMIT. Either the branch moved (update the pin deliberately) or this is the wrong tree."
+                exit 1
+              fi
+              echo "commit pin verified: $head"
+            else
+              echo "no commit pin: building $(git -C kernel rev-parse HEAD) on $KERNEL_BRANCH"
+            fi
           fi
 
       - name: Validate the tree before spending an hour on it
         run: |
           set -euo pipefail
           chmod +x "$J4_DIR"/*.sh
-          "$J4_DIR/verify-tree.sh" kernel "$KERNEL_VERSION" "$KERNEL_PROBE" "$DEFCONFIG" \
+          set +e
+          J4_REQUIRE_SOC="${J4_REQUIRE_SOC:-1}" \
+            "$J4_DIR/verify-tree.sh" kernel "$KERNEL_VERSION" "$KERNEL_PROBE" "$DEFCONFIG" 2>&1 \
             | tee tree-report.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            # Put the reason on the run itself, so it is readable without
+            # downloading a log or an artifact.
+            while IFS= read -r line; do
+              echo "::error title=Tree rejected::$line"
+            done < <(grep -E 'VERIFY FAIL|VERDICT|^ +Point|no board defconfig|ambiguous' tree-report.txt | head -5)
+            exit 1
+          fi
 
       - name: Decide the defconfig
         run: |
@@ -182,6 +228,45 @@ jobs:
           gcc -O2 -Wall -Wextra -Werror -o repack-boot "$J4_DIR/repack-boot.c"
           ./repack-boot inspect "$J4_DIR/../../boot.img" >/dev/null 2>&1 || true
           echo "repack-boot built"
+
+      - name: Self-test the packing tools on the donor
+        run: |
+          set -euo pipefail
+          # A synthetic "kernel" keeps this independent of the real build and of
+          # any downloaded donor: it proves inspect/repack/build still agree
+          # with each other on every run, which is what protects the phone.
+          head -c 65536 /dev/urandom > /tmp/fake-kernel
+          head -c 32768 /dev/urandom > /tmp/fake-ramdisk
+          ./repack-boot build --kernel /tmp/fake-kernel --ramdisk /tmp/fake-ramdisk \
+            --out /tmp/synth.img --page-size 2048 --kernel-addr 0x8000 \
+            --ramdisk-addr 0x2000000 --tags-addr 0x100 --cmdline 'selftest'
+          ./repack-boot inspect /tmp/synth.img
+          ./repack-boot repack /tmp/synth.img --kernel-new /tmp/fake-ramdisk \
+            --out /tmp/synth2.img --force >/dev/null
+          ./repack-boot inspect /tmp/synth2.img
+          # Refusals must stay refusals.
+          if ./repack-boot build --kernel /tmp/fake-kernel --ramdisk /tmp/fake-ramdisk \
+               --out /tmp/synth.img 2>/dev/null; then
+            echo "::error title=Self-test::build overwrote an existing image without --force"
+            exit 1
+          fi
+          if ./repack-boot repack /tmp/synth.img --kernel-new /tmp/nonexistent \
+               --out /tmp/synth3.img 2>/dev/null; then
+            echo "::error title=Self-test::repack accepted a missing kernel"
+            exit 1
+          fi
+          echo "self-test passed"
+
+      - name: Self-test only (skips kernel, donor and repack)
+        if: ${{ inputs.selftest_only }}
+        run: |
+          echo "selftest_only requested; stopping before the kernel build"
+          {
+            echo '## J4+ 5.10 bring-up: self-test only'
+            echo
+            echo 'repack-boot build/inspect/repack and the refusal paths passed.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
       - name: Fetch the donor boot image
         run: |
