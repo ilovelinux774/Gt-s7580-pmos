@@ -18,6 +18,13 @@ name: j4primelte 5.10 bring-up (systemd-capable kernel)
 #     flash-and-report procedure that works without UART (see REPORTING.md).
 
 on:
+  # workflow_dispatch only appears in the Actions UI once this file is on the
+  # default branch. Until then, pushes that touch these paths run the build, so
+  # the pipeline can be validated on a feature branch.
+  push:
+    paths:
+      - 'ci/j4primelte/k510/**'
+      - '.github/workflows/j4primelte-k510.yml'
   workflow_dispatch:
     inputs:
       defconfig:
@@ -91,6 +98,16 @@ jobs:
             echo "NOTICE: branch overridden to ${{ inputs.kernel_ref }}; commit pin dropped" >&2
           fi
           echo "allow_audit_fail=${{ inputs.allow_audit_fail }}" >> "$GITHUB_ENV"
+          # A dispatch honours its dry_run input; a push builds for real, which
+          # is the only way to get a boot image out of a branch that is not the
+          # default branch yet.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            dry="${{ inputs.dry_run }}"
+          else
+            dry=false
+          fi
+          echo "J4_DRY_RUN=$dry" >> "$GITHUB_ENV"
+          echo "dry run: $dry"
 
       - name: Clone the pinned tree
         run: |
@@ -140,7 +157,7 @@ jobs:
           fi
 
       - name: Fetch toolchain
-        if: ${{ !inputs.dry_run }}
+        if: env.J4_DRY_RUN != 'true'
         run: |
           set -euo pipefail
           git init --quiet tc
@@ -180,7 +197,7 @@ jobs:
           echo "donor accepted"
 
       - name: Build kernel
-        if: ${{ !inputs.dry_run }}
+        if: env.J4_DRY_RUN != 'true'
         run: |
           set -euo pipefail
           export J4_K510_JOBS="$(nproc)"
@@ -188,7 +205,7 @@ jobs:
           "$J4_DIR/build-kernel.sh" kernel "$PWD/out" "$PWD/tc" "$DEFCONFIG" 2>&1 | tee build.log
 
       - name: Repack the donor with the new kernel
-        if: ${{ !inputs.dry_run }}
+        if: env.J4_DRY_RUN != 'true'
         run: |
           set -euo pipefail
           ./repack-boot repack donor/boot.img \
@@ -212,7 +229,7 @@ jobs:
             echo "- branch: \`${{ github.ref_name }}\` / run \`${{ github.run_id }}\`"
             echo "- tree: \`$KERNEL_URL\` @ \`$KERNEL_BRANCH\`"
             echo "- defconfig: \`${DEFCONFIG:-<undecided>}\`"
-            echo "- dry run: \`${{ inputs.dry_run }}\`"
+            echo "- dry run: \`$J4_DRY_RUN\`"
             echo
             echo '<details><summary>tree validation</summary>'
             echo
