@@ -71,9 +71,10 @@ branch before it is on `main`).
 | `sources.env` | all pins: tree, branch, commit, toolchain, donor boot image, boot header addresses | it is the only place pins live |
 | `verify-tree.sh` | rejects a tree that is not the pin, and separately **rejects a tree with no msm8917/8937 support** | run in CI: it correctly rejected the current CAF pin |
 | `config-audit.py` | checks a `.config` against systemd's documented requirements; `hard`/`systemd`/`userspace` severities, alias-aware, `--json` | run against the real 3.18 config (above) and in CI |
-| `repack-boot.c` | v0 Android boot image `inspect` / `build` / `repack` | self-tested in CI on every run, including the refusal paths |
+| `repack-boot.c` | Qualcomm v0 Android boot image `inspect` / `build` / `repack`, including QCDT `dt_size` and after-ramdisk placement | synthetic QCDT image round-tripped and inspected in CI |
+| `qcdt.py` | validates the board FDT metadata and creates a Qualcomm QCDT v3 table | unit tests plus C packer integration self-test |
 | `fragment-audit.py` | checks every fragment symbol against the tree's own Kconfig **before** compiling, because `scripts/config` accepts nonsense and `olddefconfig` then drops it silently | run on the real tree: found that the fragment's `DRM_PANEL_SAMSUNG_S6D7AT0B01` does not exist there |
-| `build-kernel.sh` | defconfig → fragments → force the exact symbols systemd needs → build → dtbs → append DTB → audit | not yet run to completion (no `flex`/`bison` in this sandbox) |
+| `build-kernel.sh` | defconfig → fragments → force the exact symbols systemd needs → build → stage kernel and board DTB → audit | CI kernel build; device boot still requires a hardware test |
 
 ### What `fragment-audit.py` already caught
 
@@ -173,28 +174,31 @@ That last one is the exact failure mode this pipeline exists to prevent: a
 kernel that builds perfectly, boots maybe, and cannot run systemd for a reason
 nothing in the build output mentions.
 
-## Device tree: advisory, never blocking
+## Device tree: required Qualcomm QCDT handoff
 
-The pinned tree has no `j4primelte` device tree, so `mainline/msm8917-samsung-j4primelte.dts`
-is compiled by its **own early workflow step** into `board-dtb/j4-board.dtb`, which
-is then appended to the kernel payload (`Image.gz-dtb`, what Samsung's loader expects).
+The first hardware test reported `Can't get fdt` in Odin/Download Mode. That is
+before Linux starts. The earlier build treated a raw FDT appended to the kernel
+payload as sufficient (and the exact run used for that test had no usable J4+
+FDT handoff). That assumption was wrong for this Qualcomm LK boot path.
 
-That step is deliberately non-fatal. If `cpp` or `dtc` fails, the run prints a
-warning, sets `DTB_APPENDED=no` in the job summary, and the kernel build carries
-on. Rationale: this is a test build. A kernel image with no DTB is still a
-useful artifact (it is exactly what the first green run produced); a failed
-20-minute compile because the optional device tree would not compile is not.
+For the J4+ boot image, the board DT must be packaged as a Qualcomm **QCDT
+version 3 table** after the ramdisk/second-stage payload. The table length goes
+in the Qualcomm `dt_size` word at boot-header offset 40. It must not be appended
+after the gzip kernel as a bare FDT. The current build therefore:
 
-What the DTB decides in practice:
+1. Compiles `mainline/msm8917-samsung-j4primelte.dts` as the board FDT.
+2. Reads its root `qcom,msm-id`, `qcom,board-id`, and `qcom,pmic-id` tuples and
+   emits QCDT v3 match records (including the J4+ MSM8917/8217/8617 IDs and
+   board tuple `<8 6>`).
+3. Repackages the QCDT table after the donor ramdisk, updates `dt_size`, then
+   reads the image back and validates every record's offset, size, and FDT magic.
 
-| | with DTB | without DTB |
-|---|---|---|
-| Boots on this phone | maybe | only if the bootloader supplies one |
-| Screen / panel | as configured in the DTS (M1: simple-framebuffer, no MDSS nodes) | bootloader's framebuffer state survives |
-| USB, eMMC, keys, ramoops | from the DTS nodes | nothing describes them |
-
-So "no DTB" is not cosmetic for a boot test - but it is not a build failure
-either, and the artifact now states which kind it is (`DTB_APPENDED`).
+This is now a **hard requirement** for a flashable artifact: if DTS compilation
+or QCDT validation fails, no boot image is produced or uploaded. The synthetic
+CI test validates the container and header placement, but it still cannot prove
+the proprietary bootloader accepts the board match. The next phone test is the
+actual acceptance check; only after the bootloader gets past the FDT handoff can
+we learn anything about kernel bring-up or userspace.
 
 ## Testing on the phone (no UART, no pstore)
 

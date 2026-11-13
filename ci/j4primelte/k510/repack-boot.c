@@ -16,17 +16,15 @@
  *                      [--board S] [--no-second]
  *       Write a v0 boot image. --out is never overwritten unless --force.
  *
- *   repack-boot repack <donor.img> --kernel-new K --out O
+ *   repack-boot repack <donor.img> --kernel-new K --out O [--dt QCDT]
  *                      [--cmdline-append S] [--cmdline-replace S]
- *       Copy every header field from `donor` and swap only the kernel payload.
- *       This is the operation kernel bring-up needs: the donor's page size,
- *       load addresses and cmdline are exactly what the phone's loader was
- *       last observed to accept, so they cannot be lost to a typo. The
- *       resulting image is re-read and validated before the process exits.
+ *       Copy the donor's v0 header/ramdisk and replace its kernel and optional
+ *       Qualcomm DT table. On this legacy Qualcomm format, the word at header
+ *       offset 40 is dt_size and QCDT follows the ramdisk/second-stage payload.
+ *       The output is read back and validated before it is kept.
  *
- * Only the v0 ("ANDROID!" without a header_version field) format is
- * implemented, because that is what Samsung's J4+ loader parses. An image with
- * header_version >= 1 is rejected rather than half-understood.
+ * Only the v0 boot layout used by the J4+ is supported. Android's later header
+ * versions are not silently interpreted as Qualcomm dt_size fields.
  *
  * Addresses are accepted as hex (0x...) or decimal.
  */
@@ -56,8 +54,8 @@ struct header {
 	uint32_t second_addr;
 	uint32_t tags_addr;
 	uint32_t page_size;
-	uint32_t header_version;
-	uint32_t os_version;
+	uint32_t dt_size;
+	uint32_t unused;
 	char name[NAME_MAX_BOOT];
 	char cmdline[CMDLINE_MAX];
 	char id[ID_LEN];
@@ -92,6 +90,49 @@ static void put32(unsigned char *p, uint32_t v)
 	p[3] = (v >> 24) & 0xff;
 }
 
+static uint32_t get_be32(const unsigned char *p)
+{
+	return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
+	       (uint32_t)p[2] << 8 | (uint32_t)p[3];
+}
+
+/* Validate the legacy Qualcomm QCDT container used after the boot ramdisk. */
+static uint32_t validate_qcdt(const unsigned char *dt, size_t len, uint32_t page)
+{
+	if (len < 16 || memcmp(dt, "QCDT", 4) != 0)
+		die("dt_size is nonzero but the Qualcomm DT payload lacks QCDT magic");
+	uint32_t version = get32(dt + 4);
+	uint32_t count = get32(dt + 8);
+	uint32_t record_size;
+	switch (version) {
+	case 1: record_size = 20; break;
+	case 2: record_size = 24; break;
+	case 3: record_size = 40; break;
+	default: die("unsupported QCDT version %u", version);
+	}
+	if (count == 0 || count > (len - 16) / record_size)
+		die("invalid QCDT record count %u", count);
+	size_t records_end = 12 + (size_t)count * record_size;
+	if (records_end + 4 > len || get32(dt + records_end) != 0)
+		die("QCDT end-of-table marker is missing or truncated");
+	if (len % page != 0)
+		die("QCDT size %zu is not aligned to boot page size %u", len, page);
+	for (uint32_t i = 0; i < count; i++) {
+		const unsigned char *record = dt + 12 + (size_t)i * record_size;
+		uint32_t offset = get32(record + record_size - 8);
+		uint32_t size = get32(record + record_size - 4);
+		if (!size || offset % page || size % page ||
+		    (size_t)offset + size > len)
+			die("QCDT record %u has an invalid offset/size", i);
+		if (get_be32(dt + offset) != 0xd00dfeed)
+			die("QCDT record %u does not point to an FDT", i);
+		uint32_t fdt_size = get_be32(dt + offset + 4);
+		if (fdt_size < 40 || fdt_size > size)
+			die("QCDT record %u has an invalid FDT totalsize", i);
+	}
+	return count;
+}
+
 static void parse_header(const unsigned char *buf, struct header *h)
 {
 	if (memcmp(buf, ANDROID_MAGIC, MAGIC_LEN) != 0)
@@ -104,8 +145,8 @@ static void parse_header(const unsigned char *buf, struct header *h)
 	h->second_addr = get32(buf + 28);
 	h->tags_addr = get32(buf + 32);
 	h->page_size = get32(buf + 36);
-	h->header_version = get32(buf + 40);
-	h->os_version = get32(buf + 44);
+	h->dt_size = get32(buf + 40);
+	h->unused = get32(buf + 44);
 	memcpy(h->name, buf + 48, NAME_MAX_BOOT);
 	memcpy(h->cmdline, buf + 64, CMDLINE_MAX);
 	memcpy(h->id, buf + 64 + CMDLINE_MAX, ID_LEN);
@@ -178,9 +219,6 @@ static int cmd_inspect(int argc, char **argv)
 	struct header h;
 	parse_header(buf, &h);
 
-	if (h.header_version != 0)
-		die("header_version=%u: only v0 images are supported (Samsung J4+ loader)",
-		    h.header_version);
 	if (h.page_size == 0 || (h.page_size & (h.page_size - 1)) != 0)
 		die("page_size=%u is not a power of two", h.page_size);
 
@@ -207,14 +245,25 @@ static int cmd_inspect(int argc, char **argv)
 	print_pages("kernel", buf + k_off, h.kernel_size, 0);
 	print_pages("ramdisk", buf + r_off, h.ramdisk_size, 0);
 
-	/* --- consistency --------------------------------------------------- */
+	/* --- Qualcomm v0 DT table and image consistency ------------------- */
 	int bad = 0;
 	if (end > len) {
 		fprintf(stderr, "  MISMATCH: header declares %zu bytes, file is %zu\n", end, len);
 		bad = 1;
 	}
-	if (len > end + h.page_size) {
-		fprintf(stderr, "  NOTE: %zu trailing bytes after the last payload\n", len - end);
+	if (h.dt_size) {
+		if (end + h.dt_size > len) {
+			fprintf(stderr, "  MISMATCH: dt_size declares %u bytes at offset %zu, file is %zu\n",
+				h.dt_size, end, len);
+			bad = 1;
+		} else {
+			uint32_t entries = validate_qcdt(buf + end, h.dt_size, h.page_size);
+			printf("  qcdt          v%u, %u match records, %u bytes at offset %zu\n",
+			       get32(buf + end + 4), entries, h.dt_size, end);
+		}
+	} else if (len > end + h.page_size) {
+		fprintf(stderr, "  NOTE: %zu trailing bytes after the last payload (dt_size is zero)\n",
+			len - end);
 	}
 	if (h.kernel_size == 0)
 		die("kernel payload is empty");
@@ -321,7 +370,7 @@ static void sha1_final(struct sha1 *s, unsigned char out[20])
 /* SHA-1 over exactly what AOSP's mkbootimg hashes. */
 static void boot_id(const unsigned char *k, size_t klen, const unsigned char *r,
 		    size_t rlen, const unsigned char *s, size_t slen,
-		    unsigned char out[20])
+		    const unsigned char *dt, size_t dtlen, unsigned char out[20])
 {
 	struct sha1 st;
 	unsigned char b[4];
@@ -335,6 +384,11 @@ static void boot_id(const unsigned char *k, size_t klen, const unsigned char *r,
 	if (s) {
 		sha1_update(&st, s, slen);
 		put32(b, (uint32_t)slen);
+		sha1_update(&st, b, 4);
+	}
+	if (dt) {
+		sha1_update(&st, dt, dtlen);
+		put32(b, (uint32_t)dtlen);
 		sha1_update(&st, b, 4);
 	}
 	sha1_final(&st, out);
@@ -402,7 +456,7 @@ static int cmd_build(int argc, char **argv)
 	memcpy(hdr + 64, cmdline, strlen(cmdline));
 
 	unsigned char digest[20];
-	boot_id(kbuf, klen, rbuf, rlen, sbuf, slen, digest);
+	boot_id(kbuf, klen, rbuf, rlen, sbuf, slen, NULL, 0, digest);
 	/* The id field is 32 raw bytes. AOSP's mkbootimg famously writes 40 hex
 	 * characters here and spills into extra_cmdline; Samsung's variant wrote
 	 * the 20-byte digest and left the rest zero. Match the latter, so a
@@ -441,13 +495,14 @@ static void cmdline_append(char *field, size_t size, const char *extra)
 
 static int cmd_repack(int argc, char **argv)
 {
-	const char *donor = NULL, *kernel = NULL, *out = NULL;
+	const char *donor = NULL, *kernel = NULL, *dt_path = NULL, *out = NULL;
 	const char *append = NULL, *replace = NULL;
 	int force = 0;
 
 	for (int i = 0; i < argc; i++) {
 		const char *a = argv[i];
 		if (!strcmp(a, "--kernel-new") && i + 1 < argc) kernel = argv[++i];
+		else if (!strcmp(a, "--dt") && i + 1 < argc) dt_path = argv[++i];
 		else if (!strcmp(a, "--out") && i + 1 < argc) out = argv[++i];
 		else if (!strcmp(a, "--cmdline-append") && i + 1 < argc) append = argv[++i];
 		else if (!strcmp(a, "--cmdline-replace") && i + 1 < argc) replace = argv[++i];
@@ -456,7 +511,7 @@ static int cmd_repack(int argc, char **argv)
 		else if (!donor) donor = a;
 		else die("unexpected argument: %s", a);
 	}
-	if (!donor) die("usage: repack <donor.img> --kernel-new K --out O");
+	if (!donor) die("usage: repack <donor.img> --kernel-new K --dt QCDT --out O");
 	if (!kernel) die("--kernel-new is required");
 	if (!out) die("--out is required");
 	if (append && replace) die("--cmdline-append and --cmdline-replace are mutually exclusive");
@@ -466,25 +521,36 @@ static int cmd_repack(int argc, char **argv)
 			die("%s already exists (pass --force to replace it)", out);
 	}
 
-	size_t dlen, klen;
+	size_t dlen, klen, new_dt_len = 0;
 	unsigned char *dbuf = read_file(donor, &dlen);
 	unsigned char *kbuf = read_file(kernel, &klen);
+	unsigned char *new_dt = dt_path ? read_file(dt_path, &new_dt_len) : NULL;
 	struct header h;
 	parse_header(dbuf, &h);
-	if (h.header_version != 0)
-		die("donor has header_version=%u; only v0 is supported", h.header_version);
 	if (h.page_size != 2048 && h.page_size != 4096)
 		die("donor page_size=%u is unexpected", h.page_size);
 	if (klen == 0)
 		die("new kernel payload is empty");
 	if (klen > 0xffffffffUL)
 		die("new kernel payload is absurdly large");
+	if (new_dt_len > 0xffffffffUL)
+		die("QCDT payload is larger than the boot header can describe");
+	if (new_dt && new_dt_len != 0)
+		(void)validate_qcdt(new_dt, new_dt_len, h.page_size);
 
 	size_t r_off = h.page_size + round_up(h.kernel_size, h.page_size);
 	size_t s_off = r_off + round_up(h.ramdisk_size, h.page_size);
-	if (s_off > dlen)
-		die("donor is truncated: header describes %zu bytes, file has %zu", s_off, dlen);
+	size_t old_dt_off = s_off + round_up(h.second_size, h.page_size);
+	if (old_dt_off > dlen)
+		die("donor is truncated before end of its second stage");
+	if (h.dt_size && old_dt_off + h.dt_size > dlen)
+		die("donor is truncated: dt_size declares %u bytes at offset %zu", h.dt_size, old_dt_off);
+	if (h.dt_size)
+		(void)validate_qcdt(dbuf + old_dt_off, h.dt_size, h.page_size);
 
+	/* A supplied table replaces the donor's table; otherwise preserve it. */
+	const unsigned char *dt_data = new_dt ? new_dt : (h.dt_size ? dbuf + old_dt_off : NULL);
+	size_t dt_len = new_dt ? new_dt_len : h.dt_size;
 	if (replace) {
 		if (strlen(replace) >= CMDLINE_MAX)
 			die("--cmdline-replace is longer than %d bytes", CMDLINE_MAX - 1);
@@ -498,7 +564,8 @@ static int cmd_repack(int argc, char **argv)
 	const unsigned char *ramdisk = dbuf + r_off;
 	unsigned char digest[20];
 	boot_id(kbuf, klen, ramdisk, h.ramdisk_size,
-		h.second_size ? dbuf + s_off : NULL, h.second_size, digest);
+		h.second_size ? dbuf + s_off : NULL, h.second_size,
+		dt_data, dt_len, digest);
 
 	unsigned char hdr[HEADER_LEN];
 	memset(hdr, 0, sizeof(hdr));
@@ -511,15 +578,14 @@ static int cmd_repack(int argc, char **argv)
 	put32(hdr + 28, h.second_addr);
 	put32(hdr + 32, h.tags_addr);
 	put32(hdr + 36, h.page_size);
-	put32(hdr + 40, 0);
-	put32(hdr + 44, h.os_version);
+	put32(hdr + 40, (uint32_t)dt_len);
+	put32(hdr + 44, h.unused);
 	memcpy(hdr + 48, h.name, NAME_MAX_BOOT);
 	memcpy(hdr + 64, h.cmdline, CMDLINE_MAX);
 	memcpy(hdr + 64 + CMDLINE_MAX, digest, 20);
 	memcpy(hdr + 64 + CMDLINE_MAX + ID_LEN, h.extra_cmdline, CMDLINE_MAX);
 
-	/* Write to a temporary name, validate, then move into place. A half
-	 * written boot image is a brick-shaped artifact, so never leave one. */
+	/* Write to a temporary name, validate, then move into place. */
 	char *tmp = malloc(strlen(out) + 8);
 	if (!tmp)
 		die("out of memory");
@@ -528,10 +594,12 @@ static int cmd_repack(int argc, char **argv)
 	if (!f)
 		die("cannot create %s: %s", tmp, strerror(errno));
 	write_padded(f, hdr, sizeof(hdr), h.page_size);
-	size_t kwritten = write_padded(f, kbuf, klen, h.page_size);
+	write_padded(f, kbuf, klen, h.page_size);
 	write_padded(f, ramdisk, h.ramdisk_size, h.page_size);
 	if (h.second_size)
 		write_padded(f, dbuf + s_off, h.second_size, h.page_size);
+	if (dt_data)
+		write_padded(f, dt_data, dt_len, h.page_size);
 	if (fclose(f) != 0)
 		die("cannot finish writing %s", tmp);
 
@@ -540,20 +608,27 @@ static int cmd_repack(int argc, char **argv)
 	unsigned char *vbuf = read_file(tmp, &vlen);
 	struct header v;
 	parse_header(vbuf, &v);
-	size_t v_r_off = v.page_size + round_up(v.kernel_size, v.page_size);
-	size_t v_end = v_r_off + round_up(v.ramdisk_size, v.page_size) +
-		       round_up(v.second_size, v.page_size);
+	size_t v_k_off = v.page_size;
+	size_t v_r_off = v_k_off + round_up(v.kernel_size, v.page_size);
+	size_t v_s_off = v_r_off + round_up(v.ramdisk_size, v.page_size);
+	size_t v_dt_off = v_s_off + round_up(v.second_size, v.page_size);
 	int ok = 1;
 	if (v.kernel_size != (uint32_t)klen) { fprintf(stderr, "verify: kernel size mismatch\n"); ok = 0; }
 	if (v.ramdisk_size != h.ramdisk_size) { fprintf(stderr, "verify: ramdisk size mismatch\n"); ok = 0; }
 	if (v.page_size != h.page_size) { fprintf(stderr, "verify: page size mismatch\n"); ok = 0; }
-	if (v_end > vlen) { fprintf(stderr, "verify: image shorter than declared\n"); ok = 0; }
-	if (memcmp(vbuf + v.page_size, kbuf, klen) != 0) {
+	if (v.dt_size != dt_len) { fprintf(stderr, "verify: dt_size mismatch\n"); ok = 0; }
+	if (v_dt_off + v.dt_size > vlen) { fprintf(stderr, "verify: image shorter than declared\n"); ok = 0; }
+	if (memcmp(vbuf + v_k_off, kbuf, klen) != 0) {
 		fprintf(stderr, "verify: kernel payload does not read back\n"); ok = 0;
 	}
 	if (memcmp(vbuf + v_r_off, ramdisk, h.ramdisk_size) != 0) {
 		fprintf(stderr, "verify: ramdisk payload does not read back\n"); ok = 0;
 	}
+	if (dt_len && memcmp(vbuf + v_dt_off, dt_data, dt_len) != 0) {
+		fprintf(stderr, "verify: Qualcomm DT payload does not read back\n"); ok = 0;
+	}
+	if (ok && v.dt_size)
+		(void)validate_qcdt(vbuf + v_dt_off, v.dt_size, v.page_size);
 	free(vbuf);
 	if (!ok) {
 		remove(tmp);
@@ -567,6 +642,7 @@ static int cmd_repack(int argc, char **argv)
 	free(tmp);
 	free(dbuf);
 	free(kbuf);
+	free(new_dt);
 
 	printf("%s\n", out);
 	printf("  donor        %s\n", donor);
@@ -574,10 +650,13 @@ static int cmd_repack(int argc, char **argv)
 	printf("  kernel       %zu bytes -> 0x%08x (was %u bytes)\n",
 	       klen, h.kernel_addr, h.kernel_size);
 	printf("  ramdisk      %u bytes kept from donor\n", h.ramdisk_size);
+	size_t new_dt_off = h.page_size + round_up((uint32_t)klen, h.page_size) +
+			    round_up(h.ramdisk_size, h.page_size) +
+			    round_up(h.second_size, h.page_size);
+	printf("  Qualcomm DT  %zu bytes at boot-image offset %zu\n", dt_len, new_dt_off);
 	printf("  tags_addr    0x%08x\n", h.tags_addr);
 	printf("  cmdline      \"%s\"\n", h.cmdline);
 	printf("  verified     yes\n");
-	(void)kwritten;
 	return 0;
 }
 
@@ -587,7 +666,7 @@ static int usage(void)
 		"usage:\n"
 		"  %s inspect <boot.img>\n"
 		"  %s build --kernel K --ramdisk R --out O [options]\n"
-		"  %s repack <donor.img> --kernel-new K --out O\n"
+		"  %s repack <donor.img> --kernel-new K --dt QCDT --out O\n"
 		"         [--cmdline-append S] [--cmdline-replace S] [--force]\n"
 		"options: --page-size 2048|4096 --kernel-addr A --ramdisk-addr A\n"
 		"         --tags-addr A --second-addr A --second S --no-second\n"

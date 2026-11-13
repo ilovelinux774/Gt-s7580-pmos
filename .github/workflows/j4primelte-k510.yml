@@ -185,21 +185,25 @@ jobs:
           ./repack-boot inspect "$J4_DIR/../../boot.img" >/dev/null 2>&1 || true
           echo "repack-boot built"
 
-      - name: Self-test the packing tools on the donor
+      - name: Self-test Qualcomm DT table and boot-image packing
         run: |
           set -euo pipefail
-          # A synthetic "kernel" keeps this independent of the real build and of
-          # any downloaded donor: it proves inspect/repack/build still agree
-          # with each other on every run, which is what protects the phone.
+          # Keep these tests independent of a real kernel and donor: prove the
+          # QCDT v3 metadata, Qualcomm dt_size field, and post-ramdisk placement.
+          python3 "$J4_DIR/test_qcdt.py" --fixture-out /tmp/test-qcdt.img \
+            | tee selftest-report.txt
           head -c 65536 /dev/urandom > /tmp/fake-kernel
           head -c 32768 /dev/urandom > /tmp/fake-ramdisk
           ./repack-boot build --kernel /tmp/fake-kernel --ramdisk /tmp/fake-ramdisk \
-            --out /tmp/synth.img --page-size 2048 --kernel-addr 0x8000 \
-            --ramdisk-addr 0x2000000 --tags-addr 0x100 --cmdline 'selftest'
-          ./repack-boot inspect /tmp/synth.img | tee selftest-report.txt
-          ./repack-boot repack /tmp/synth.img --kernel-new /tmp/fake-ramdisk \
-            --out /tmp/synth2.img --force | tee -a selftest-report.txt
-          ./repack-boot inspect /tmp/synth2.img | tee -a selftest-report.txt
+            --out /tmp/synth.img --page-size 4096 --kernel-addr 0x82008000 \
+            --ramdisk-addr 0x83000000 --tags-addr 0x82000100 \
+            --second-addr 0x82f00000 --cmdline 'selftest'
+          ./repack-boot inspect /tmp/synth.img | tee -a selftest-report.txt
+          ./repack-boot repack /tmp/synth.img --kernel-new /tmp/fake-kernel \
+            --dt /tmp/test-qcdt.img --out /tmp/synth-qcdt.img \
+            | tee -a selftest-report.txt
+          ./repack-boot inspect /tmp/synth-qcdt.img | tee -a selftest-report.txt
+          grep -q 'qcdt.*v3, 3 match records' selftest-report.txt
           # Refusals must stay refusals.
           if ./repack-boot build --kernel /tmp/fake-kernel --ramdisk /tmp/fake-ramdisk \
                --out /tmp/synth.img 2>/dev/null; then
@@ -211,7 +215,7 @@ jobs:
             echo "::error title=Self-test::repack accepted a missing kernel"
             exit 1
           fi
-          echo "self-test passed"
+          echo "QCDT/boot-image self-test passed"
 
       - name: Self-test only (skips kernel, donor and repack)
         if: ${{ inputs.selftest_only }}
@@ -344,33 +348,29 @@ jobs:
           ./tc/bin/"${CROSS_PREFIX:-aarch64-linux-gnu-}"gcc -dumpmachine | tee /dev/stderr | grep -q aarch64 \
             || { echo "toolchain is not aarch64" >&2; exit 1; }
 
-      - name: Build the board DTB (separate from the kernel, and never fatal)
+      - name: Build the required board DTB and Qualcomm QCDT image
         run: |
           set -euo pipefail
           if [ -z "${BOARD_DTS:-}" ]; then
-            echo "no board DTS pinned"; exit 0
+            echo "::error title=Missing board DTS::a flashable J4+ image requires its board DTB"
+            exit 1
           fi
           mkdir -p board-dtb
-          # Cheap and isolated: this touches nothing the kernel build reads, so a
-          # device tree that does not compile is reported and then ignored.
-          if ! cpp -nostdinc -undef -x assembler-with-cpp \
-                 -I kernel/include -I kernel/arch/arm64/boot/dts/qcom \
-                 "$BOARD_DTS" -o board-dtb/j4-board.dts; then
-            echo "::warning title=Board DTB::cpp failed; the image will carry no DTB"
-            echo "DTB_APPENDED=no" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          if ! dtc -I dts -O dtb -o board-dtb/j4-board.dtb board-dtb/j4-board.dts \
-                 2> board-dtb/dtc.log; then
-            head -n 15 board-dtb/dtc.log | while IFS= read -r l; do
-              echo "::warning title=Board DTB::dtc: $l"
-            done
-            echo "DTB_APPENDED=no" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          echo "board DTB: $(stat -c%s board-dtb/j4-board.dtb) bytes"
-          echo "DTB_APPENDED=yes" >> "$GITHUB_ENV"
+          cpp -nostdinc -undef -x assembler-with-cpp \
+            -I kernel/include -I kernel/arch/arm64/boot/dts/qcom \
+            "$BOARD_DTS" -o board-dtb/j4-board.dts
+          dtc -I dts -O dtb -o board-dtb/j4-board.dtb board-dtb/j4-board.dts \
+            2> board-dtb/dtc.log || {
+              cat board-dtb/dtc.log
+              echo "::error title=Board DTB failed::cannot make a device-ready boot image without the J4+ DTB"
+              exit 1
+            }
+          python3 "$J4_DIR/qcdt.py" --dtb board-dtb/j4-board.dtb \
+            --out board-dtb/j4-qcdt.img --page-size 4096 \
+            | tee board-dtb/qcdt-report.txt
           echo "BOARD_DTB=$PWD/board-dtb/j4-board.dtb" >> "$GITHUB_ENV"
+          echo "QCDT_IMAGE=$PWD/board-dtb/j4-qcdt.img" >> "$GITHUB_ENV"
+          echo "DTB_HANDOFF=QCDT-after-ramdisk" >> "$GITHUB_ENV"
 
       - name: Fetch the donor boot image
         run: |
@@ -447,32 +447,17 @@ jobs:
         if: env.J4_DRY_RUN != 'true'
         run: |
           set -euo pipefail
+          test -s "${QCDT_IMAGE:?required Qualcomm QCDT table missing}"
           ./repack-boot repack donor/boot.img \
             --kernel-new out/kernel.payload \
+            --dt "$QCDT_IMAGE" \
             --out boot-k510.img \
             --cmdline-append 'systemd.unified_cgroup_hierarchy=1' \
             | tee repack-report.txt
           ./repack-boot inspect boot-k510.img | tee boot-k510-report.txt
-
-          # The payload must end in a DTB. fdt magic is 0xd00dfeed; the DTB is
-          # appended after the gzip stream, so look for the last occurrence.
-          python3 - <<'PY'
-          import sys
-          blob = open('out/kernel.payload', 'rb').read()
-          idx = blob.rfind(b'\xd0\x0d\xfe\xed')
-          if idx < 0:
-              # Not fatal: an image without a DTB is still a build test.
-              print('::warning title=No DTB in payload::this image only boots if the bootloader supplies a DTB')
-              sys.exit(0)
-          size = int.from_bytes(blob[idx + 4:idx + 8], 'big')
-          print(f'DTB found at offset {idx}, total size {size} bytes')
-          if idx + size > len(blob):
-              print('::warning title=Truncated DTB::declared size runs past the end of the payload')
-              sys.exit(0)
-          print('payload: kernel + complete DTB')
-          PY
-          # Same sha1-id convention as the donor, so the only differences are
-          # the kernel payload, the appended cmdline word and the id field.
+          grep -q 'qcdt.*v3' boot-k510-report.txt
+          # Retain the donor header/ramdisk; intentional changes are the kernel,
+          # QCDT table + dt_size, the cmdline word, and the informational id.
           sha256sum boot-k510.img > boot-k510.img.sha256
           cat boot-k510.img.sha256
 
@@ -487,7 +472,7 @@ jobs:
             echo "- tree: \`$KERNEL_URL\` @ \`$KERNEL_BRANCH\`"
             echo "- defconfig: \`${DEFCONFIG:-<undecided>}\`"
             echo "- fragment: \`${FRAGMENT:-none}\`"
-            echo "- DTB appended: \`${DTB_APPENDED:-unknown}\`"
+            echo "- DT handoff: \`${DTB_HANDOFF:-missing}\`"
             echo "- dry run: \`$J4_DRY_RUN\`"
             echo
             echo '<details><summary>tree validation</summary>'

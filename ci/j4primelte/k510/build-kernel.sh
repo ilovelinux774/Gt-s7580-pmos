@@ -7,6 +7,7 @@
 #   J4_K510_JOBS        parallel make jobs (default: nproc)
 #   J4_K510_LOCALVERSION  -j4-k510-... suffix, default -j4-k510
 #   J4_K510_CC          override the C compiler (e.g. clang)
+#   J4_K510_BOARD_DTB  required compiled j4primelte DTB; staged for QCDT pack
 #   J4_K510_KEEP_TREE   set to 1 to skip the "already built" guard
 #
 # The script never invents a defconfig and never continues after an error. It
@@ -148,49 +149,25 @@ make -C "$tree" O="$out" "${make_args[@]}" dtbs -j"$jobs" \
 
 echo "=== collect"
 art="$out/arch/arm64/boot"
-for candidate in Image.gz-dtb Image.gz Image; do
+for candidate in Image.gz Image; do
 	if [[ -f $art/$candidate ]]; then
 		echo "kernel image: $candidate ($(stat -c%s "$art/$candidate") bytes)"
 		cp "$art/$candidate" "$out/kernel.payload"
 		break
 	fi
 done
-# Android boot images for arm64 carry the DTB appended to the kernel payload
-# (the Image.gz-dtb convention). Samsung's loader expects a DTB it can find:
-# with none appended, the kernel has no idea what board it is on, and on this
-# phone that is the difference between "boots" and "hangs".
-#
-# Preferred source is the tree's own DTB. The pinned tree has no j4primelte
-# device tree, so fall back to the board DTS pinned in sources.env, compiled
-# with the tree's own headers (cpp) and dtc.
-# The DTB is supplied precompiled (J4_K510_BOARD_DTB), built by an earlier,
-# separate workflow step. Doing it there means a device tree that does not
-# compile costs seconds instead of a compiler run, and - deliberately - it
-# cannot block the kernel build: an image without a DTB is still a valid test
-# artifact, just a differently limited one.
+# Qualcomm aboot expects a QCDT container after the ramdisk, described by
+# the Qualcomm dt_size word in the v0 boot header. A bare FDT appended to
+# Image.gz is not the format used by this device and must never be emitted.
 board_dtb=${J4_K510_BOARD_DTB:-}
-dtb=$(find "$out/arch/arm64/boot/dts" -iname '*j4primelte*.dtb' 2>/dev/null | head -n1) || true
-[[ -z $dtb && -n $board_dtb && -f $board_dtb ]] && dtb=$board_dtb
-
-if [[ -n $dtb && -f $out/kernel.payload ]]; then
-	if [[ $(head -c2 "$out/kernel.payload" | od -An -tx1 | tr -d ' \n') == 1f8b ]]; then
-		cat "$out/kernel.payload" "$dtb" > "$out/kernel.payload.dtb"
-		echo "appended $dtb to the gzip payload (Image.gz-dtb convention)"
-	else
-		cat "$out/kernel.payload" "$dtb" > "$out/kernel.payload.dtb"
-		echo "appended $dtb to the raw Image payload"
-	fi
-	mv "$out/kernel.payload.dtb" "$out/kernel.payload"
-	cp "$dtb" "$out/j4-board.dtb"
-else
-	cat >&2 <<-'EOF'
-	WARNING: no device tree is appended to the kernel payload.
-	         The image will boot only if the bootloader supplies a usable DTB.
-	         Treat this artifact as a build test, not as a boot test.
-	EOF
-	echo "DTB_APPENDED=no" > "$out/dtb-status.txt"
+if [[ -z $board_dtb || ! -s $board_dtb ]]; then
+	echo "FAILED PHASE: board DTB missing; a flashable J4+ image requires QCDT" >&2
+	exit 1
 fi
-[[ -n $dtb ]] && echo "DTB_APPENDED=yes" > "$out/dtb-status.txt" || true
+cp "$board_dtb" "$out/j4-board.dtb"
+echo "staged board DTB for Qualcomm QCDT packaging: $out/j4-board.dtb"
+
+echo "DTB_HANDOFF=QCDT-after-ramdisk" > "$out/dtb-status.txt"
 
 if [[ ! -f $out/kernel.payload ]]; then
 	# Some vendor trees only produce vmlinux plus a raw Image under a
