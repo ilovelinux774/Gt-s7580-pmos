@@ -17,3 +17,16 @@
 # The line above is the declaration that makes the earlier unknown symbol
 # explicit instead of silent.
 ! SUPERSEDES DRM_PANEL_SAMSUNG_S6D7AT0B01
+
+# systemd's cgroup v2 device controller is CONFIG_CGROUP_BPF, and that symbol is
+# "depends on BPF_SYSCALL".
+#
+# The mainline fragment disables BPF_SYSCALL (line 222) because that bring-up
+# build did not want eBPF. That is no longer tenable: with BPF_SYSCALL off,
+# scripts/config accepts CGROUP_BPF, olddefconfig silently drops it, the kernel
+# compiles, and the audit reports CGROUP_BPF as ABSENT. Observed on run
+# 43380010613 - compiled, then blocked by the audit.
+#
+# This file is applied after the mainline fragment, so this wins.
++ BPF_SYSCALL
++ CGROUP_BPF

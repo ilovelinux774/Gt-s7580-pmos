@@ -55,6 +55,10 @@ on:
         description: 'Reject trees without msm8917/msm8937 board support (turn off only to test generic builds)'
         type: boolean
         default: true
+      config_only:
+        description: 'Stop after configure + audit (no compile): iterate on the config in a minute'
+        type: boolean
+        default: false
       selftest_only:
         description: 'Skip the kernel entirely; exercise repack-boot and the audits on the donor image'
         type: boolean
@@ -357,6 +361,10 @@ jobs:
           export J4_K510_ALLOW_AUDIT_FAIL="$( [ "$allow_audit_fail" = true ] && echo 1 || echo 0 )"
           export J4_K510_CROSS_COMPILE="$CROSS_PREFIX"
           export J4_K510_FRAGMENT="${FRAGMENT:-}"
+          if [ "${{ inputs.config_only }}" = "true" ]; then
+            export J4_K510_CONFIG_ONLY=1
+            echo "config-only run: no compile"
+          fi
           tc_dir=$PWD/tc
           [ -n "$TOOLCHAIN_URL" ] || tc_dir=/usr
           set +e
