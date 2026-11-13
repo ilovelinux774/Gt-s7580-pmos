@@ -134,6 +134,10 @@ jobs:
           fi
             echo "DONOR_URL=$J4_K510_DONOR_URL"
             echo "DONOR_SHA256=$J4_K510_DONOR_SHA256"
+          if [ -n "$J4_K510_BOARD_DTS" ]; then
+            test -f "$J4_K510_BOARD_DTS" || { echo "::error title=Board DTS missing::$J4_K510_BOARD_DTS"; exit 1; }
+            echo "BOARD_DTS=$PWD/$J4_K510_BOARD_DTS" >> "$GITHUB_ENV"
+          fi
           } >> "$GITHUB_ENV"
           # The debug override may pick a different branch, but a commit pin is
           # only meaningful for the branch it came from.
@@ -361,6 +365,7 @@ jobs:
           export J4_K510_ALLOW_AUDIT_FAIL="$( [ "$allow_audit_fail" = true ] && echo 1 || echo 0 )"
           export J4_K510_CROSS_COMPILE="$CROSS_PREFIX"
           export J4_K510_FRAGMENT="${FRAGMENT:-}"
+          export J4_K510_BOARD_DTS="${BOARD_DTS:-}"
           if [ "${{ inputs.config_only }}" = "true" ]; then
             export J4_K510_CONFIG_ONLY=1
             echo "config-only run: no compile"
@@ -408,6 +413,23 @@ jobs:
             --cmdline-append 'systemd.unified_cgroup_hierarchy=1' \
             | tee repack-report.txt
           ./repack-boot inspect boot-k510.img | tee boot-k510-report.txt
+
+          # The payload must end in a DTB. fdt magic is 0xd00dfeed; the DTB is
+          # appended after the gzip stream, so look for the last occurrence.
+          python3 - <<'PY'
+          import sys
+          blob = open('out/kernel.payload', 'rb').read()
+          idx = blob.rfind(b'\xd0\x0d\xfe\xed')
+          if idx < 0:
+              print('::error title=No DTB in payload::the kernel image carries no device tree')
+              sys.exit(1)
+          size = int.from_bytes(blob[idx + 4:idx + 8], 'big')
+          print(f'DTB found at offset {idx}, total size {size} bytes')
+          if idx + size > len(blob):
+              print('::error title=Truncated DTB::declared size runs past the end of the payload')
+              sys.exit(1)
+          print('payload: kernel + complete DTB')
+          PY
           # Same sha1-id convention as the donor, so the only differences are
           # the kernel payload, the appended cmdline word and the id field.
           sha256sum boot-k510.img > boot-k510.img.sha256

@@ -156,27 +156,51 @@ for candidate in Image.gz-dtb Image.gz Image; do
 	fi
 done
 # Android boot images for arm64 carry the DTB appended to the kernel payload
-# (the Image.gz-dtb convention). If this tree produced a board DTB, append it;
-# otherwise leave the payload as it is and say so loudly.
-dtb=$(find "$out/arch/arm64/boot/dts" -iname '*j4primelte*.dtb' 2>/dev/null | head -n1)
+# (the Image.gz-dtb convention). Samsung's loader expects a DTB it can find:
+# with none appended, the kernel has no idea what board it is on, and on this
+# phone that is the difference between "boots" and "hangs".
+#
+# Preferred source is the tree's own DTB. The pinned tree has no j4primelte
+# device tree, so fall back to the board DTS pinned in sources.env, compiled
+# with the tree's own headers (cpp) and dtc.
+board_dts=${J4_K510_BOARD_DTS:-}
+dtb=$(find "$out/arch/arm64/boot/dts" -iname '*j4primelte*.dtb' 2>/dev/null | head -n1) || true
+
+if [[ -z $dtb && -n $board_dts ]]; then
+	[[ -f $board_dts ]] || { echo "board DTS not found: $board_dts" >&2; exit 1; }
+	command -v dtc >/dev/null || {
+		echo "dtc is required to build $board_dts but is not installed" >&2
+		exit 1
+	}
+	inc=(-I "$tree/include" -I "$tree/arch/arm64/boot/dts/qcom")
+	echo "=== compile board DTS: $board_dts"
+	cpp -nostdinc -undef -x assembler-with-cpp "${inc[@]}" "$board_dts" -o "$out/j4-board.dts" \
+		|| { echo "cpp failed on $board_dts" >&2; exit 1; }
+	dtc -I dts -O dtb -o "$out/j4-board.dtb" "$out/j4-board.dts" \
+		|| { echo "dtc failed on $board_dts" >&2; exit 1; }
+	dtb="$out/j4-board.dtb"
+	echo "board DTB: $(stat -c%s "$dtb") bytes"
+fi
+
 if [[ -n $dtb && -f $out/kernel.payload ]]; then
-	case $out/kernel.payload in
-		*.gz|*/kernel.payload)
-			base=$out/kernel.payload
-			if [[ $(head -c2 "$base" | od -An -tx1 | tr -d ' \n') == 1f8b ]]; then
-				cat "$base" "$dtb" > "$out/kernel.payload.dtb"
-				mv "$out/kernel.payload.dtb" "$out/kernel.payload"
-				echo "appended $dtb to the gzip payload (Image.gz-dtb convention)"
-			else
-				cat "$base" "$dtb" > "$out/kernel.payload.dtb"
-				mv "$out/kernel.payload.dtb" "$out/kernel.payload"
-				echo "appended $dtb to the raw Image payload"
-			fi
-			;;
-	esac
+	if [[ $(head -c2 "$out/kernel.payload" | od -An -tx1 | tr -d ' \n') == 1f8b ]]; then
+		cat "$out/kernel.payload" "$dtb" > "$out/kernel.payload.dtb"
+		echo "appended $dtb to the gzip payload (Image.gz-dtb convention)"
+	else
+		cat "$out/kernel.payload" "$dtb" > "$out/kernel.payload.dtb"
+		echo "appended $dtb to the raw Image payload"
+	fi
+	mv "$out/kernel.payload.dtb" "$out/kernel.payload"
+	cp "$dtb" "$out/j4-board.dtb"
 else
-	echo "warning: no j4primelte DTB in the build output; the kernel will rely" >&2
-	echo "         on whatever DTB the bootloader supplies or on a built-in one" >&2
+	cat >&2 <<-'EOF'
+	ERROR: the boot payload would carry no device tree.
+	       A bare Image/Image.gz with no DTB does not describe this board, and
+	       flashing it only produces a boot that hangs with no output.
+	       Pin J4_K510_BOARD_DTS in sources.env (or use a tree that ships a
+	       j4primelte device tree).
+	EOF
+	exit 1
 fi
 
 if [[ ! -f $out/kernel.payload ]]; then
