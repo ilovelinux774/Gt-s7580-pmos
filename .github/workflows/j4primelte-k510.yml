@@ -90,6 +90,19 @@ jobs:
       - name: Load pins
         run: |
           set -euo pipefail
+          chmod +x "$J4_DIR"/*.sh
+          # First: is sources.env itself sane? A duplicated assignment is
+          # invisible to bash's sourcing (last one wins) and cost one run here.
+          set +e
+          "$J4_DIR/check-pins.sh" "$J4_DIR/sources.env" | tee pins-report.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            grep -E 'PIN FAIL|^  [A-Z_]' pins-report.txt | head -6 | while IFS= read -r l; do
+              echo "::error title=Bad pin file::$l"
+            done
+            exit 1
+          fi
           # shellcheck disable=SC1091
           source "$J4_DIR/sources.env"
           {
@@ -423,6 +436,7 @@ jobs:
           name: j4-k510-${{ github.run_id }}
           path: |
             selftest-report.txt
+            pins-report.txt
             fragment-report.txt
             tree-report.txt
             donor-report.txt
