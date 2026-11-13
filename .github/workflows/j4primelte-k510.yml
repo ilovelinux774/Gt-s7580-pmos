@@ -104,6 +104,12 @@ jobs:
             echo "TOOLCHAIN_BRANCH=$J4_K510_TOOLCHAIN_BRANCH"
             echo "TOOLCHAIN_COMMIT=$J4_K510_TOOLCHAIN_COMMIT"
             echo "DEFCONFIG=${defconfig:-$J4_K510_DEFCONFIG}"
+          # Absolute, because build-kernel.sh runs from the workspace root but
+          # takes paths as arguments elsewhere.
+          if [ -n "$J4_K510_FRAGMENT" ]; then
+            echo "FRAGMENT=$PWD/$J4_K510_FRAGMENT" >> "$GITHUB_ENV"
+            test -f "$J4_K510_FRAGMENT" || { echo "fragment missing: $J4_K510_FRAGMENT" >&2; exit 1; }
+          fi
             echo "DONOR_URL=$J4_K510_DONOR_URL"
             echo "DONOR_SHA256=$J4_K510_DONOR_SHA256"
           } >> "$GITHUB_ENV"
@@ -304,6 +310,7 @@ jobs:
           set -euo pipefail
           export J4_K510_JOBS="$(nproc)"
           export J4_K510_CROSS_COMPILE="$CROSS_PREFIX"
+          export J4_K510_FRAGMENT="${FRAGMENT:-}"
           export J4_K510_ALLOW_AUDIT_FAIL="$( [ "$allow_audit_fail" = true ] && echo 1 || echo 0 )"
           tc_dir=$PWD/tc
           [ -n "$TOOLCHAIN_URL" ] || tc_dir=/usr
@@ -334,6 +341,7 @@ jobs:
             echo "- branch: \`${{ github.ref_name }}\` / run \`${{ github.run_id }}\`"
             echo "- tree: \`$KERNEL_URL\` @ \`$KERNEL_BRANCH\`"
             echo "- defconfig: \`${DEFCONFIG:-<undecided>}\`"
+            echo "- fragment: \`${FRAGMENT:-none}\`"
             echo "- dry run: \`$J4_DRY_RUN\`"
             echo
             echo '<details><summary>tree validation</summary>'

@@ -81,10 +81,33 @@ match. Repacking the 3.18 boot image with its own kernel payload is
 byte-identical outside the informational SHA-1 id field — that round trip is
 checked locally and the tool's behaviour is re-checked on every CI run.
 
-## The open problem: which 5.10 tree?
+## Which tree: mainline msm89x7, not 5.10
 
-Nothing in `sources.env` is a working base yet. What was checked, and what was
-found:
+The local work only contains 3.18 trees (armv7 **and** arm64). It does not
+contain a 5.10 anything, and no public 5.10 Qualcomm tree with this SoC was
+found. So the pin is not 5.10: it is the **msm89x7 mainline tree this
+repository's own `pmos-j4primelte-20260927` branch already builds**, at commit
+`15c904f9ffe0` on `msm89x7/7.1.3`.
+
+That satisfies the actual requirement (kernel ≥ 5.10) and brings hardware
+support that no 5.10 vendor tree would have: MSM8917/8937 support, and the
+generated DSI panel driver the J4+ panel needs. The pipeline therefore treats
+5.10 as a **floor**, not an equality: `verify-tree.sh` rejects 5.4 and accepts
+7.1.3, with tests for both directions.
+
+Pinned:
+
+* tree `https://github.com/msm89x7-mainline/linux.git` @ `15c904f9ffe0`
+  (`msm89x7/7.1.3`), probe `arch/arm64/boot/dts/qcom/msm8917.dtsi`
+* defconfig `defconfig`
+* fragment `ci/j4primelte/k510/mainline/j4mainline.fragment` (358 lines, copied
+  from the mainline work, applied through `scripts/config` so a symbol that does
+  not exist is reported instead of silently dropped)
+* board DTS `ci/j4primelte/k510/mainline/msm8917-samsung-j4primelte.dts` (697
+  lines, same provenance) for the case where the pinned tree has no j4primelte
+  device tree of its own
+
+What was checked, for the record:
 
 * `CodeLinaro-mirror/la_kernel_msm-5.10` @ `aosp-new/android12-5.10/android12-5.10-2022-07`
   (Linux 5.10.110) — **no msm8917/msm8937/khaje/scuba anywhere**; only genuine
@@ -96,10 +119,11 @@ found:
   much larger project and is not what this pipeline is for.
 * Vendor 3.18 trees — have the real J4+ IoT DTS (`msm8917-sec-j4primelte-sea-open-r06.dts`,
   board-id `<8 6>`, matching the phone's `androidboot.revision=6`) but are 3.18.
+* `msm89x7-mainline/linux` — **the chosen base**. Branches run 6.6 … 7.1.3; there
+  is no 5.10 branch and there never needed to be.
 
-**The next concrete step** is a 5.10 Qualcomm tree that carries msm8917/8937
-(scuba / khaje / sdm429 board support). Once one is in hand, in order of
-increasing cost:
+**The next concrete step** is a real build of the pinned mainline tree. In order
+of increasing cost:
 
 1. Put it in `sources.env` (or use the workflow's `kernel_tarball_url` +
    `kernel_tarball_sha256` inputs, so a tree that only exists on your disk does

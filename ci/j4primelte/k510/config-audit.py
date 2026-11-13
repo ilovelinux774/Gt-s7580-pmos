@@ -78,6 +78,15 @@ NOTES = {
 
 SEVERITY_ORDER = ['hard', 'systemd', 'userspace']
 
+# symbol -> first kernel that has it at all.
+MINIMUM_KERNEL = {
+    'CONFIG_MEMBARRIER': (4, 3),
+    'CONFIG_CGROUP_PIDS': (4, 5),
+    'CONFIG_CGROUP_BPF': (4, 15),
+    'CONFIG_AUTOFS_FS': (4, 18),
+    'CONFIG_COMPAT_32BIT_TIME': (4, 17),
+}
+
 # Same feature, different name depending on kernel generation. The first symbol
 # that exists in the config decides.
 ALIASES = {
@@ -87,10 +96,14 @@ ALIASES = {
 
 
 def parse_config(path):
-    values = {}
+    # The banner ("Linux/arm64 5.10.110 Kernel Configuration") is the one place
+    # a version is guaranteed, even in trees without IKCONFIG.
+    values = {'CONFIG_VERSION_SIGNATURE': ''}
     with open(path, 'r', errors='replace') as fh:
         for line in fh:
             line = line.rstrip('\n')
+            if line.startswith('# ') and 'Kernel Configuration' in line:
+                values['CONFIG_VERSION_SIGNATURE'] = line
             if line.startswith('# ') and line.endswith(' is not set'):
                 values[line[2:-len(' is not set')]] = 'n'
             elif '=' in line and not line.startswith('#'):
@@ -99,14 +112,40 @@ def parse_config(path):
     return values
 
 
+def kernel_version(values):
+    """(major, minor) from CONFIG_VERSION_SIGNATURE ('Linux version 5.10.110...')."""
+    # Vendor kernels often lack CONFIG_IKHEADERS/IKCONFIG; fall back to the
+    # banner in the localversion string, which is where 3.18 keeps it.
+    sig = values.get('CONFIG_VERSION_SIGNATURE', '') or values.get('CONFIG_LOCALVERSION', '')
+    for token in sig.replace('(', ' ').split():
+        if token[:1].isdigit() and token.count('.') >= 1:
+            parts = token.split('.')
+            try:
+                return int(parts[0]), int(parts[1])
+            except (ValueError, IndexError):
+                continue
+    return None
+
+
 def is_set(value):
     return value in ('y', 'm') or (value is not None and value not in ('n', ''))
 
 
 def check(values, mode):
     max_index = SEVERITY_ORDER.index(mode)
+    version = kernel_version(values)
     results = []
     for symbol, (expected, severity, why) in REQUIRED.items():
+        # Some of systemd's list only exists in newer kernels. Flagging
+        # CONFIG_CPUSETS as "missing" on a 3.18 tree is noise: it is not
+        # absent, it is unavailable. Label those instead of hiding them.
+        minimum = MINIMUM_KERNEL.get(symbol)
+        if minimum and version and version < minimum:
+            results.append({'symbol': symbol, 'expected': expected, 'actual': None,
+                            'ok': True, 'severity': severity, 'skipped': True,
+                            'why': why + f' (needs kernel {minimum[0]}.{minimum[1]}+; '
+                                         f'this tree is {version[0]}.{version[1]})'})
+            continue
         if SEVERITY_ORDER.index(severity) > max_index:
             continue
         actual = values.get(symbol)
@@ -128,6 +167,7 @@ def check(values, mode):
             'symbol': symbol,
             'expected': expected,
             'actual': actual if actual is not None else 'ABSENT',
+            'skipped': False,
             'ok': ok,
             'severity': severity,
             'why': why,
@@ -166,8 +206,9 @@ def main(argv=None):
     else:
         print(f'config audit ({args.mode}): {len(results)} symbols checked')
         for r in results:
-            mark = 'ok  ' if r['ok'] else 'FAIL'
-            print(f"  {mark} {r['symbol']:<34} want={r['expected']:<4} got={r['actual']:<6} {r['why']}")
+            mark = 'n/a ' if r.get('skipped') else ('ok  ' if r['ok'] else 'FAIL')
+            got = 'n/a' if r.get('skipped') else (r['actual'] or 'ABSENT')
+            print(f"  {mark} {r['symbol']:<34} want={r['expected']:<4} got={got:<6} {r['why']}")
         for n in notes(values):
             print(f"  note {n['symbol']}: {n['why']}")
         if failed:

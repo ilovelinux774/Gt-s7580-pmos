@@ -36,6 +36,11 @@ cross=$toolchain/bin/$prefix
 echo "compiler: ${cross}gcc ($(${cross}gcc -dumpversion 2>/dev/null))"
 [[ -f $tree/arch/arm64/configs/$defconfig ]] \
 	|| { echo "defconfig not found: arch/arm64/configs/$defconfig" >&2; exit 1; }
+fragment=${J4_K510_FRAGMENT:-}
+if [[ -n $fragment ]]; then
+	[[ -f $fragment ]] || { echo "fragment not found: $fragment" >&2; exit 1; }
+	echo "fragment: $fragment"
+fi
 mkdir -p "$out"
 
 # --- reproducibility -------------------------------------------------------
@@ -89,13 +94,35 @@ else
 	echo "warning: $cfg missing; shipping the defconfig unmodified" >&2
 fi
 
+# A fragment is applied through scripts/config, not by concatenating text: a
+# vendor tree happily ignores unknown symbols, so a typo has to be reported.
+if [[ -n $fragment ]]; then
+	# Accept both "+ SYMBOL" (the format in ci/j4primelte/mainline/) and
+	# "+SYMBOL"; an unknown symbol is reported, never silently dropped.
+	while read -r op sym rest; do
+		[[ -z ${op:-} || $op == \#* ]] && continue
+		if [[ $op != [+-@] ]]; then
+			sym=${op#?}
+			op=${op:0:1}
+		fi
+		case $op in
+			+) "$cfg" --file "$out/.config" --enable "$sym" 2>/dev/null \
+				|| echo "  fragment: CONFIG_$sym is not in this tree" ;;
+			-) "$cfg" --file "$out/.config" --disable "$sym" 2>/dev/null || true ;;
+			@) "$cfg" --file "$out/.config" --set-str "$sym" "$rest" 2>/dev/null \
+				|| echo "  fragment: CONFIG_$sym is not in this tree" ;;
+		esac
+	done < "$fragment"
+fi
+
 # Re-resolve dependencies now, so the .config we audit is the one we build.
 make -C "$tree" O="$out" "${make_args[@]}" olddefconfig
 
 echo "=== build"
 make -C "$tree" O="$out" "${make_args[@]}" -j"$jobs"
-# Vendor arm64 trees do not build DTBs as part of the default target.
-make -C "$tree" O="$out" "${make_args[@]}" dtbs -j"$jobs" || echo "note: dtbs target failed"
+# Mainline builds dtbs in the default target; vendor trees often do not.
+make -C "$tree" O="$out" "${make_args[@]}" dtbs -j"$jobs" \
+	|| echo "note: dtbs target failed (see the log above)"
 
 echo "=== collect"
 art="$out/arch/arm64/boot"

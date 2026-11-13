@@ -23,8 +23,12 @@ major=$(read_make VERSION)
 patch=$(read_make PATCHLEVEL)
 sub=$(read_make SUBLEVEL)
 got_version="${major}.${patch}"
-[[ $got_version == "$want_version" ]] \
-	|| fail "tree is Linux ${got_version}.${sub}, pin expects ${want_version}"
+# want_version is a FLOOR: systemd needs >= 5.10, so 6.x/7.x is fine and 5.4 is
+# not. Promising an exact version would reject the newer trees on purpose.
+if (( major < ${want_version%%.*} )) ||
+   { (( major == ${want_version%%.*} )) && (( patch < ${want_version#*.} )); }; then
+	fail "tree is Linux ${got_version}.${sub}, below the required floor ${want_version}"
+fi
 echo "version: ${got_version}.${sub}"
 
 # --- probe ----------------------------------------------------------------
@@ -38,8 +42,13 @@ arm32=no
 if [[ -d $tree/arch/arm/mach-qcom ]] || [[ -d $tree/arch/arm/mach-msm ]]; then
 	arm32=yes
 fi
-arm32_dts=$(find "$tree/arch/arm/boot/dts" -maxdepth 2 \
-	-iname '*8917*' -o -maxdepth 2 -iname '*8937*' 2>/dev/null | wc -l)
+# find exits non-zero on a missing directory, and `set -e` + `pipefail` would
+# turn that into a silent death of the whole script.
+arm32_dts=0
+if [[ -d $tree/arch/arm/boot/dts ]]; then
+	arm32_dts=$(find "$tree/arch/arm/boot/dts" -maxdepth 2 \
+		\( -iname '*msm8917*' -o -iname '*msm8937*' \) 2>/dev/null | wc -l) || true
+fi
 echo "arch/arm support: mach=$( [[ $arm32 == yes ]] && echo yes || echo no ) dts_matches=${arm32_dts}"
 if [[ $arm32 == no ]] && (( arm32_dts == 0 )); then
 	echo "note: this tree cannot build a 32-bit kernel for msm8917/8937."
@@ -50,9 +59,12 @@ fi
 # A generic arm64 tree builds a kernel that has never heard of this phone. Make
 # that verdict explicit, because it is the difference between "our pin is
 # wrong" and "this tree can never work here".
-soc_hits=$(find "$tree/arch/arm64" \( -path '*/boot/dts/*' -o -path '*/configs/*' \) \
-	\( -iname '*8917*' -o -iname '*8937*' -o -iname '*scuba*' -o -iname '*khaje*' -o -iname '*sdm429*' \) \
-	2>/dev/null | wc -l)
+soc_hits=0
+if [[ -d $tree/arch/arm64 ]]; then
+	soc_hits=$(find "$tree/arch/arm64" \( -path '*/boot/dts/*' -o -path '*/configs/*' \) \
+		\( -iname '*msm8917*' -o -iname '*msm8937*' -o -iname '*scuba*' -o -iname '*khaje*' -o -iname '*sdm429*' \) \
+		2>/dev/null | wc -l) || true
+fi
 echo "SoC support hits (arch/arm64 dts+configs): $soc_hits"
 if (( soc_hits == 0 )); then
 	cat >&2 <<-'EOF'
@@ -92,12 +104,22 @@ else
 fi
 
 # --- device tree ----------------------------------------------------------
-dts=$(find "$tree/arch/arm64/boot/dts" -iname '*j4primelte*' 2>/dev/null | head -n5)
+soc_dtsi=$(find "$tree/arch/arm64/boot/dts" \( -iname 'msm8917.dtsi' -o -iname 'msm8937.dtsi' \) 2>/dev/null | head -n3) || true
+dts=$(find "$tree/arch/arm64/boot/dts" -iname '*j4primelte*' 2>/dev/null | head -n5) || true
+if [[ -n $soc_dtsi ]]; then
+	echo "SoC description:"
+	printf '  %s\n' $soc_dtsi
+fi
 if [[ -n $dts ]]; then
-	echo "device tree:"
+	echo "board device tree:"
 	printf '  %s\n' $dts
 else
-	echo "device tree: none for j4primelte (the board DTBs must be brought over)"
+	cat <<-'EOF'
+	board device tree: none named j4primelte in this tree.
+	  A board DTB can still be supplied from this repository at build time
+	  (ci/j4primelte/mainline/msm8917-samsung-j4primelte.dts on branch
+	  pmos-j4primelte-20260927 is a 697-line J4+ device tree for this SoC).
+	EOF
 fi
 
 echo "VERIFY OK"
