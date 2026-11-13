@@ -55,10 +55,18 @@ export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}
 export KBUILD_BUILD_TIMESTAMP=${KBUILD_BUILD_TIMESTAMP:-"Thu, 01 Jan 1970 00:00:00 +0000"}
 export LC_ALL=C
 
-# Recent hosts default to gcc 10+ semantics (no -fcommon, -fno-common, stricter
-# warnings). These vendor trees predate all of that.
-HOSTCFLAGS="-O2 -Wall -Wmissing-prototypes -Wstrict-prototypes -fomit-frame-pointer -std=gnu89 -fcommon"
-make_args=(ARCH=arm64 "CROSS_COMPILE=$cross" "HOSTCFLAGS=$HOSTCFLAGS" PYTHON=python3)
+# Host flags are NOT overridden for modern trees. Forcing the 3.18-era
+# "-std=gnu89 -fcommon" onto a 7.x tree breaks kconfig itself:
+#   scripts/include/hashtable.h: error: 'for' loop initial declarations are only
+#   allowed in C99 or C11 mode
+# Only trees older than 5.0 get the legacy flags, because only they need them.
+kver_major=$(sed -n 's/^VERSION *= *//p' "$tree/Makefile" | head -n1)
+make_args=(ARCH=arm64 "CROSS_COMPILE=$cross" PYTHON=python3)
+if (( kver_major < 5 )); then
+	HOSTCFLAGS="-O2 -Wall -Wmissing-prototypes -Wstrict-prototypes -fomit-frame-pointer -std=gnu89 -fcommon"
+	make_args+=("HOSTCFLAGS=$HOSTCFLAGS")
+	echo "legacy host flags enabled (tree is $kver_major.x)"
+fi
 if [[ -n ${J4_K510_CC:-} ]]; then
 	make_args+=("CC=$J4_K510_CC")
 else
