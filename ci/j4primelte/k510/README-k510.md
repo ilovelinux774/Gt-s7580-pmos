@@ -151,6 +151,28 @@ of increasing cost:
    new kernel, the dm-verity-free pmOS ramdisk unchanged, and
    `systemd.unified_cgroup_hierarchy=1` appended to the cmdline.
 
+## First green build: what it produced
+
+Run [`43382757960`](https://github.com/ilovelinux774/Gt-s7580-pmos/actions/runs/43382757960)
+completed in 18m54s: pinned tree validated, fragment audited, kernel compiled,
+config audit passed, donor boot image repacked. Artifact `j4-k510-43382757960`
+(36 MB) contains `boot-k510.img`, its sha256, `config.full`, `config-audit.json`,
+the tree/fragment/donor reports and the packing self-test output.
+
+Getting there fixed four real defects, each found by a mechanism rather than by
+luck:
+
+| Symptom | Cause | Now caught by |
+|---|---|---|
+| bare "exit code 1", no reason | failures were unreadable in the log | `::error` annotations on the run |
+| `hashtable.h: 'for' loop declarations only in C99` | 3.18-era `HOSTCFLAGS=-std=gnu89 -fcommon` forced onto a 7.x tree | applied only when `VERSION < 5` |
+| "no board defconfig found" | `sources.env` assigned `J4_K510_DEFCONFIG` twice; the empty one won | `check-pins.sh` |
+| kernel compiled but `CGROUP_BPF ABSENT` | `CGROUP_BPF` depends on `BPF_SYSCALL`, which the verbatim fragment disables | the audit itself, as a hard failure |
+
+That last one is the exact failure mode this pipeline exists to prevent: a
+kernel that builds perfectly, boots maybe, and cannot run systemd for a reason
+nothing in the build output mentions.
+
 ## Testing on the phone (no UART, no pstore)
 
 1. Keep the known-good 3.18 `boot.img` next to you. Flashing is reversible: the
