@@ -100,6 +100,7 @@ jobs:
             echo "KERNEL_VERSION=$J4_K510_KERNEL_VERSION"
             echo "KERNEL_PROBE=$J4_K510_KERNEL_PROBE"
             echo "TOOLCHAIN_URL=$J4_K510_TOOLCHAIN_URL"
+          echo "CROSS_PREFIX=$J4_K510_CROSS_COMPILE"
             echo "TOOLCHAIN_BRANCH=$J4_K510_TOOLCHAIN_BRANCH"
             echo "TOOLCHAIN_COMMIT=$J4_K510_TOOLCHAIN_COMMIT"
             echo "DEFCONFIG=${defconfig:-$J4_K510_DEFCONFIG}"
@@ -147,7 +148,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev libelf-dev rsync zip unzip xz-utils cpio \
-            device-tree-compiler gcc libc6-dev python3
+            device-tree-compiler gcc libc6-dev python3 gcc-aarch64-linux-gnu
           gcc -O2 -Wall -Wextra -Werror -o repack-boot "$J4_DIR/repack-boot.c"
           ./repack-boot inspect "$J4_DIR/../../boot.img" >/dev/null 2>&1 || true
           echo "repack-boot built"
@@ -264,6 +265,14 @@ jobs:
         if: env.J4_DRY_RUN != 'true'
         run: |
           set -euo pipefail
+          if [ -z "$TOOLCHAIN_URL" ]; then
+            # Host compiler (installed with the host tools above).
+            "$CROSS_PREFIX"gcc -dumpmachine | grep -q aarch64 \
+              || { echo "::error title=Toolchain::host ${CROSS_PREFIX}gcc is not aarch64"; exit 1; }
+            echo "${CROSS_PREFIX:-aarch64-linux-gnu-}gcc $("$CROSS_PREFIX"gcc -dumpversion)"
+            echo "using host toolchain"
+            exit 0
+          fi
           git init --quiet tc
           git -C tc remote add origin "$TOOLCHAIN_URL"
           git -C tc fetch --depth=1 origin "$TOOLCHAIN_BRANCH"
@@ -273,7 +282,7 @@ jobs:
             exit 1
           fi
           chmod +x tc/bin/* 2>/dev/null || true
-          ./tc/bin/aarch64-linux-android-gcc -dumpmachine | tee /dev/stderr | grep -q aarch64 \
+          ./tc/bin/"${CROSS_PREFIX:-aarch64-linux-gnu-}"gcc -dumpmachine | tee /dev/stderr | grep -q aarch64 \
             || { echo "toolchain is not aarch64" >&2; exit 1; }
 
       - name: Fetch the donor boot image
@@ -294,8 +303,11 @@ jobs:
         run: |
           set -euo pipefail
           export J4_K510_JOBS="$(nproc)"
+          export J4_K510_CROSS_COMPILE="$CROSS_PREFIX"
           export J4_K510_ALLOW_AUDIT_FAIL="$( [ "$allow_audit_fail" = true ] && echo 1 || echo 0 )"
-          "$J4_DIR/build-kernel.sh" kernel "$PWD/out" "$PWD/tc" "$DEFCONFIG" 2>&1 | tee build.log
+          tc_dir=$PWD/tc
+          [ -n "$TOOLCHAIN_URL" ] || tc_dir=/usr
+          "$J4_DIR/build-kernel.sh" kernel "$PWD/out" "$tc_dir" "$DEFCONFIG" 2>&1 | tee build.log
 
       - name: Repack the donor with the new kernel
         if: env.J4_DRY_RUN != 'true'

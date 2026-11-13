@@ -24,10 +24,16 @@ defconfig=${4:?defconfig name, relative to arch/arm64/configs}
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 jobs=${J4_K510_JOBS:-$(nproc)}
 localversion=${J4_K510_LOCALVERSION:--j4-k510}
-cross=$toolchain/bin/aarch64-linux-android-
+# The cross prefix comes from sources.env (J4_K510_CROSS_COMPILE); the
+# toolchain directory may be /usr when the host compiler is used.
+prefix=${J4_K510_CROSS_COMPILE:-aarch64-linux-gnu-}
+cross=$toolchain/bin/$prefix
+[[ -x ${cross}gcc ]] || cross=$(command -v "${prefix}gcc" || true)
+[[ -n $cross ]] && cross=${cross%gcc}
 
 [[ -f $tree/Makefile ]] || { echo "not a kernel tree: $tree" >&2; exit 1; }
-[[ -x ${cross}gcc ]] || { echo "no compiler at ${cross}gcc" >&2; exit 1; }
+[[ -n $cross && -x ${cross}gcc ]] || { echo "no compiler for prefix $prefix" >&2; exit 1; }
+echo "compiler: ${cross}gcc ($(${cross}gcc -dumpversion 2>/dev/null))"
 [[ -f $tree/arch/arm64/configs/$defconfig ]] \
 	|| { echo "defconfig not found: arch/arm64/configs/$defconfig" >&2; exit 1; }
 mkdir -p "$out"
