@@ -1,0 +1,99 @@
+name: J4+ Linux 4.19 Riva-reference DTS smoke test
+
+on:
+  push:
+    paths:
+      - 'ci/j4primelte/k419/**'
+      - '.github/workflows/j4primelte-k419.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: j4primelte-k419-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dts-smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      J4_DIR: ci/j4primelte/k419
+    steps:
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Load pinned Android 15/16 and J4 DTS sources
+        run: |
+          set -euo pipefail
+          source "$J4_DIR/sources.env"
+          for name in RIVA_ANDROID15_KERNEL_URL RIVA_ANDROID15_KERNEL_BRANCH RIVA_ANDROID15_KERNEL_COMMIT \
+            RIVA_ANDROID16_KERNEL_URL RIVA_ANDROID16_KERNEL_BRANCH RIVA_ANDROID16_KERNEL_COMMIT \
+            RIVA_ANDROID15_DEVICE_URL RIVA_ANDROID15_DEVICE_BRANCH RIVA_ANDROID15_DEVICE_COMMIT \
+            RIVA_ANDROID16_DEVICE_URL RIVA_ANDROID16_DEVICE_BRANCH RIVA_ANDROID16_DEVICE_COMMIT \
+            RIVA_KERNEL_VERSION J4_DTS_SOURCE_REPO J4_DTS_SOURCE_BRANCH J4_DTS_SOURCE_COMMIT \
+            J4_DTS_SOURCE_BOARD J4_BOOT_PARTITION_BYTES; do
+            printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
+          done
+
+      - name: Install kernel and device-tree build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev rsync device-tree-compiler \
+            clang llvm lld gcc-aarch64-linux-gnu libc6-dev python3
+
+      - name: Fetch pinned Android 16 Riva kernel
+        run: |
+          set -euo pipefail
+          git init --quiet kernel
+          git -C kernel remote add origin "$RIVA_ANDROID16_KERNEL_URL"
+          git -C kernel fetch --depth=1 origin "$RIVA_ANDROID16_KERNEL_BRANCH"
+          git -C kernel checkout --quiet --detach FETCH_HEAD
+          actual=$(git -C kernel rev-parse HEAD)
+          if [ "$actual" != "$RIVA_ANDROID16_KERNEL_COMMIT" ]; then
+            echo "::error title=Riva kernel pin mismatch::expected $RIVA_ANDROID16_KERNEL_COMMIT, got $actual"
+            exit 1
+          fi
+          grep -qx 'VERSION = 4' kernel/Makefile
+          grep -qx 'PATCHLEVEL = 19' kernel/Makefile
+          grep -qx 'SUBLEVEL = 325' kernel/Makefile
+          printf 'kernel_repo=%s\nkernel_branch=%s\nkernel_commit=%s\n' \
+            "$RIVA_ANDROID16_KERNEL_URL" "$RIVA_ANDROID16_KERNEL_BRANCH" "$actual" | tee source-report.txt
+          printf 'android15_kernel_commit=%s\nandroid16_device_commit=%s\nandroid15_device_commit=%s\n' \
+            "$RIVA_ANDROID15_KERNEL_COMMIT" "$RIVA_ANDROID16_DEVICE_COMMIT" \
+            "$RIVA_ANDROID15_DEVICE_COMMIT" | tee -a source-report.txt
+          printf 'j4_dts_source=%s@%s:%s\n' "$J4_DTS_SOURCE_REPO" \
+            "$J4_DTS_SOURCE_COMMIT" "$J4_DTS_SOURCE_BOARD" | tee -a source-report.txt
+
+      - name: Configure and compile J4+ Rev06 DTB against Linux 4.19
+        run: |
+          set -euo pipefail
+          export JOBS="$(nproc)"
+          bash "$J4_DIR/build-dtb-smoke.sh" kernel "$PWD/out" 2>&1 | tee dtb-build.log
+          sha256sum ci/j4primelte/k419/sources.env "$J4_DIR/import-j4-dts.py" \
+            > port-inputs.sha256
+
+      - name: Upload DTB smoke-test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-k419-dtb-smoke-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            out/j4primelte-rev06.dtb
+            out/j4primelte-rev06.dtb.sha256
+            source-report.txt
+            port-inputs.sha256
+            dtb-build.log
+            ci/j4primelte/k419/README.md
+            ci/j4primelte/k419/sources.env
+            ci/j4primelte/k419/import-j4-dts.py
