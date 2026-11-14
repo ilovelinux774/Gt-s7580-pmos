@@ -17,8 +17,7 @@ sublevel=$(sed -n 's/^SUBLEVEL *= *//p' "$tree/Makefile" | head -1)
 mkdir -p "$out"
 make -C "$tree" O="$out" ARCH=arm64 LLVM=1 vendor/msm8937-perf_defconfig
 python3 "$(dirname "${BASH_SOURCE[0]}")/import-j4-dts.py" "$tree"
-make -C "$tree" O="$out" ARCH=arm64 LLVM=1 -j"${JOBS:-$(nproc)}" \
-  arch/arm64/boot/dts/samsung/msm8917-sec-j4primelte-sea-open-r06.dtb
+make -C "$tree" O="$out" ARCH=arm64 LLVM=1 -j"${JOBS:-$(nproc)}" dtbs
 
 dtb="$out/arch/arm64/boot/dts/samsung/msm8917-sec-j4primelte-sea-open-r06.dtb"
 [[ -s "$dtb" ]] || { echo "J4+ Rev06 DTB was not produced: $dtb" >&2; exit 1; }
