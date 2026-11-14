@@ -68,29 +68,19 @@ def main() -> None:
         if source_path.endswith("msm8917-sec-j4primelte-display-r03.dtsi"):
             text = text.replace('"samsung/msm8917-mdss-panels.dtsi"', '"msm8917-mdss-panels.dtsi"')
         if source_path.endswith("msm8917-sec-lte-common.dtsi"):
-            # Riva's 4.19 GCC DTS lacks the old clock_gcc phandle used by
-            # Samsung's optional crypto-acceleration node; omit that node.
-            mcd = re.compile(r"^\tmcd: mcd \{.*?^\t\};\n", re.M | re.S)
-            text, count = mcd.subn(
-                "\t/* Samsung MCD node omitted: legacy clock_gcc phandle. */\n",
-                text,
-                count=1,
-            )
-            if count != 1:
-                raise SystemExit("could not identify the Samsung MCD node")
-            i2c4 = "\ti2c_4: i2c@78b8000 { /* BLSP1 QUP4 */\n"
-            if text.count(i2c4) != 1:
-                raise SystemExit("could not identify the Samsung BLSP1 QUP4 node")
-            text = text.replace(
-                i2c4,
-                i2c4 + '\t\tstatus = "disabled"; /* initial 4.19 bring-up */\n',
-                1,
-            )
+            # Riva's 4.19 GCC DTS lacks legacy clock_gcc and SSR labels in
+            # optional Samsung MCD/modem nodes. Neither is needed for this boot.
+            for node, pattern in (
+                ("MCD", r"^\tmcd: mcd \{.*?^\t\};\n"),
+                ("BLSP1 QUP4", r"^\ti2c_4: i2c@78b8000 \{.*?^\t\};\n"),
+            ):
+                text, count = re.subn(pattern, "", text, count=1, flags=re.M | re.S)
+                if count != 1:
+                    raise SystemExit(f"could not identify the Samsung {node} node")
+            text = text.replace("\t\ti2c4 = &i2c_4;\n", "")
             text += (
                 "\n&soc {\n"
-                "\tqcom,mss@4080000 {\n"
-                "\t\tstatus = \"disabled\"; /* modem not needed for initramfs/RNDIS */\n"
-                "\t};\n"
+                "\t/delete-node/ qcom,mss@4080000;\n"
                 "};\n"
             )
         if source_path.endswith("msm8917-sec-j4primelte-sea-open-r06.dtsi"):

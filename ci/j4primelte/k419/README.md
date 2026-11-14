@@ -37,8 +37,8 @@ data. The J4+ needs its Samsung-specific device tree and board setup, based on
 its own hardware evidence and existing J4+ sources. `import-j4-dts.py` imports
 the pinned Rev06 board DTS and its panel descriptions from the J4+ Linux 4.9
 source, redirects the SoC includes to the 4.19 tree's `vendor-legacy/qcom`
-files, disables the nonessential `sec_ts`, BLSP1 QUP4, and modem nodes, and
-omits MCD, camera, sensor, and NFC overlays for initial bring-up. These
+files, disables the nonessential `sec_ts` node, and omits Samsung MCD, BLSP1
+QUP4, modem, camera, sensor, and NFC descriptions for initial bring-up. These
 peripherals are not needed to reach the standalone initramfs/RNDIS test; some
 legacy I2C/clock/remoteproc labels differ from the Riva 4.19 SoC DTS. These are
 compatibility trims for the first port build, not conclusions about the earlier
