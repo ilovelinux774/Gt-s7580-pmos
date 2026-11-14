@@ -59,6 +59,8 @@ done
 # The IPA debugfs driver has GCC-11 object-size build failures and is not part
 # of this initramfs's generic USB RNDIS path; omit this optional accelerator.
 "$cfg" --file "$out/.config" --disable IPA 2>/dev/null || true
+# The vendor tree has manual KSU call sites but no KSU implementation source.
+"$cfg" --file "$out/.config" --disable KSU_MANUAL_HOOK 2>/dev/null || true
 make -C "$tree" O="$out" "${make_args[@]}" olddefconfig
 for symbol in "${required[@]}"; do
   if ! grep -qx "CONFIG_${symbol}=y" "$out/.config"; then
@@ -66,7 +68,7 @@ for symbol in "${required[@]}"; do
     exit 1
   fi
 done
-for symbol in FORTIFY_SOURCE IPA; do
+for symbol in FORTIFY_SOURCE IPA KSU_MANUAL_HOOK; do
   if grep -qx "CONFIG_${symbol}=y" "$out/.config"; then
     echo "CONFIG_${symbol} remained enabled; the 4.19 bring-up compatibility trim did not apply" >&2
     exit 1
