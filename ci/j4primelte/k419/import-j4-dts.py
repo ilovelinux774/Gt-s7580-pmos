@@ -19,7 +19,6 @@ FILES = (
     "arch/arm64/boot/dts/samsung/msm8917-sec-j4primelte-sea-open-r06.dtsi",
     "arch/arm64/boot/dts/samsung/msm8917-sec-lte-common.dtsi",
     "arch/arm64/boot/dts/samsung/msm8917-pinctrl-sec-j4primelte-sea-open-r06.dtsi",
-    "arch/arm64/boot/dts/samsung/msm8917-camera-sensor-cdp-j4primelte-r04.dtsi",
     "arch/arm64/boot/dts/samsung/msm8917-sec-j4primelte-battery-common-r03.dtsi",
     "arch/arm64/boot/dts/samsung/msm8917-sec-j4primelte-battery-common.dtsi",
     "arch/arm64/boot/dts/samsung/msm8917-j4primelte-s2mu005.dtsi",
@@ -71,6 +70,12 @@ def main() -> None:
         if source_path.endswith("msm8917-sec-j4primelte-display-r03.dtsi"):
             text = text.replace('"samsung/msm8917-mdss-panels.dtsi"', '"msm8917-mdss-panels.dtsi"')
         if source_path.endswith("msm8917-sec-j4primelte-sea-open-r06.dtsi"):
+            # Camera sensors are not part of the first initramfs/RNDIS boot test;
+            # Riva 4.19 labels its I2C buses differently from the Samsung 4.9 DTS.
+            text = text.replace(
+                '#include "msm8917-camera-sensor-cdp-j4primelte-r04.dtsi"',
+                '/* camera sensor DTS omitted for initial 4.19 bring-up */',
+            )
             # The 4.19 reference has no Samsung sec_ts driver. Keep the I2C bus
             # but suppress this nonessential device for the initial boot test.
             pattern = re.compile(r'(\btouchscreen@48\s*\{)(.*?)(\n\s*\};)', re.S)
