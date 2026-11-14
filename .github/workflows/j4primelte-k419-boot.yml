@@ -140,13 +140,13 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export JOBS="$(nproc)"
           set +e
-          bash "$J4_DIR/build-boot-image.sh" kernel "$PWD/out" \\
-            "$J4_BOOT_DONOR_PATH" "$PWD/systemd-debug-initramfs.cpio.xz" \\
+          bash "$J4_DIR/build-boot-image.sh" kernel "$PWD/out" \
+            "$J4_BOOT_DONOR_PATH" "$PWD/systemd-debug-initramfs.cpio.xz" \
             2>&1 | tee boot-build.log
           rc=${PIPESTATUS[0]}
           set -e
           if [ "$rc" -ne 0 ]; then
-            grep -m 20 -E 'error:|Error [0-9]+|fatal:|FAILED|missing |required diagnostic|undefined reference|No rule to make' boot-build.log \\
+            grep -m 20 -E 'error:|Error [0-9]+|fatal:|FAILED|missing |required diagnostic|undefined reference|No rule to make' boot-build.log \
               | while IFS= read -r line; do echo "::error title=Linux 4.19 BOOT build failure::$line"; done || true
             while IFS= read -r line; do
               escaped=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r/%0D/g')
