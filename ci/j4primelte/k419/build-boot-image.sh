@@ -56,6 +56,9 @@ done
 # a bring-up build; record the compatibility tradeoff rather than silently
 # accepting a broken C build.
 "$cfg" --file "$out/.config" --disable FORTIFY_SOURCE 2>/dev/null || true
+# The IPA debugfs driver has GCC-11 object-size build failures and is not part
+# of this initramfs's generic USB RNDIS path; omit this optional accelerator.
+"$cfg" --file "$out/.config" --disable IPA 2>/dev/null || true
 make -C "$tree" O="$out" "${make_args[@]}" olddefconfig
 for symbol in "${required[@]}"; do
   if ! grep -qx "CONFIG_${symbol}=y" "$out/.config"; then
@@ -63,10 +66,12 @@ for symbol in "${required[@]}"; do
     exit 1
   fi
 done
-if grep -qx 'CONFIG_FORTIFY_SOURCE=y' "$out/.config"; then
-  echo 'CONFIG_FORTIFY_SOURCE remained enabled; this GCC 11 compatibility workaround did not apply' >&2
-  exit 1
-fi
+for symbol in FORTIFY_SOURCE IPA; do
+  if grep -qx "CONFIG_${symbol}=y" "$out/.config"; then
+    echo "CONFIG_${symbol} remained enabled; the 4.19 bring-up compatibility trim did not apply" >&2
+    exit 1
+  fi
+done
 cp "$out/.config" "$out/config.full"
 
 echo '=== Build the J4+ Rev06 DTB and 4.19 kernel image'
