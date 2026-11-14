@@ -27,6 +27,8 @@
 + COMPAT
 + BLK_DEV_INITRD
 + RD_GZIP
+# The standalone systemd debug initramfs is xz-compressed to fit the 32 MiB BOOT partition.
++ RD_XZ
 # Device tree support is def_bool y on arm64; naming it keeps the audit at the
 # end of the build honest (every REQUIRED symbol is enabled somewhere).
 + OF

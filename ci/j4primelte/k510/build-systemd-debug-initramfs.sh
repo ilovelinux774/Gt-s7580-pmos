@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
-  echo "usage: $0 <arm64-deb-directory> <work-directory> <output-initramfs.cpio.gz>" >&2
+  echo "usage: $0 <arm64-deb-directory> <work-directory> <output-initramfs.cpio.xz>" >&2
   exit 2
 fi
 
@@ -29,6 +29,12 @@ for package in "${packages[@]}"; do
   dpkg-deb -x "$package" "$root"
 done
 ((arm64_count > 0)) || { echo "no arm64 packages found in $deb_dir" >&2; exit 1; }
+
+# Package payloads include documentation, translations, headers and caches
+# intended for a full distro install. None is needed by this debug initramfs.
+rm -rf "$root/usr/share" "$root/usr/local/share" "$root/usr/include" \
+  "$root/usr/lib/pkgconfig" "$root/usr/lib/cmake" \
+  "$root/var/cache" "$root/var/lib"
 
 systemd_bin="$root/usr/lib/systemd/systemd"
 [[ -x $systemd_bin ]] || systemd_bin="$root/lib/systemd/systemd"

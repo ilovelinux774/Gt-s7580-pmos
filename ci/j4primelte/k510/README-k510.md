@@ -231,8 +231,8 @@ to test systemd as PID 1. It is **not** either of the pmOS-rootfs boot images.
 Its components are:
 
 * the same arm64 7.1.3 kernel and mainline-compatible J4+ FDT;
-* a newly built minimal initramfs assembled from Ubuntu 22.04 arm64 systemd,
-  BusyBox-static, and iproute2 packages;
+* a newly built minimal xz-compressed initramfs assembled from Ubuntu 22.04
+  arm64 systemd, BusyBox-static, and iproute2 packages;
 * `/init` execs systemd directly, with `rd.systemd.unit=emergency.target`;
 * systemd starts a dedicated configfs gadget unit for RNDIS (`usb0`,
   `172.16.42.1/24`) and an ACM serial function for a direct shell on
@@ -248,9 +248,11 @@ server or SSH daemon; for a network test, configure the host side as
 
 This image tests whether the kernel and this packaged systemd initramfs can
 start systemd, bind the device controller, configure RNDIS, and reach an
-emergency shell. CI validates package/image structure only; phone boot, USB
-enumeration, and interactive console behavior still need hardware testing. Keep
-the known-good recovery image available and flash BOOT only.
+emergency shell. The known J4+ BOOT partition is 33,554,432 bytes; CI refuses
+the debug image if it exceeds that limit. CI validates package/image structure
+only; phone boot, USB enumeration, and interactive console behavior still need
+hardware testing. Keep the known-good recovery image available and flash BOOT
+only.
 
 ## Testing the pmOS-rootfs images on the phone (no UART; pstore is best-effort)
 

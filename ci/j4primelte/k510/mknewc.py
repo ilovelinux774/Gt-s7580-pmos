@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Write a deterministic gzip-compressed `newc` archive of an initramfs tree."""
+"""Write a deterministic xz-compressed `newc` archive of an initramfs tree."""
 from __future__ import annotations
-import gzip
+import lzma
 import os
 import stat
 import sys
@@ -54,14 +54,15 @@ def build(root: Path) -> bytes:
 
 def main() -> int:
     if len(sys.argv) != 3:
-        print(f"usage: {sys.argv[0]} <root-directory> <output.cpio.gz>", file=sys.stderr)
+        print(f"usage: {sys.argv[0]} <root-directory> <output.cpio.xz>", file=sys.stderr)
         return 2
     root, output = Path(sys.argv[1]), Path(sys.argv[2])
     if not root.is_dir():
         print(f"not a directory: {root}", file=sys.stderr)
         return 1
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(gzip.compress(build(root), compresslevel=9, mtime=0))
+    output.write_bytes(lzma.compress(build(root), format=lzma.FORMAT_XZ,
+                                     check=lzma.CHECK_CRC32, preset=9 | lzma.PRESET_EXTREME))
     print(f"created {output} ({output.stat().st_size} bytes)")
     return 0
 

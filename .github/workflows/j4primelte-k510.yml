@@ -551,7 +551,7 @@ jobs:
         run: |
           set -euo pipefail
           bash "$J4_DIR/build-systemd-debug-initramfs.sh" \
-            systemd-debs systemd-debug-build systemd-debug-initramfs.cpio.gz
+            systemd-debs systemd-debug-build systemd-debug-initramfs.cpio.xz
           python3 "$J4_DIR/debug-cmdline.py" donor/boot.img \
             > systemd-debug-cmdline.txt
           if grep -Eq '(^| )(root|rootfstype|rootflags|init|rdinit)=' systemd-debug-cmdline.txt; then
@@ -559,8 +559,8 @@ jobs:
             exit 1
           fi
           grep -q 'rd.systemd.unit=emergency.target' systemd-debug-cmdline.txt
-          sha256sum systemd-debug-initramfs.cpio.gz > systemd-debug-initramfs.cpio.gz.sha256
-          cat systemd-debug-cmdline.txt systemd-debug-initramfs.cpio.gz.sha256
+          sha256sum systemd-debug-initramfs.cpio.xz > systemd-debug-initramfs.cpio.xz.sha256
+          cat systemd-debug-cmdline.txt systemd-debug-initramfs.cpio.xz.sha256
 
       - name: Repack kernel and debug initramfs
         if: env.J4_DRY_RUN != 'true'
@@ -602,7 +602,7 @@ jobs:
           # initramfs. It never executes the donor's pmOS init or mounts rootfs.
           ./repack-boot repack donor/boot.img \
             --kernel-new out/kernel.payload \
-            --ramdisk-new systemd-debug-initramfs.cpio.gz \
+            --ramdisk-new systemd-debug-initramfs.cpio.xz \
             --append-dtb "${BOARD_DTB:?compiled mainline DTB missing}" \
             --cmdline-replace "$(cat systemd-debug-cmdline.txt)" \
             --cmdline-clear-extra \
@@ -613,6 +613,12 @@ jobs:
           grep -q 'ramdisk.*replaced donor payload' systemd-debug-repack-report.txt
           grep -q 'rd.systemd.unit=emergency.target' boot-k510-systemd-debug-report.txt
           grep -q 'dt_size.*0' boot-k510-systemd-debug-report.txt
+          debug_bytes=$(stat -c %s boot-k510-systemd-debug.img)
+          if (( debug_bytes > 33554432 )); then
+            echo "::error title=Debug image exceeds BOOT partition::${debug_bytes} bytes exceeds 33554432-byte /dev/block/mmcblk0p23"
+            exit 1
+          fi
+          echo "systemd debug image size ${debug_bytes} bytes (BOOT partition limit 33554432)"
           python3 - <<'PY'
           from pathlib import Path
           import struct
@@ -627,7 +633,7 @@ jobs:
           cmdline = image[64:64 + 512].split(b'\0', 1)[0].decode()
           extra = image[64 + 512 + 32:64 + 512 + 32 + 512].split(b'\0', 1)[0]
           fdt = Path('board-dtb/j4-board.dtb').read_bytes()
-          initrd = Path('systemd-debug-initramfs.cpio.gz').read_bytes()
+          initrd = Path('systemd-debug-initramfs.cpio.xz').read_bytes()
           assert dt_size == 0
           assert kernel.endswith(fdt)
           assert ramdisk == initrd
@@ -732,8 +738,8 @@ jobs:
             boot-k510-systemd-debug.img
             boot-k510-systemd-debug.img.sha256
             boot-k510-systemd-debug-report.txt
-            systemd-debug-initramfs.cpio.gz
-            systemd-debug-initramfs.cpio.gz.sha256
+            systemd-debug-initramfs.cpio.xz
+            systemd-debug-initramfs.cpio.xz.sha256
             systemd-debug-cmdline.txt
             systemd-debug-repack-report.txt
             appended-dtb-repack-report.txt
