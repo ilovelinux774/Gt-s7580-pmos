@@ -1,4 +1,4 @@
-name: J4+ Linux 4.9.237 + systemd 249 debug boot
+name: J4+ Linux 4.9.237 + systemd 249 no-touch diagnostic boot
 
 on:
   push:
@@ -65,8 +65,10 @@ jobs:
             echo "::error title=Kernel pin mismatch::expected $J4_K49_KERNEL_COMMIT, got $actual"
             exit 1
           fi
-          printf 'source=%s\nbranch=%s\ncommit=%s\n' \
-            "$J4_K49_KERNEL_URL" "$J4_K49_KERNEL_BRANCH" "$actual" | tee source-report.txt
+          printf 'source=%s\nbranch=%s\ncommit=%s\ndiagnostic_dts_helper=%s\n' \
+            "$J4_K49_KERNEL_URL" "$J4_K49_KERNEL_BRANCH" "$actual" \
+            "$J4_DIR/disable-sec-ts.py" | tee source-report.txt
+          sha256sum "$J4_DIR/disable-sec-ts.py" | tee -a source-report.txt
           grep -q '^VERSION = 4$' kernel/Makefile
           grep -q '^PATCHLEVEL = 9$' kernel/Makefile
           grep -q '^SUBLEVEL = 237$' kernel/Makefile
@@ -114,7 +116,7 @@ jobs:
           print(f'prepared {len(records)} arm64/all packages')
           PY
 
-      - name: Build Linux 4.9.237 kernel and Rev06 device tree
+      - name: Build Linux 4.9.237 kernel and Rev06 no-touch device tree
         run: |
           set -euo pipefail
           export CROSS_COMPILE=aarch64-linux-gnu-
@@ -148,7 +150,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: j4primelte-k49-kernel-failure-${{ github.run_id }}
+          name: j4primelte-k49-no-touch-kernel-failure-${{ github.run_id }}
           if-no-files-found: warn
           retention-days: 7
           path: |
@@ -191,32 +193,34 @@ jobs:
             --dt "$QCDT_IMAGE" \
             --cmdline-replace "$(cat systemd-debug-cmdline.txt)" \
             --cmdline-clear-extra \
-            --out boot-k49-systemd-debug.img | tee repack-report.txt
-          ./repack-boot inspect boot-k49-systemd-debug.img | tee boot-report.txt
+            --out boot-k49-systemd-debug-no-touch.img | tee repack-report.txt
+          ./repack-boot inspect boot-k49-systemd-debug-no-touch.img | tee boot-report.txt
           grep -q 'ramdisk.*replaced donor payload' repack-report.txt
           grep -q 'qcdt.*v3' boot-report.txt
-          bytes=$(stat -c %s boot-k49-systemd-debug.img)
+          bytes=$(stat -c %s boot-k49-systemd-debug-no-touch.img)
           if (( bytes > J4_K49_BOOT_PARTITION_BYTES )); then
             echo "::error title=Image exceeds BOOT partition::$bytes > $J4_K49_BOOT_PARTITION_BYTES bytes"
             exit 1
           fi
           echo "BOOT image size: $bytes / $J4_K49_BOOT_PARTITION_BYTES bytes"
-          sha256sum boot-k49-systemd-debug.img > boot-k49-systemd-debug.img.sha256
-          cat boot-k49-systemd-debug.img.sha256
+          sha256sum boot-k49-systemd-debug-no-touch.img > boot-k49-systemd-debug-no-touch.img.sha256
+          cat boot-k49-systemd-debug-no-touch.img.sha256
 
-      - name: Upload debug image and audit reports
+      - name: Upload no-touch debug image, DTS patch, and audit reports
         uses: actions/upload-artifact@v4
         with:
-          name: j4primelte-k49-systemd-debug-${{ github.run_id }}
+          name: j4primelte-k49-systemd-debug-no-touch-${{ github.run_id }}
           if-no-files-found: error
           retention-days: 14
           path: |
-            boot-k49-systemd-debug.img
-            boot-k49-systemd-debug.img.sha256
+            boot-k49-systemd-debug-no-touch.img
+            boot-k49-systemd-debug-no-touch.img.sha256
             boot-report.txt
             repack-report.txt
             donor-report.txt
             source-report.txt
+            ci/j4primelte/k49/disable-sec-ts.py
+            ci/j4primelte/k49/README.md
             qcdt-report.txt
             systemd-debug-cmdline.txt
             systemd-debug-initramfs.cpio.xz

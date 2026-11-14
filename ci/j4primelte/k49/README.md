@@ -1,4 +1,4 @@
-# J4+ Linux 4.9 + systemd 249 debug candidate
+# J4+ Linux 4.9 + systemd 249 no-touch diagnostic candidate
 
 This is a separate, BOOT-only diagnostic path; it does not replace the existing
 7.1.3 experiment or build/mount an installed root filesystem.
@@ -39,6 +39,27 @@ supported. These flags can narrow down synchronous initcall failures, but they
 do not identify every asynchronous probe or prove the last logged driver caused
 a later hang. Pstore is not required for the boot itself, but persistent logs
 are needed to diagnose a reset that occurs after startup.
+
+## Touchscreen-isolation experiment
+
+The latest K49 pstore shows `sec_ts_init` starting and its `sec_ts_probe` making
+progress through device identification, but has no matching initcall return
+before the capture ends. This makes the touchscreen a useful test target, not a
+confirmed cause: an abrupt pstore cutoff cannot prove that execution remained
+inside the driver. Earlier camera/video initcall messages in the same capture
+return, and the log does not demonstrate that camera was disabled or that a
+camera change fixed anything.
+
+The diagnostic build applies
+`disable-sec-ts.py` to the pinned Rev06 DTS.
+It disables only the `sec,sec_ts` touchscreen node at I2C address `0x48`; the I2C
+controller and other devices remain enabled. This is a boot-isolation
+experiment, not a permanent hardware-support change or a proven fix. The image
+is identified by kernel localversion `-j4-k49-systemd-debug-no-touch` and output
+name `boot-k49-systemd-debug-no-touch.img`. If startup proceeds farther, retain
+the new pstore and compare it with the touchscreen-enabled capture before
+concluding causality. The build still uses the standalone initramfs and never
+mounts or switches to an installed root filesystem.
 
 ## Build/test boundary
 

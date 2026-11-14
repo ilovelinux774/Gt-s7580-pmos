@@ -7,6 +7,8 @@ out=${2:?output directory}
 : "${CROSS_COMPILE:=aarch64-linux-gnu-}"
 jobs=${JOBS:-$(nproc)}
 defconfig=j4primelte-4.9_sea_defconfig
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+touchscreen_test="$script_dir/disable-sec-ts.py"
 expected_commit=5713b6504118bcee2ef2aa7823c3446142e2166b
 
 [[ -f "$tree/Makefile" ]] || { echo "not a kernel source tree: $tree" >&2; exit 1; }
@@ -30,6 +32,7 @@ fi
 [[ -f "$tree/arch/arm64/configs/$defconfig" ]] || {
   echo "missing J4+ defconfig: $defconfig" >&2; exit 1;
 }
+[[ -f "$touchscreen_test" ]] || { echo "missing touchscreen-isolation helper: $touchscreen_test" >&2; exit 1; }
 
 mkdir -p "$out"
 export ARCH=arm64
@@ -40,6 +43,9 @@ export KBUILD_BUILD_VERSION=1
 export SOURCE_DATE_EPOCH=0
 export KBUILD_BUILD_TIMESTAMP='Thu, 01 Jan 1970 00:00:00 +0000'
 export LC_ALL=C
+
+echo '=== apply controlled touchscreen-isolation DTS test'
+python3 "$touchscreen_test" "$tree/arch/arm64/boot/dts/samsung/msm8917-sec-j4primelte-sea-open-r06.dtsi"
 
 make_args=(ARCH=arm64 "CROSS_COMPILE=$CROSS_COMPILE" \
   'HOSTCFLAGS=-O2 -Wall -Wmissing-prototypes -Wstrict-prototypes -fomit-frame-pointer -std=gnu89 -fcommon')
@@ -64,7 +70,7 @@ for symbol in ANDROID_PARANOID_NETWORK SYSFS_DEPRECATED FW_LOADER_USER_HELPER \
   USB_G_ANDROID USB_ANDROID_SAMSUNG_COMPOSITE; do
   "$cfg" --file "$out/.config" --disable "$symbol" 2>/dev/null || true
 done
-"$cfg" --file "$out/.config" --set-str LOCALVERSION '-j4-k49-systemd-debug'
+"$cfg" --file "$out/.config" --set-str LOCALVERSION '-j4-k49-systemd-debug-no-touch'
 make -C "$tree" O="$out" "${make_args[@]}" olddefconfig
 
 for symbol in "${required[@]}"; do
