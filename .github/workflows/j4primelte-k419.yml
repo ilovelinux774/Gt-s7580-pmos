@@ -78,7 +78,21 @@ jobs:
         run: |
           set -euo pipefail
           export JOBS="$(nproc)"
+          set +e
           bash "$J4_DIR/build-dtb-smoke.sh" kernel "$PWD/out" 2>&1 | tee dtb-build.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            grep -m 30 -E 'error:|Error [0-9]+|No rule to make|No such file|not found|FATAL|fatal error|undefined reference' dtb-build.log \
+              | while IFS= read -r line; do echo "::error title=4.19 J4 DTB build failure::$line"; done || true
+            {
+              echo '### 4.19 J4 DTB failure tail'
+              echo '```text'
+              tail -n 80 dtb-build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
           sha256sum ci/j4primelte/k419/sources.env "$J4_DIR/import-j4-dts.py" \
             > port-inputs.sha256
 
