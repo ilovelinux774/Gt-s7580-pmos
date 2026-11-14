@@ -83,8 +83,8 @@ jobs:
           rc=${PIPESTATUS[0]}
           set -e
           if [ "$rc" -ne 0 ]; then
-            grep -mi 40 -E 'error|warning|label|syntax|No rule to make|No such file|not found|FATAL|undefined reference' dtb-build.log \
-              | while IFS= read -r line; do echo "::error title=4.19 J4 DTB build failure::$line"; done || true
+            tail -n 30 dtb-build.log \
+              | while IFS= read -r line; do escaped=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r/%0D/g'); echo "::error title=4.19 J4 DTB log tail::$escaped"; done || true
             {
               echo '### 4.19 J4 DTB failure tail'
               echo '```text'
