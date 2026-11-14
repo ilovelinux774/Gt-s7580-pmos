@@ -67,11 +67,30 @@ for applet in grep mkdir mount seq sleep umount; do
   ln -sfn "${busybox#"$root"}" "$root/bin/$applet"
 done
 
+cat > "$root/usr/libexec/j4-debug-screen" <<'EOF'
+#!/bin/sh
+# Write a high-contrast status page to the framebuffer VT, independently of
+# pstore and USB. The kernel DT supplies a simple framebuffer on this board.
+set -u
+screen=/dev/tty1
+[ -c "$screen" ] || screen=/dev/console
+[ -c "$screen" ] || exit 0
+{
+  printf '\033[2J\033[H\033[1;36mJ4+ MAINLINE DEBUG BOOT\033[0m\n\n'
+  printf '\033[1;37m%s\033[0m\n' "$@"
+} > "$screen" 2>/dev/null || true
+if [ -w /dev/kmsg ]; then
+  printf 'j4-debug-screen: %s\n' "$*" > /dev/kmsg 2>/dev/null || true
+fi
+EOF
+chmod 0755 "$root/usr/libexec/j4-debug-screen"
+
 systemd_exec=${systemd_bin#"$root"}
 cat > "$root/init" <<EOF
 #!/bin/sh
 # PID 1 is systemd in initrd mode. No pmOS init, root search, or switch_root.
 export PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+/usr/libexec/j4-debug-screen 'KERNEL STARTED' 'INITRAMFS STARTED' 'STARTING SYSTEMD AS PID 1'
 exec $systemd_exec --system
 EOF
 chmod 0755 "$root/init"
@@ -80,11 +99,13 @@ cat > "$root/usr/libexec/j4-debug-rndis" <<'EOF'
 #!/bin/sh
 set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+/usr/libexec/j4-debug-screen 'SYSTEMD IS RUNNING' 'PROBING USB CONTROLLER'
 
 # systemd mounts sysfs/devtmpfs; mount configfs if the kernel exposes it.
 mkdir -p /sys/kernel/config
 if ! grep -q ' /sys/kernel/config configfs ' /proc/mounts; then
   mount -t configfs configfs /sys/kernel/config || {
+    /usr/libexec/j4-debug-screen 'SYSTEMD IS RUNNING' 'CONFIGFS MOUNT FAILED'
     echo 'debug-rndis: configfs mount failed' >/dev/kmsg 2>/dev/null || true
     exit 1
   }
@@ -101,9 +122,11 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 [ -n "$udc" ] || {
+  /usr/libexec/j4-debug-screen 'SYSTEMD IS RUNNING' 'NO USB DEVICE CONTROLLER FOUND'
   echo 'debug-rndis: no USB device controller appeared' >/dev/kmsg 2>/dev/null || true
   exit 1
 }
+/usr/libexec/j4-debug-screen 'USB CONTROLLER FOUND' "$udc" 'CONFIGURING RNDIS + ACM'
 
 g=/sys/kernel/config/usb_gadget/j4debug
 mkdir -p "$g"
@@ -132,8 +155,13 @@ if ! echo "$udc" > "$g/UDC"; then
   rm -f "$g/configs/c.1/acm.usb0"
   rmdir "$g/functions/acm.usb0" 2>/dev/null || true
   echo "debug-rndis: ACM unavailable; retrying RNDIS-only on $udc" >/dev/kmsg 2>/dev/null || true
-  echo "$udc" > "$g/UDC" || exit 1
+  echo "$udc" > "$g/UDC" || {
+    /usr/libexec/j4-debug-screen 'USB CONTROLLER FOUND' "$udc" 'GADGET BIND FAILED'
+    exit 1
+  }
 fi
+
+/usr/libexec/j4-debug-screen 'USB GADGET BOUND' "$udc" 'WAITING FOR RNDIS NETWORK'
 
 # Configfs RNDIS normally creates usb0. Assign a fixed device address; the
 # host can use 172.16.42.2/24 for this no-DHCP diagnostic.
@@ -146,6 +174,7 @@ for attempt in $(seq 1 15); do
   sleep 1
 done
 [ -n "$netdev" ] || {
+  /usr/libexec/j4-debug-screen 'USB GADGET BOUND' "$udc" 'RNDIS NETWORK INTERFACE MISSING'
   echo 'debug-rndis: RNDIS function did not create usb0' >/dev/kmsg 2>/dev/null || true
   exit 1
 }
@@ -159,6 +188,7 @@ for attempt in $(seq 1 10); do
   sleep 1
 done
 
+/usr/libexec/j4-debug-screen 'RNDIS IS ACTIVE' 'DEVICE: 172.16.42.1' "CONTROLLER: $udc" 'USB ACM SHELL MAY BE AVAILABLE'
 echo "debug-rndis: gadget active on UDC $udc; RNDIS usb0=172.16.42.1" >/dev/kmsg 2>/dev/null || true
 EOF
 chmod 0755 "$root/usr/libexec/j4-debug-rndis"

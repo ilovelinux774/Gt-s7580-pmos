@@ -1,0 +1,192 @@
+name: J4+ Linux 4.9.237 + systemd 249 debug boot
+
+on:
+  push:
+    paths:
+      - 'ci/j4primelte/k49/**'
+      - '.github/workflows/j4primelte-k49.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: j4primelte-k49-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      J4_DIR: ci/j4primelte/k49
+      SHARED_DIR: ci/j4primelte/k510
+    steps:
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Load pinned inputs
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source "$J4_DIR/sources.env"
+          for name in J4_K49_KERNEL_URL J4_K49_KERNEL_BRANCH J4_K49_KERNEL_COMMIT \
+            J4_K49_KERNEL_VERSION J4_K49_DEFCONFIG J4_K49_BOARD_DTB \
+            J4_K49_DONOR_URL J4_K49_DONOR_SHA256 J4_K49_BOOT_PARTITION_BYTES; do
+            printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
+          done
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev rsync device-tree-compiler \
+            gcc gcc-aarch64-linux-gnu libc6-dev python3 dpkg-dev xz-utils \
+            zip unzip
+          gcc -O2 -Wall -Wextra -Werror -o repack-boot "$SHARED_DIR/repack-boot.c"
+          ./repack-boot inspect boot.img >/dev/null
+
+      - name: Fetch pinned J4+ Linux 4.9 tree
+        run: |
+          set -euo pipefail
+          git init --quiet kernel
+          git -C kernel remote add origin "$J4_K49_KERNEL_URL"
+          git -C kernel fetch --depth=1 origin "$J4_K49_KERNEL_BRANCH"
+          git -C kernel checkout --quiet --detach FETCH_HEAD
+          actual=$(git -C kernel rev-parse HEAD)
+          if [ "$actual" != "$J4_K49_KERNEL_COMMIT" ]; then
+            echo "::error title=Kernel pin mismatch::expected $J4_K49_KERNEL_COMMIT, got $actual"
+            exit 1
+          fi
+          printf 'source=%s\nbranch=%s\ncommit=%s\n' \
+            "$J4_K49_KERNEL_URL" "$J4_K49_KERNEL_BRANCH" "$actual" | tee source-report.txt
+          grep -q '^VERSION = 4$' kernel/Makefile
+          grep -q '^PATCHLEVEL = 9$' kernel/Makefile
+          grep -q '^SUBLEVEL = 237$' kernel/Makefile
+          test -f "kernel/arch/arm64/configs/$J4_K49_DEFCONFIG"
+
+      - name: Download arm64 systemd 249 initramfs packages
+        run: |
+          set -euo pipefail
+          codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          aptroot="$PWD/apt-arm64"
+          mkdir -p "$aptroot/lists/partial" "$aptroot/archives/partial" "$aptroot/sourceparts" systemd-debs
+          : > "$aptroot/status"
+          : > "$aptroot/extended_states"
+          printf 'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports %s main universe\n' "$codename" > "$aptroot/sources.list"
+          printf 'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports %s-updates main universe\n' "$codename" >> "$aptroot/sources.list"
+          printf 'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports %s-security main universe\n' "$codename" >> "$aptroot/sources.list"
+          apt_opts=(
+            -o Dir::State::status="$aptroot/status"
+            -o Dir::State::extended_states="$aptroot/extended_states"
+            -o Dir::State::lists="$aptroot/lists"
+            -o Dir::Cache::archives="$aptroot/archives"
+            -o Dir::Etc::sourcelist="$aptroot/sources.list"
+            -o Dir::Etc::sourceparts="$aptroot/sourceparts"
+            -o APT::Architecture=arm64
+            -o APT::Architectures=arm64
+          )
+          sudo apt-get "${apt_opts[@]}" update
+          sudo apt-get "${apt_opts[@]}" --download-only --no-install-recommends -y install \
+            systemd busybox-static iproute2
+          cp "$aptroot"/archives/*.deb systemd-debs/
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          packages = sorted(Path('systemd-debs').glob('*.deb'))
+          records = [(p, subprocess.check_output(['dpkg-deb', '-f', str(p), 'Package'], text=True).strip(),
+                      subprocess.check_output(['dpkg-deb', '-f', str(p), 'Architecture'], text=True).strip(),
+                      subprocess.check_output(['dpkg-deb', '-f', str(p), 'Version'], text=True).strip())
+                     for p in packages]
+          systemd = [row for row in records if row[1] == 'systemd' and row[2] == 'arm64']
+          if len(systemd) != 1 or not systemd[0][3].startswith('249.'):
+              raise SystemExit(f'expected one arm64 systemd 249 package, got {systemd}')
+          if not any(row[1] == 'busybox-static' and row[2] == 'arm64' for row in records):
+              raise SystemExit('missing arm64 busybox-static')
+          print(f'systemd package pin: {systemd[0][3]}')
+          print(f'prepared {len(records)} arm64/all packages')
+          PY
+
+      - name: Build Linux 4.9.237 kernel and Rev06 device tree
+        run: |
+          set -euo pipefail
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export JOBS="$(nproc)"
+          bash "$J4_DIR/build-kernel.sh" kernel "$PWD/out"
+          test -s out/kernel.payload
+          test -s out/j4primelte-rev06.dtb
+          python3 "$SHARED_DIR/qcdt.py" --dtb out/j4primelte-rev06.dtb \
+            --out j4primelte-rev06.qcdt --page-size 4096 | tee qcdt-report.txt
+          echo "QCDT_IMAGE=$PWD/j4primelte-rev06.qcdt" >> "$GITHUB_ENV"
+
+      - name: Build systemd 249 debug initramfs
+        run: |
+          set -euo pipefail
+          bash "$SHARED_DIR/build-systemd-debug-initramfs.sh" \
+            systemd-debs systemd-debug-build systemd-debug-initramfs.cpio.xz
+          python3 "$J4_DIR/debug-cmdline.py" boot.img > systemd-debug-cmdline.txt
+          grep -q 'systemd.unified_cgroup_hierarchy=0' systemd-debug-cmdline.txt
+          if grep -Eq '(^| )(root|rootfstype|rootflags|init|rdinit)=' systemd-debug-cmdline.txt; then
+            echo 'root/init argument survived command-line filtering' >&2
+            exit 1
+          fi
+          sha256sum systemd-debug-initramfs.cpio.xz > initramfs.sha256
+          cat systemd-debug-cmdline.txt initramfs.sha256
+
+      - name: Fetch and verify known-good donor boot header
+        run: |
+          set -euo pipefail
+          mkdir -p donor
+          curl -fL --retry 3 --retry-delay 5 -o donor/boot.img "$J4_K49_DONOR_URL"
+          echo "$J4_K49_DONOR_SHA256  donor/boot.img" | sha256sum -c -
+          ./repack-boot inspect donor/boot.img | tee donor-report.txt
+          grep -q 'page_size.*4096' donor-report.txt
+
+      - name: Repack and enforce the BOOT partition limit
+        run: |
+          set -euo pipefail
+          ./repack-boot repack donor/boot.img \
+            --kernel-new out/kernel.payload \
+            --ramdisk-new systemd-debug-initramfs.cpio.xz \
+            --dt "$QCDT_IMAGE" \
+            --cmdline-replace "$(cat systemd-debug-cmdline.txt)" \
+            --cmdline-clear-extra \
+            --out boot-k49-systemd-debug.img | tee repack-report.txt
+          ./repack-boot inspect boot-k49-systemd-debug.img | tee boot-report.txt
+          grep -q 'ramdisk.*replaced donor payload' repack-report.txt
+          grep -q 'qcdt.*v3' boot-report.txt
+          bytes=$(stat -c %s boot-k49-systemd-debug.img)
+          if (( bytes > J4_K49_BOOT_PARTITION_BYTES )); then
+            echo "::error title=Image exceeds BOOT partition::$bytes > $J4_K49_BOOT_PARTITION_BYTES bytes"
+            exit 1
+          fi
+          echo "BOOT image size: $bytes / $J4_K49_BOOT_PARTITION_BYTES bytes"
+          sha256sum boot-k49-systemd-debug.img > boot-k49-systemd-debug.img.sha256
+          cat boot-k49-systemd-debug.img.sha256
+
+      - name: Upload debug image and audit reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-k49-systemd-debug-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            boot-k49-systemd-debug.img
+            boot-k49-systemd-debug.img.sha256
+            boot-report.txt
+            repack-report.txt
+            donor-report.txt
+            source-report.txt
+            qcdt-report.txt
+            systemd-debug-cmdline.txt
+            systemd-debug-initramfs.cpio.xz
+            initramfs.sha256
+            out/config.full
+            out/SHA256SUMS

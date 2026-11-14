@@ -19,13 +19,8 @@ name: j4primelte 5.10 bring-up (systemd-capable kernel)
 #     flash-and-report procedure that works without UART (see REPORTING.md).
 
 on:
-  # workflow_dispatch only appears in the Actions UI once this file is on the
-  # default branch. Until then, pushes that touch these paths run the build, so
-  # the pipeline can be validated on a feature branch.
-  push:
-    paths:
-      - 'ci/j4primelte/k510/**'
-      - '.github/workflows/j4primelte-k510.yml'
+  # Retained for reproducibility, but disabled on push while the 4.9 device
+  # kernel is the active bring-up path. It can still be run manually.
   workflow_dispatch:
     inputs:
       defconfig:

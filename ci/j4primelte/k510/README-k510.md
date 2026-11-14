@@ -228,6 +228,13 @@ network interface and DHCP.
 
 The workflow also emits a separate `boot-k510-systemd-debug.img` specifically
 to test systemd as PID 1. It is **not** either of the pmOS-rootfs boot images.
+Its initramfs writes boot-stage status directly to framebuffer VT1: kernel/initramfs
+entry, systemd startup, USB-controller discovery, gadget binding, and RNDIS setup.
+This is independent of pstore and host USB enumeration. A visible status screen
+therefore tells us how far userspace got; a stuck Samsung logo with no status
+still leaves the kernel/framebuffer handoff unresolved. It depends on the
+bootloader-provided simple framebuffer being usable by the mainline kernel.
+
 Its components are:
 
 * the same arm64 7.1.3 kernel and mainline-compatible J4+ FDT;
