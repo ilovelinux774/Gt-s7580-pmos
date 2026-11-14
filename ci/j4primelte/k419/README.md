@@ -48,21 +48,21 @@ In particular, Redmi's Android build uses a 2,048-byte boot page and a
 this project must retain the J4+ BOOT limit of 33,554,432 bytes and use the
 J4+-appropriate boot container/header and DT payload.
 
-## Initial sequence
+## Build status and BOOT image
 
-1. Compare Android 15 and 16 kernel trees/config fragments, keeping 16-dev as
-the primary reference and 15-dev as a cross-check.
-2. Inventory the existing J4+ board DTS, defconfig, boot header, and device
-   peripherals; separate SoC-common code from Xiaomi board-specific pieces.
-3. Add a J4+-specific 4.19 board configuration/DTS and build audit without
-   changing or importing the Riva boot image or rootfs.
-4. Package a standalone initramfs diagnostic image and enforce the BOOT limit
-   before any device test. A successful compile is not evidence of a successful
-   hardware boot.
+`build-dtb-smoke.sh` is the fast DTB-only check. `build-boot-image.sh` is the
+end-to-end Linux 4.19.325 image builder: it configures the Android 16 Riva
+`vendor/msm8937-perf_defconfig`, enables and verifies the initramfs/systemd and
+USB diagnostic options, builds `Image.gz` plus the Samsung Rev06 DTB, packages
+the DTB as Qualcomm QCDT v3, and repacks the pinned J4+ Android v0 boot header.
+It replaces the donor's kernel and ramdisk; it does not retain the donor
+pmOS-initramfs or its root UUID command line.
 
-The first automated milestone is a DTB-only smoke test: it configures the
-pinned Android 16 kernel and compiles the imported J4+ Rev06 device tree. This
-validates source compatibility and the board-DTS include closure, not the kernel
-image or hardware boot. The next stage is the 4.19 kernel/config build and BOOT
-image packaging. Keep changes isolated under `ci/j4primelte/k419/` until the
-source/config/device-tree audit supports a reproducible build.
+The ramdisk is a standalone Ubuntu 22.04 arm64 systemd 249 diagnostic initramfs
+with an emergency shell and optional RNDIS/USB-ACM access. The command line is
+filtered to remove inherited `root=`, `init=`, and pmOS root-selection tokens.
+The package step rejects an image larger than 33,554,432 bytes and records its
+SHA-256. GitHub Actions uploads the image with build, config, DTB, and header
+verification reports. A successful build proves packaging consistency only;
+it is not evidence that the kernel boots on hardware. Do not flash without a
+separate review and backup of the original BOOT partition.
