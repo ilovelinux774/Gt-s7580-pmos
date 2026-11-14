@@ -163,6 +163,8 @@ jobs:
             systemd-debs systemd-debug-build systemd-debug-initramfs.cpio.xz
           python3 "$J4_DIR/debug-cmdline.py" boot.img > systemd-debug-cmdline.txt
           grep -q 'systemd.unified_cgroup_hierarchy=0' systemd-debug-cmdline.txt
+          grep -qw 'initcall_debug' systemd-debug-cmdline.txt
+          grep -qw 'ignore_loglevel' systemd-debug-cmdline.txt
           if grep -Eq '(^| )(root|rootfstype|rootflags|init|rdinit)=' systemd-debug-cmdline.txt; then
             echo 'root/init argument survived command-line filtering' >&2
             exit 1

@@ -33,7 +33,7 @@ def command_line(image: bytes) -> str:
         kept.append("console=tty0")
     kept.extend(("rd.systemd.unit=emergency.target", "systemd.gpt_auto=0",
                  "systemd.unified_cgroup_hierarchy=0", "rd.fstab=no",
-                 "systemd.show_status=1"))
+                 "systemd.show_status=1", "initcall_debug", "ignore_loglevel"))
     result = " ".join(kept)
     if len(result.encode("ascii")) >= CMDLINE_MAX:
         raise ValueError(f"debug command line too long ({len(result)} >= {CMDLINE_MAX})")

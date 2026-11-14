@@ -30,7 +30,15 @@ runs systemd as PID 1, configures RNDIS, and keeps the emergency shell. It does
 not search for, mount, or switch to the installed root filesystem.
 
 The framebuffer status helper reports initramfs/systemd startup and USB gadget
-stages on VT1 when the framebuffer console is available. Pstore is not required.
+stages on VT1 when the framebuffer console is available. `/init` already writes
+`KERNEL STARTED`, `INITRAMFS STARTED`, and `STARTING SYSTEMD AS PID 1` to the
+screen and `/dev/kmsg`; a separate heartbeat addition is unnecessary. The K49
+diagnostic command line also enables `initcall_debug` and `ignore_loglevel` to
+make initcall messages more visible and preserve them in the console log where
+supported. These flags can narrow down synchronous initcall failures, but they
+do not identify every asynchronous probe or prove the last logged driver caused
+a later hang. Pstore is not required for the boot itself, but persistent logs
+are needed to diagnose a reset that occurs after startup.
 
 ## Build/test boundary
 
