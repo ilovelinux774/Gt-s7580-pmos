@@ -37,10 +37,11 @@ data. The J4+ needs its Samsung-specific device tree and board setup, based on
 its own hardware evidence and existing J4+ sources. `import-j4-dts.py` imports
 the pinned Rev06 board DTS and its panel descriptions from the J4+ Linux 4.9
 source, redirects the SoC includes to the 4.19 tree's `vendor-legacy/qcom`
-files, and disables the unused `sec_ts` node and omits the camera-sensor overlay for
-initial bring-up. Camera is not needed for systemd/RNDIS; its legacy I2C label
-references do not match the newer Riva SoC DTS. Neither omission implies those
-components caused the earlier K49 reset. In particular, Redmi's
+files, and disables the unused `sec_ts` and MCD nodes and omits the camera-sensor
+overlay for initial bring-up. Camera and MCD acceleration are not needed for
+systemd/RNDIS; their legacy I2C/clock labels do not fully match the newer Riva
+SoC DTS. These omissions are compatibility trims for the first port build and
+do not imply those components caused the earlier K49 reset. In particular, Redmi's
 Android build uses a 2,048-byte boot page and a 67,108,864-byte BOOT partition;
 this project must retain the J4+ BOOT limit of 33,554,432 bytes and use the
 J4+-appropriate boot container/header and DT payload.

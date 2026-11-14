@@ -69,6 +69,17 @@ def main() -> None:
             text = text.replace('../qcom/msm8917-audio.dtsi', '../vendor-legacy/qcom/msm8917-audio.dtsi')
         if source_path.endswith("msm8917-sec-j4primelte-display-r03.dtsi"):
             text = text.replace('"samsung/msm8917-mdss-panels.dtsi"', '"msm8917-mdss-panels.dtsi"')
+        if source_path.endswith("msm8917-sec-lte-common.dtsi"):
+            # The Riva 4.19 GCC DTS has no legacy clock_gcc label for MCD.
+            # Crypto acceleration is optional during early boot bring-up.
+            needle = "\tmcd: mcd {\n"
+            if text.count(needle) != 1:
+                raise SystemExit("could not identify the Samsung MCD node")
+            text = text.replace(
+                needle,
+                needle + '\t\tstatus = "disabled"; /* no 4.19 clock_gcc */\n',
+                1,
+            )
         if source_path.endswith("msm8917-sec-j4primelte-sea-open-r06.dtsi"):
             # Camera sensors are not part of the first initramfs/RNDIS boot test;
             # Riva 4.19 labels its I2C buses differently from the Samsung 4.9 DTS.
