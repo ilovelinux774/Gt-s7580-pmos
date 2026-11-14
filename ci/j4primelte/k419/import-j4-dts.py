@@ -23,8 +23,6 @@ FILES = (
     "arch/arm64/boot/dts/samsung/msm8917-sec-j4primelte-battery-common.dtsi",
     "arch/arm64/boot/dts/samsung/msm8917-j4primelte-s2mu005.dtsi",
     "arch/arm64/boot/dts/samsung/msm8917-sec-j4primelte-display-r03.dtsi",
-    "arch/arm64/boot/dts/samsung/msm8917-sec-j4primelte-sensor-r03.dtsi",
-    "arch/arm64/boot/dts/samsung/msm8917-sec-j4primelte-nfc-r04.dtsi",
     "arch/arm64/boot/dts/samsung/msm8917-mdss-panels.dtsi",
     "drivers/video/fbdev/msm/samsung/S6D7AT0B01_PM6003XB1/dsi_panel_S6D7AT0B01_PM6003XB1_hdp_video.dtsi",
     "drivers/video/fbdev/msm/samsung/S6D7AT0B01_BS060WKM/dsi_panel_S6D7AT0B01_BS060WKM_hdp_video.dtsi",
@@ -80,6 +78,21 @@ def main() -> None:
             )
             if count != 1:
                 raise SystemExit("could not identify the Samsung MCD node")
+            i2c4 = "\ti2c_4: i2c@78b8000 { /* BLSP1 QUP4 */\n"
+            if text.count(i2c4) != 1:
+                raise SystemExit("could not identify the Samsung BLSP1 QUP4 node")
+            text = text.replace(
+                i2c4,
+                i2c4 + '\t\tstatus = "disabled"; /* initial 4.19 bring-up */\n',
+                1,
+            )
+            text += (
+                "\n&soc {\n"
+                "\tqcom,mss@4080000 {\n"
+                "\t\tstatus = \"disabled\"; /* modem not needed for initramfs/RNDIS */\n"
+                "\t};\n"
+                "};\n"
+            )
         if source_path.endswith("msm8917-sec-j4primelte-sea-open-r06.dtsi"):
             # Camera sensors are not part of the first initramfs/RNDIS boot test;
             # Riva 4.19 labels its I2C buses differently from the Samsung 4.9 DTS.
@@ -87,6 +100,14 @@ def main() -> None:
                 '#include "msm8917-camera-sensor-cdp-j4primelte-r04.dtsi"',
                 '/* camera sensor DTS omitted for initial 4.19 bring-up */',
             )
+            for overlay, reason in (
+                ("msm8917-sec-j4primelte-sensor-r03.dtsi", "sensor"),
+                ("msm8917-sec-j4primelte-nfc-r04.dtsi", "NFC"),
+            ):
+                text = text.replace(
+                    f'#include "{overlay}"',
+                    f'/* {reason} DTS omitted for initial 4.19 bring-up */',
+                )
             # The 4.19 reference has no Samsung sec_ts driver. Keep the I2C bus
             # but suppress this nonessential device for the initial boot test.
             pattern = re.compile(r'(\btouchscreen@48\s*\{)(.*?)(\n\s*\};)', re.S)
