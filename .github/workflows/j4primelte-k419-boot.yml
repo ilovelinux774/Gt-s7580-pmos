@@ -161,7 +161,8 @@ jobs:
             exit "$rc"
           fi
           sha256sum "$J4_DIR/sources.env" "$J4_DIR/import-j4-dts.py" \
-            "$J4_DIR/build-boot-image.sh" "$J4_DIR/debug-cmdline.py" \
+            "$J4_DIR/patch-riva-kernel.py" "$J4_DIR/build-boot-image.sh" \
+            "$J4_DIR/debug-cmdline.py" \
             > out/port-inputs.sha256
           {
             echo '### J4+ Linux 4.19 diagnostic BOOT image'

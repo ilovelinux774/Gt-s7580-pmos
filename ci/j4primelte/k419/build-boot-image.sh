@@ -38,6 +38,7 @@ export KBUILD_BUILD_TIMESTAMP='Thu, 01 Jan 1970 00:00:00 +0000' LC_ALL=C
 mkdir -p "$out"
 
 python3 "$HERE/import-j4-dts.py" "$tree"
+python3 "$HERE/patch-riva-kernel.py" "$tree"
 make -C "$tree" O="$out" "${make_args[@]}" vendor/msm8937-perf_defconfig
 cfg="$tree/scripts/config"
 [[ -x "$cfg" || -f "$cfg" ]] || { echo "missing kernel scripts/config" >&2; exit 1; }
@@ -50,6 +51,11 @@ for symbol in "${required[@]}"; do
 done
 "$cfg" --file "$out/.config" --set-str LOCALVERSION '-j4-k419-debug'
 "$cfg" --file "$out/.config" --disable LOCALVERSION_AUTO 2>/dev/null || true
+# GCC 11 tightened FORTIFY_SOURCE diagnostics for this 4.19 vendor tree and
+# promotes known-size legacy copy warnings to hard errors. This kernel remains
+# a bring-up build; record the compatibility tradeoff rather than silently
+# accepting a broken C build.
+"$cfg" --file "$out/.config" --disable FORTIFY_SOURCE 2>/dev/null || true
 make -C "$tree" O="$out" "${make_args[@]}" olddefconfig
 for symbol in "${required[@]}"; do
   if ! grep -qx "CONFIG_${symbol}=y" "$out/.config"; then
@@ -57,6 +63,10 @@ for symbol in "${required[@]}"; do
     exit 1
   fi
 done
+if grep -qx 'CONFIG_FORTIFY_SOURCE=y' "$out/.config"; then
+  echo 'CONFIG_FORTIFY_SOURCE remained enabled; this GCC 11 compatibility workaround did not apply' >&2
+  exit 1
+fi
 cp "$out/.config" "$out/config.full"
 
 echo '=== Build the J4+ Rev06 DTB and 4.19 kernel image'

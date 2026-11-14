@@ -52,8 +52,11 @@ J4+-appropriate boot container/header and DT payload.
 
 `build-dtb-smoke.sh` is the fast DTB-only check. `build-boot-image.sh` is the
 end-to-end Linux 4.19.325 image builder: it configures the Android 16 Riva
-`vendor/msm8937-perf_defconfig`, enables and verifies the initramfs/systemd and
-USB diagnostic options, builds `Image.gz` plus the Samsung Rev06 DTB, packages
+`vendor/msm8937-perf_defconfig`, applies a narrowly scoped fix for a malformed
+ICE diagnostic string in the pinned source, disables the GCC-11-incompatible
+`FORTIFY_SOURCE` check for this bring-up build, enables and verifies the
+initramfs/systemd and USB diagnostic options, builds `Image.gz` plus the
+Samsung Rev06 DTB, packages
 the DTB as Qualcomm QCDT v3, and repacks the pinned J4+ Android v0 boot header.
 It replaces the donor's kernel and ramdisk; it does not retain the donor
 pmOS-initramfs or its root UUID command line.
