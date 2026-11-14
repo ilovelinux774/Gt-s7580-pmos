@@ -35,7 +35,10 @@ stages on VT1 when the framebuffer console is available. Pstore is not required.
 ## Build/test boundary
 
 The workflow pins and builds the source, checks systemd 249's required kernel
-options, packages the Rev06 DTB in QCDT form, and refuses to upload an image over
-the reported 33,554,432-byte BOOT partition limit. It does not flash the phone.
+options, packages the Rev06 DTB in QCDT form, and uses the hash-pinned,
+repository-tracked `boot.img` only as an Android boot-header/container template
+(the output kernel, ramdisk and DT payload are replaced). It refuses to upload
+an image over the reported 33,554,432-byte BOOT partition limit. It does not
+flash the phone.
 A hardware boot/USB test is still required, with a known-good recovery image
 retained and only BOOT changed if the owner chooses to test it.

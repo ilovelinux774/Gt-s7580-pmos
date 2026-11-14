@@ -38,7 +38,7 @@ jobs:
           source "$J4_DIR/sources.env"
           for name in J4_K49_KERNEL_URL J4_K49_KERNEL_BRANCH J4_K49_KERNEL_COMMIT \
             J4_K49_KERNEL_VERSION J4_K49_DEFCONFIG J4_K49_BOARD_DTB \
-            J4_K49_DONOR_URL J4_K49_DONOR_SHA256 J4_K49_BOOT_PARTITION_BYTES; do
+            J4_K49_DONOR_PATH J4_K49_DONOR_SHA256 J4_K49_BOOT_PARTITION_BYTES; do
             printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
           done
 
@@ -170,14 +170,15 @@ jobs:
           sha256sum systemd-debug-initramfs.cpio.xz > initramfs.sha256
           cat systemd-debug-cmdline.txt initramfs.sha256
 
-      - name: Fetch and verify known-good donor boot header
+      - name: Use and verify the repository boot-image template
         run: |
           set -euo pipefail
           mkdir -p donor
-          curl -fL --retry 3 --retry-delay 5 -o donor/boot.img "$J4_K49_DONOR_URL"
+          cp "$J4_K49_DONOR_PATH" donor/boot.img
           echo "$J4_K49_DONOR_SHA256  donor/boot.img" | sha256sum -c -
           ./repack-boot inspect donor/boot.img | tee donor-report.txt
           grep -q 'page_size.*4096' donor-report.txt
+          echo 'All payloads, including the donor ramdisk, are replaced or superseded before this image can be tested.'
 
       - name: Repack and enforce the BOOT partition limit
         run: |
