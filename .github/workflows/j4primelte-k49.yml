@@ -119,12 +119,38 @@ jobs:
           set -euo pipefail
           export CROSS_COMPILE=aarch64-linux-gnu-
           export JOBS="$(nproc)"
-          bash "$J4_DIR/build-kernel.sh" kernel "$PWD/out"
+          set +e
+          bash "$J4_DIR/build-kernel.sh" kernel "$PWD/out" 2>&1 | tee kernel-build.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            grep -m 20 -E 'error:|Error [0-9]+|fatal:|No rule to make|required for systemd|incompatible Android|missing compressed kernel|missing J4' kernel-build.log \
+              | while IFS= read -r line; do echo "::error title=Linux 4.9 build failure::$line"; done
+            {
+              echo '### Linux 4.9 build failure details'
+              echo '```text'
+              tail -n 60 kernel-build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
           test -s out/kernel.payload
           test -s out/j4primelte-rev06.dtb
           python3 "$SHARED_DIR/qcdt.py" --dtb out/j4primelte-rev06.dtb \
             --out j4primelte-rev06.qcdt --page-size 4096 | tee qcdt-report.txt
           echo "QCDT_IMAGE=$PWD/j4primelte-rev06.qcdt" >> "$GITHUB_ENV"
+
+      - name: Upload kernel failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-k49-kernel-failure-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            kernel-build.log
+            out/.config
+            out/config.full
 
       - name: Build systemd 249 debug initramfs
         run: |
