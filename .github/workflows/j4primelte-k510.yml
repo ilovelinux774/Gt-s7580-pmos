@@ -2,14 +2,15 @@ name: j4primelte 5.10 bring-up (systemd-capable kernel)
 
 # What this workflow is, precisely:
 #
-#   * It builds a Linux **5.10** kernel for the Galaxy J4+ (SM-J415F) from a
-#     tree pinned in ci/j4primelte/k510/sources.env, audits the resulting
-#     .config against systemd's own requirements, and repacks the kernel into a
-#     boot.img using the phone's OWN known-good boot image as the donor.
-#     The donor supplies the pmOS initramfs; no rootfs is built here.
-#   * It is manual-only (workflow_dispatch). Nothing is published, released or
-#     flashed automatically, and a green run means "the image was built and is
-#     self-consistent", never "this boots on the phone".
+#   * It builds a Linux 7.1.3 kernel (5.10 is the minimum supported floor) for
+#     the Galaxy J4+ (SM-J415F) from the tree pinned in ci/j4primelte/k510/sources.env,
+#     audits the config, and makes several BOOT-only test images.
+#   * The QCDT and appended-FDT candidates retain the donor pmOS initramfs. A
+#     separate systemd-debug image replaces it with a minimal arm64 systemd
+#     initramfs and never mounts or switches to an installed rootfs.
+#   * A path-scoped push trigger and workflow_dispatch run the pipeline.
+#     Nothing is released or flashed automatically, and a green run means
+#     "the images were built and are self-consistent", never "this boots on the phone".
 #   * The arm32 vs arm64 question is settled in sources.env: the kernel is
 #     arm64 with CONFIG_COMPAT so the existing armv7 pmOS rootfs keeps running.
 #     systemd requires kernel >= 5.10 and cgroup v2; neither cares about the
@@ -185,6 +186,44 @@ jobs:
           ./repack-boot inspect "$J4_DIR/../../boot.img" >/dev/null 2>&1 || true
           echo "repack-boot built"
 
+      - name: Download arm64 systemd debug userspace packages
+        if: env.J4_DRY_RUN != 'true' && inputs.selftest_only != true
+        run: |
+          set -euo pipefail
+          codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          aptroot="$PWD/apt-arm64"
+          mkdir -p "$aptroot/lists/partial" "$aptroot/archives/partial" "$aptroot/sourceparts" systemd-debs
+          : > "$aptroot/status"
+          : > "$aptroot/extended_states"
+          printf 'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports %s main universe\n' "$codename" > "$aptroot/sources.list"
+          printf 'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports %s-updates main universe\n' "$codename" >> "$aptroot/sources.list"
+          printf 'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports %s-security main universe\n' "$codename" >> "$aptroot/sources.list"
+          apt_opts=(
+            -o Dir::State::status="$aptroot/status"
+            -o Dir::State::extended_states="$aptroot/extended_states"
+            -o Dir::State::lists="$aptroot/lists"
+            -o Dir::Cache::archives="$aptroot/archives"
+            -o Dir::Etc::sourcelist="$aptroot/sources.list"
+            -o Dir::Etc::sourceparts="$aptroot/sourceparts"
+            -o APT::Architecture=arm64
+            -o APT::Architectures=arm64
+          )
+          sudo apt-get "${apt_opts[@]}" update
+          sudo apt-get "${apt_opts[@]}" --download-only --no-install-recommends -y install \
+            systemd busybox-static iproute2
+          cp "$aptroot"/archives/*.deb systemd-debs/
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          packages = sorted(Path('systemd-debs').glob('*.deb'))
+          arm64 = [p.name for p in packages
+                   if subprocess.check_output(['dpkg-deb', '-f', str(p), 'Architecture'], text=True).strip()
+                   in ('arm64', 'all')]
+          if not any('systemd' in name for name in arm64):
+              raise SystemExit('no arm64 systemd packages were downloaded')
+          print(f'prepared {len(arm64)} arm64/all packages for initramfs')
+          PY
+
       - name: Self-test QCDT and appended-FDT boot-image layouts
         run: |
           set -euo pipefail
@@ -197,7 +236,27 @@ jobs:
           ./repack-boot build --kernel /tmp/fake-kernel --ramdisk /tmp/fake-ramdisk \
             --out /tmp/synth.img --page-size 4096 --kernel-addr 0x82008000 \
             --ramdisk-addr 0x83000000 --tags-addr 0x82000100 \
-            --second-addr 0x82f00000 --cmdline 'selftest'
+            --second-addr 0x82f00000 \
+            --cmdline 'androidboot.hardware=qcom console=ttyMSM0 root=UUID=test init=/init pmos.root_uuid=deadbeef'
+          python3 - <<'PY'
+          from pathlib import Path
+          image = bytearray(Path('/tmp/synth.img').read_bytes())
+          extra = b'rootfstype=ext4 rdinit=/pmos-init\0'
+          offset = 64 + 512 + 32
+          image[offset:offset + len(extra)] = extra
+          Path('/tmp/synth.img').write_bytes(image)
+          PY
+          python3 "$J4_DIR/debug-cmdline.py" /tmp/synth.img > /tmp/systemd-debug-cmdline
+          grep -q 'androidboot.hardware=qcom' /tmp/systemd-debug-cmdline
+          grep -q 'console=ttyMSM0' /tmp/systemd-debug-cmdline
+          grep -q 'rd.systemd.unit=emergency.target' /tmp/systemd-debug-cmdline
+          if grep -Eq '(^| )(root|rootfstype|rootflags|init|rdinit)=' /tmp/systemd-debug-cmdline; then
+            echo 'debug cmdline retained a root/init argument' >&2; exit 1
+          fi
+          if grep -Eq '(^| )(pmos[._]|quiet($| )|splash($| )|plymouth\.)' /tmp/systemd-debug-cmdline; then
+            echo 'debug cmdline retained pmOS or splash arguments' >&2; exit 1
+          fi
+          cat /tmp/systemd-debug-cmdline | tee -a selftest-report.txt
           ./repack-boot inspect /tmp/synth.img | tee -a selftest-report.txt
           ./repack-boot repack /tmp/synth.img --kernel-new /tmp/fake-kernel \
             --dt /tmp/test-qcdt.img --out /tmp/synth-qcdt.img \
@@ -239,6 +298,26 @@ jobs:
             echo "::error title=Self-test::repack accepted a missing kernel"
             exit 1
           fi
+          # Also prove replacing the donor ramdisk and clearing inherited boot
+          # arguments is supported for the standalone systemd debug image.
+          head -c 16384 /dev/urandom > /tmp/fake-debug-ramdisk
+          ./repack-boot repack /tmp/synth.img --kernel-new /tmp/fake-kernel \
+            --ramdisk-new /tmp/fake-debug-ramdisk \
+            --cmdline-replace 'rd.systemd.unit=emergency.target' \
+            --cmdline-clear-extra --out /tmp/synth-systemd-debug.img \
+            | tee -a selftest-report.txt
+          ./repack-boot inspect /tmp/synth-systemd-debug.img | tee -a selftest-report.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          image = Path('/tmp/synth-systemd-debug.img').read_bytes()
+          ramdisk_size = struct.unpack_from('<I', image, 16)[0]
+          page = struct.unpack_from('<I', image, 36)[0]
+          assert ramdisk_size == 16384, f'unexpected replacement ramdisk size: {ramdisk_size}'
+          assert image[64:64 + 512].split(b'\0', 1)[0] == b'rd.systemd.unit=emergency.target'
+          assert not image[64 + 512 + 32:64 + 512 + 32 + 512].split(b'\0', 1)[0]
+          print(f'systemd debug repack self-test passed: ramdisk={ramdisk_size} bytes, cmdline replaced')
+          PY
           echo "QCDT/boot-image self-test passed"
 
       - name: Self-test only (skips kernel, donor and repack)
@@ -467,7 +546,23 @@ jobs:
             exit 1
           fi
 
-      - name: Repack the donor with the new kernel
+      - name: Build standalone systemd debug initramfs
+        if: env.J4_DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+          bash "$J4_DIR/build-systemd-debug-initramfs.sh" \
+            systemd-debs systemd-debug-build systemd-debug-initramfs.cpio.gz
+          python3 "$J4_DIR/debug-cmdline.py" donor/boot.img \
+            > systemd-debug-cmdline.txt
+          if grep -Eq '(^| )(root|rootfstype|rootflags|init|rdinit)=' systemd-debug-cmdline.txt; then
+            echo "::error title=Unsafe debug cmdline::root/init arguments survived filtering"
+            exit 1
+          fi
+          grep -q 'rd.systemd.unit=emergency.target' systemd-debug-cmdline.txt
+          sha256sum systemd-debug-initramfs.cpio.gz > systemd-debug-initramfs.cpio.gz.sha256
+          cat systemd-debug-cmdline.txt systemd-debug-initramfs.cpio.gz.sha256
+
+      - name: Repack kernel and debug initramfs
         if: env.J4_DRY_RUN != 'true'
         run: |
           set -euo pipefail
@@ -503,11 +598,49 @@ jobs:
           assert kernel.endswith(dtb), 'mainline FDT is not appended to kernel payload'
           print(f'validated raw-FDT handoff: {len(dtb)} FDT bytes in kernel_size; dt_size=0')
           PY
-          # Retain the donor header/ramdisk in each output; checksums let the
-          # two BOOT-only variants be distinguished and rolled back safely.
+          # The separate diagnostic uses systemd as PID 1 in its own minimal
+          # initramfs. It never executes the donor's pmOS init or mounts rootfs.
+          ./repack-boot repack donor/boot.img \
+            --kernel-new out/kernel.payload \
+            --ramdisk-new systemd-debug-initramfs.cpio.gz \
+            --append-dtb "${BOARD_DTB:?compiled mainline DTB missing}" \
+            --cmdline-replace "$(cat systemd-debug-cmdline.txt)" \
+            --cmdline-clear-extra \
+            --out boot-k510-systemd-debug.img \
+            | tee systemd-debug-repack-report.txt
+          ./repack-boot inspect boot-k510-systemd-debug.img \
+            | tee boot-k510-systemd-debug-report.txt
+          grep -q 'ramdisk.*replaced donor payload' systemd-debug-repack-report.txt
+          grep -q 'rd.systemd.unit=emergency.target' boot-k510-systemd-debug-report.txt
+          grep -q 'dt_size.*0' boot-k510-systemd-debug-report.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          image = Path('boot-k510-systemd-debug.img').read_bytes()
+          page, kernel_size, ramdisk_size, dt_size = (struct.unpack_from('<I', image, off)[0]
+                                                       for off in (36, 8, 16, 40))
+          round_page = lambda size: (size + page - 1) // page * page
+          kernel_off = page
+          ramdisk_off = kernel_off + round_page(kernel_size)
+          kernel = image[kernel_off:kernel_off + kernel_size]
+          ramdisk = image[ramdisk_off:ramdisk_off + ramdisk_size]
+          cmdline = image[64:64 + 512].split(b'\0', 1)[0].decode()
+          extra = image[64 + 512 + 32:64 + 512 + 32 + 512].split(b'\0', 1)[0]
+          fdt = Path('board-dtb/j4-board.dtb').read_bytes()
+          initrd = Path('systemd-debug-initramfs.cpio.gz').read_bytes()
+          assert dt_size == 0
+          assert kernel.endswith(fdt)
+          assert ramdisk == initrd
+          assert 'rd.systemd.unit=emergency.target' in cmdline
+          assert not extra
+          assert not any(token.startswith(('root=', 'init=', 'rdinit=', 'pmos_', 'pmos.', 'plymouth.'))
+                         or token in ('quiet', 'splash') for token in cmdline.split())
+          print(f'debug image verified: kernel={kernel_size}, initramfs={ramdisk_size}, systemd emergency target, no root mount args')
+          PY
           sha256sum boot-k510.img > boot-k510.img.sha256
           sha256sum boot-k510-appended-dtb.img > boot-k510-appended-dtb.img.sha256
-          cat boot-k510.img.sha256 boot-k510-appended-dtb.img.sha256
+          sha256sum boot-k510-systemd-debug.img > boot-k510-systemd-debug.img.sha256
+          cat boot-k510.img.sha256 boot-k510-appended-dtb.img.sha256 boot-k510-systemd-debug.img.sha256
 
       - name: Summarise
         if: always()
@@ -569,6 +702,14 @@ jobs:
               echo '```'
               echo '</details>'
             fi
+            if [ -f boot-k510-systemd-debug-report.txt ]; then
+              echo '<details><summary>systemd PID 1 debug-only boot image (no installed rootfs)</summary>'
+              echo
+              echo '```'
+              cat boot-k510-systemd-debug-report.txt
+              echo '```'
+              echo '</details>'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifacts
@@ -588,6 +729,13 @@ jobs:
             boot-k510-appended-dtb.img
             boot-k510-appended-dtb.img.sha256
             boot-k510-appended-dtb-report.txt
+            boot-k510-systemd-debug.img
+            boot-k510-systemd-debug.img.sha256
+            boot-k510-systemd-debug-report.txt
+            systemd-debug-initramfs.cpio.gz
+            systemd-debug-initramfs.cpio.gz.sha256
+            systemd-debug-cmdline.txt
+            systemd-debug-repack-report.txt
             appended-dtb-repack-report.txt
             repack-report.txt
             build.log

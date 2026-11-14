@@ -71,7 +71,7 @@ branch before it is on `main`).
 | `sources.env` | all pins: tree, branch, commit, toolchain, donor boot image, boot header addresses | it is the only place pins live |
 | `verify-tree.sh` | rejects a tree that is not the pin, and separately **rejects a tree with no msm8917/8937 support** | run in CI: it correctly rejected the current CAF pin |
 | `config-audit.py` | checks a `.config` against systemd's documented requirements; `hard`/`systemd`/`userspace` severities, alias-aware, `--json` | run against the real 3.18 config (above) and in CI |
-| `repack-boot.c` | Qualcomm v0 Android boot image `inspect` / `build` / `repack`; supports both QCDT after ramdisk and raw FDT appended to kernel payload | both synthetic layouts round-trip and inspect in CI |
+| `repack-boot.c` | Qualcomm v0 Android boot image `inspect` / `build` / `repack`; supports QCDT, raw appended FDT, replacement ramdisk, and sanitized command-line replacement | synthetic layouts and ramdisk replacement round-trip in CI |
 | `qcdt.py` | validates the board FDT metadata and creates a Qualcomm QCDT v3 table | unit tests plus C packer integration self-test |
 | `fragment-audit.py` | checks every fragment symbol against the tree's own Kconfig **before** compiling, because `scripts/config` accepts nonsense and `olddefconfig` then drops it silently | run on the real tree: found that the fragment's `DRM_PANEL_SAMSUNG_S6D7AT0B01` does not exist there |
 | `build-kernel.sh` | defconfig → fragments → force the exact symbols systemd needs → build → stage kernel and board DTB → audit | CI kernel build; device boot still requires a hardware test |
@@ -224,13 +224,42 @@ controller integration to be built in. Host-visible USB enumeration tests the
 kernel UDC/gadget path; an IP address still depends on userspace configuring the
 network interface and DHCP.
 
-## Testing on the phone (no UART; pstore is best-effort)
+## Standalone systemd debug image (no installed rootfs)
+
+The workflow also emits a separate `boot-k510-systemd-debug.img` specifically
+to test systemd as PID 1. It is **not** either of the pmOS-rootfs boot images.
+Its components are:
+
+* the same arm64 7.1.3 kernel and mainline-compatible J4+ FDT;
+* a newly built minimal initramfs assembled from Ubuntu 22.04 arm64 systemd,
+  BusyBox-static, and iproute2 packages;
+* `/init` execs systemd directly, with `rd.systemd.unit=emergency.target`;
+* systemd starts a dedicated configfs gadget unit for RNDIS (`usb0`,
+  `172.16.42.1/24`) and an ACM serial function for a direct shell on
+  `/dev/ttyGS0` (normally `/dev/ttyACM0` on the host). If that UDC cannot
+  allocate enough endpoints for both functions, the unit retries as RNDIS-only;
+  the emergency shell remains on `/dev/console`.
+
+There is no pmOS `/init`, rootfs discovery, rootfs mount, or switch-root in this
+ramdisk, and the workflow does not build or package an installed rootfs. The
+systemd emergency shell is also assigned to `/dev/console`. RNDIS has no DHCP
+server or SSH daemon; for a network test, configure the host side as
+`172.16.42.2/24`. The ACM function is the direct interactive debug channel.
+
+This image tests whether the kernel and this packaged systemd initramfs can
+start systemd, bind the device controller, configure RNDIS, and reach an
+emergency shell. CI validates package/image structure only; phone boot, USB
+enumeration, and interactive console behavior still need hardware testing. Keep
+the known-good recovery image available and flash BOOT only.
+
+## Testing the pmOS-rootfs images on the phone (no UART; pstore is best-effort)
 
 1. Keep the known-good Medusa 3.18 `boot.img` and the current QCDT image next
    to you. Flashing is reversible: change BOOT only.
-2. To test the newly observed handoff layout, flash
+2. To test the newly observed handoff layout with the pmOS initramfs, flash
    `boot-k510-appended-dtb.img` to BOOT only. Do **not** touch SYSTEM. Test the
-   QCDT `boot-k510.img` separately; never combine their payloads.
+   QCDT `boot-k510.img` separately; never combine their payloads. For the
+   systemd-only debug experiment, use `boot-k510-systemd-debug.img` instead.
 3. Record the screen from power-on and observe USB on the host:
    * **Samsung logo remains** → expected with the M1 simple-framebuffer; it does
      not by itself prove a hang.
