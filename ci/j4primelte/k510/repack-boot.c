@@ -17,11 +17,12 @@
  *       Write a v0 boot image. --out is never overwritten unless --force.
  *
  *   repack-boot repack <donor.img> --kernel-new K --out O [--dt QCDT]
- *                      [--cmdline-append S] [--cmdline-replace S]
- *       Copy the donor's v0 header/ramdisk and replace its kernel and optional
- *       Qualcomm DT table. On this legacy Qualcomm format, the word at header
- *       offset 40 is dt_size and QCDT follows the ramdisk/second-stage payload.
- *       The output is read back and validated before it is kept.
+ *                      [--append-dtb FDT] [--cmdline-append S]
+ *                      [--cmdline-replace S]
+ *       Copy the donor's v0 header/ramdisk and replace its kernel. --dt places
+ *       QCDT after the ramdisk and updates dt_size. --append-dtb instead places
+ *       one raw FDT at the end of the kernel payload and clears dt_size. The
+ *       output is read back and validated before it is kept.
  *
  * Only the v0 boot layout used by the J4+ is supported. Android's later header
  * versions are not silently interpreted as Qualcomm dt_size fields.
@@ -94,6 +95,24 @@ static uint32_t get_be32(const unsigned char *p)
 {
 	return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
 	       (uint32_t)p[2] << 8 | (uint32_t)p[3];
+}
+
+/* Validate a single raw FDT appended to the kernel payload. */
+static uint32_t validate_raw_fdt(const unsigned char *dt, size_t len)
+{
+	if (len < 40 || get_be32(dt) != 0xd00dfeed)
+		die("appended DTB does not start with an FDT header");
+	uint32_t total = get_be32(dt + 4);
+	uint32_t struct_off = get_be32(dt + 8);
+	uint32_t strings_off = get_be32(dt + 12);
+	uint32_t version = get_be32(dt + 20);
+	uint32_t strings_size = get_be32(dt + 32);
+	uint32_t struct_size = get_be32(dt + 36);
+	if (total != len || total < 40 || version < 16 ||
+	    (uint64_t)struct_off + struct_size > total ||
+	    (uint64_t)strings_off + strings_size > total)
+		die("appended DTB has an invalid FDT header/size");
+	return total;
 }
 
 /* Validate the legacy Qualcomm QCDT container used after the boot ramdisk. */
@@ -230,6 +249,7 @@ static int cmd_inspect(int argc, char **argv)
 	printf("%s\n", argv[0]);
 	printf("  size          %zu bytes\n", len);
 	printf("  page_size     %u\n", h.page_size);
+	printf("  dt_size       %u bytes\n", h.dt_size);
 	printf("  kernel        %u bytes at 0x%08x (file offset %zu)\n",
 	       h.kernel_size, h.kernel_addr, k_off);
 	printf("  ramdisk       %u bytes at 0x%08x (file offset %zu)\n",
@@ -496,6 +516,7 @@ static void cmdline_append(char *field, size_t size, const char *extra)
 static int cmd_repack(int argc, char **argv)
 {
 	const char *donor = NULL, *kernel = NULL, *dt_path = NULL, *out = NULL;
+	const char *kernel_fdt_path = NULL;
 	const char *append = NULL, *replace = NULL;
 	int force = 0;
 
@@ -503,6 +524,7 @@ static int cmd_repack(int argc, char **argv)
 		const char *a = argv[i];
 		if (!strcmp(a, "--kernel-new") && i + 1 < argc) kernel = argv[++i];
 		else if (!strcmp(a, "--dt") && i + 1 < argc) dt_path = argv[++i];
+		else if (!strcmp(a, "--append-dtb") && i + 1 < argc) kernel_fdt_path = argv[++i];
 		else if (!strcmp(a, "--out") && i + 1 < argc) out = argv[++i];
 		else if (!strcmp(a, "--cmdline-append") && i + 1 < argc) append = argv[++i];
 		else if (!strcmp(a, "--cmdline-replace") && i + 1 < argc) replace = argv[++i];
@@ -511,7 +533,7 @@ static int cmd_repack(int argc, char **argv)
 		else if (!donor) donor = a;
 		else die("unexpected argument: %s", a);
 	}
-	if (!donor) die("usage: repack <donor.img> --kernel-new K --dt QCDT --out O");
+	if (!donor) die("usage: repack <donor.img> --kernel-new K --out O [--dt QCDT|--append-dtb FDT]");
 	if (!kernel) die("--kernel-new is required");
 	if (!out) die("--out is required");
 	if (append && replace) die("--cmdline-append and --cmdline-replace are mutually exclusive");
@@ -521,10 +543,11 @@ static int cmd_repack(int argc, char **argv)
 			die("%s already exists (pass --force to replace it)", out);
 	}
 
-	size_t dlen, klen, new_dt_len = 0;
+	size_t dlen, klen, new_dt_len = 0, kernel_fdt_len = 0;
 	unsigned char *dbuf = read_file(donor, &dlen);
 	unsigned char *kbuf = read_file(kernel, &klen);
 	unsigned char *new_dt = dt_path ? read_file(dt_path, &new_dt_len) : NULL;
+	unsigned char *kernel_fdt = kernel_fdt_path ? read_file(kernel_fdt_path, &kernel_fdt_len) : NULL;
 	struct header h;
 	parse_header(dbuf, &h);
 	if (h.page_size != 2048 && h.page_size != 4096)
@@ -535,8 +558,27 @@ static int cmd_repack(int argc, char **argv)
 		die("new kernel payload is absurdly large");
 	if (new_dt_len > 0xffffffffUL)
 		die("QCDT payload is larger than the boot header can describe");
+	if (dt_path && kernel_fdt_path)
+		die("--dt and --append-dtb are mutually exclusive");
+	if (kernel_fdt_path) {
+		if (!kernel_fdt_len)
+			die("appended DTB is empty");
+		(void)validate_raw_fdt(kernel_fdt, kernel_fdt_len);
+		if (kernel_fdt_len > 0xffffffffUL - klen)
+			die("kernel plus appended DTB is larger than the boot header can describe");
+	}
 	if (new_dt && new_dt_len != 0)
 		(void)validate_qcdt(new_dt, new_dt_len, h.page_size);
+
+	size_t final_klen = klen + kernel_fdt_len;
+	unsigned char *final_kbuf = kbuf;
+	if (kernel_fdt_len) {
+		final_kbuf = malloc(final_klen);
+		if (!final_kbuf)
+			die("out of memory for kernel plus appended DTB");
+		memcpy(final_kbuf, kbuf, klen);
+		memcpy(final_kbuf + klen, kernel_fdt, kernel_fdt_len);
+	}
 
 	size_t r_off = h.page_size + round_up(h.kernel_size, h.page_size);
 	size_t s_off = r_off + round_up(h.ramdisk_size, h.page_size);
@@ -548,9 +590,10 @@ static int cmd_repack(int argc, char **argv)
 	if (h.dt_size)
 		(void)validate_qcdt(dbuf + old_dt_off, h.dt_size, h.page_size);
 
-	/* A supplied table replaces the donor's table; otherwise preserve it. */
-	const unsigned char *dt_data = new_dt ? new_dt : (h.dt_size ? dbuf + old_dt_off : NULL);
-	size_t dt_len = new_dt ? new_dt_len : h.dt_size;
+	/* A supplied table replaces the donor's table; appended-FDT mode clears it. */
+	const unsigned char *dt_data = kernel_fdt_path ? NULL :
+		(new_dt ? new_dt : (h.dt_size ? dbuf + old_dt_off : NULL));
+	size_t dt_len = kernel_fdt_path ? 0 : (new_dt ? new_dt_len : h.dt_size);
 	if (replace) {
 		if (strlen(replace) >= CMDLINE_MAX)
 			die("--cmdline-replace is longer than %d bytes", CMDLINE_MAX - 1);
@@ -563,14 +606,14 @@ static int cmd_repack(int argc, char **argv)
 	/* Keep the donor's ramdisk and second stage verbatim. */
 	const unsigned char *ramdisk = dbuf + r_off;
 	unsigned char digest[20];
-	boot_id(kbuf, klen, ramdisk, h.ramdisk_size,
+	boot_id(final_kbuf, final_klen, ramdisk, h.ramdisk_size,
 		h.second_size ? dbuf + s_off : NULL, h.second_size,
 		dt_data, dt_len, digest);
 
 	unsigned char hdr[HEADER_LEN];
 	memset(hdr, 0, sizeof(hdr));
 	memcpy(hdr, ANDROID_MAGIC, MAGIC_LEN);
-	put32(hdr + 8, (uint32_t)klen);
+	put32(hdr + 8, (uint32_t)final_klen);
 	put32(hdr + 12, h.kernel_addr);
 	put32(hdr + 16, h.ramdisk_size);
 	put32(hdr + 20, h.ramdisk_addr);
@@ -594,7 +637,7 @@ static int cmd_repack(int argc, char **argv)
 	if (!f)
 		die("cannot create %s: %s", tmp, strerror(errno));
 	write_padded(f, hdr, sizeof(hdr), h.page_size);
-	write_padded(f, kbuf, klen, h.page_size);
+	write_padded(f, final_kbuf, final_klen, h.page_size);
 	write_padded(f, ramdisk, h.ramdisk_size, h.page_size);
 	if (h.second_size)
 		write_padded(f, dbuf + s_off, h.second_size, h.page_size);
@@ -613,13 +656,16 @@ static int cmd_repack(int argc, char **argv)
 	size_t v_s_off = v_r_off + round_up(v.ramdisk_size, v.page_size);
 	size_t v_dt_off = v_s_off + round_up(v.second_size, v.page_size);
 	int ok = 1;
-	if (v.kernel_size != (uint32_t)klen) { fprintf(stderr, "verify: kernel size mismatch\n"); ok = 0; }
+	if (v.kernel_size != (uint32_t)final_klen) { fprintf(stderr, "verify: kernel size mismatch\n"); ok = 0; }
 	if (v.ramdisk_size != h.ramdisk_size) { fprintf(stderr, "verify: ramdisk size mismatch\n"); ok = 0; }
 	if (v.page_size != h.page_size) { fprintf(stderr, "verify: page size mismatch\n"); ok = 0; }
 	if (v.dt_size != dt_len) { fprintf(stderr, "verify: dt_size mismatch\n"); ok = 0; }
 	if (v_dt_off + v.dt_size > vlen) { fprintf(stderr, "verify: image shorter than declared\n"); ok = 0; }
-	if (memcmp(vbuf + v_k_off, kbuf, klen) != 0) {
+	if (memcmp(vbuf + v_k_off, final_kbuf, final_klen) != 0) {
 		fprintf(stderr, "verify: kernel payload does not read back\n"); ok = 0;
+	}
+	if (kernel_fdt_len && v.dt_size != 0) {
+		fprintf(stderr, "verify: appended-DTB mode must leave dt_size zero\n"); ok = 0;
 	}
 	if (memcmp(vbuf + v_r_off, ramdisk, h.ramdisk_size) != 0) {
 		fprintf(stderr, "verify: ramdisk payload does not read back\n"); ok = 0;
@@ -640,17 +686,23 @@ static int cmd_repack(int argc, char **argv)
 		die("cannot rename %s -> %s: %s", tmp, out, strerror(e));
 	}
 	free(tmp);
+	if (final_kbuf != kbuf)
+		free(final_kbuf);
 	free(dbuf);
 	free(kbuf);
 	free(new_dt);
+	free(kernel_fdt);
 
 	printf("%s\n", out);
 	printf("  donor        %s\n", donor);
 	printf("  page_size    %u\n", h.page_size);
 	printf("  kernel       %zu bytes -> 0x%08x (was %u bytes)\n",
-	       klen, h.kernel_addr, h.kernel_size);
+	       final_klen, h.kernel_addr, h.kernel_size);
+	if (kernel_fdt_len)
+		printf("  appended FDT %zu bytes inside kernel; dt_size cleared to zero\n",
+		       kernel_fdt_len);
 	printf("  ramdisk      %u bytes kept from donor\n", h.ramdisk_size);
-	size_t new_dt_off = h.page_size + round_up((uint32_t)klen, h.page_size) +
+	size_t new_dt_off = h.page_size + round_up((uint32_t)final_klen, h.page_size) +
 			    round_up(h.ramdisk_size, h.page_size) +
 			    round_up(h.second_size, h.page_size);
 	printf("  Qualcomm DT  %zu bytes at boot-image offset %zu\n", dt_len, new_dt_off);
@@ -666,8 +718,9 @@ static int usage(void)
 		"usage:\n"
 		"  %s inspect <boot.img>\n"
 		"  %s build --kernel K --ramdisk R --out O [options]\n"
-		"  %s repack <donor.img> --kernel-new K --dt QCDT --out O\n"
-		"         [--cmdline-append S] [--cmdline-replace S] [--force]\n"
+		"  %s repack <donor.img> --kernel-new K --out O [--dt QCDT]\n"
+		"         [--append-dtb FDT] [--cmdline-append S]\n"
+		"         [--cmdline-replace S] [--force]\n"
 		"options: --page-size 2048|4096 --kernel-addr A --ramdisk-addr A\n"
 		"         --tags-addr A --second-addr A --second S --no-second\n"
 		"         --cmdline S --board S --force\n",

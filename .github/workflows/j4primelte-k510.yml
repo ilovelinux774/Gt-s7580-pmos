@@ -185,7 +185,7 @@ jobs:
           ./repack-boot inspect "$J4_DIR/../../boot.img" >/dev/null 2>&1 || true
           echo "repack-boot built"
 
-      - name: Self-test Qualcomm DT table and boot-image packing
+      - name: Self-test QCDT and appended-FDT boot-image layouts
         run: |
           set -euo pipefail
           # Keep these tests independent of a real kernel and donor: prove the
@@ -204,6 +204,30 @@ jobs:
             | tee -a selftest-report.txt
           ./repack-boot inspect /tmp/synth-qcdt.img | tee -a selftest-report.txt
           grep -q 'qcdt.*v3, 3 match records' selftest-report.txt
+          # The provided Project Medusa J4+ image uses a different handoff:
+          # raw FDTs are included in kernel_size and dt_size stays zero. Test
+          # that legacy layout independently, without replacing the QCDT path.
+          PYTHONPATH="$J4_DIR" python3 - <<'PY'
+          from pathlib import Path
+          from test_qcdt import fixture_dtb
+          Path('/tmp/fake-board.dtb').write_bytes(fixture_dtb())
+          PY
+          ./repack-boot repack /tmp/synth.img --kernel-new /tmp/fake-kernel \
+            --append-dtb /tmp/fake-board.dtb --out /tmp/synth-appended-dtb.img \
+            | tee -a selftest-report.txt
+          ./repack-boot inspect /tmp/synth-appended-dtb.img | tee -a selftest-report.txt
+          python3 - <<'PY' | tee -a selftest-report.txt
+          from pathlib import Path
+          import struct
+          image = Path('/tmp/synth-appended-dtb.img').read_bytes()
+          page, kernel_size, dt_size = (struct.unpack_from('<I', image, off)[0]
+                                        for off in (36, 8, 40))
+          dtb = Path('/tmp/fake-board.dtb').read_bytes()
+          kernel = image[page:page + kernel_size]
+          assert dt_size == 0, f'expected dt_size=0, got {dt_size}'
+          assert kernel.endswith(dtb), 'FDT is not at the end of kernel payload'
+          print(f'raw appended FDT: {len(dtb)} bytes inside kernel; dt_size=0')
+          PY
           # Refusals must stay refusals.
           if ./repack-boot build --kernel /tmp/fake-kernel --ramdisk /tmp/fake-ramdisk \
                --out /tmp/synth.img 2>/dev/null; then
@@ -370,7 +394,7 @@ jobs:
             | tee board-dtb/qcdt-report.txt
           echo "BOARD_DTB=$PWD/board-dtb/j4-board.dtb" >> "$GITHUB_ENV"
           echo "QCDT_IMAGE=$PWD/board-dtb/j4-qcdt.img" >> "$GITHUB_ENV"
-          echo "DTB_HANDOFF=QCDT-after-ramdisk" >> "$GITHUB_ENV"
+          echo "DTB_HANDOFF=QCDT-after-ramdisk plus separate Medusa-layout raw-FDT-appended diagnostic" >> "$GITHUB_ENV"
 
       - name: Fetch the donor boot image
         run: |
@@ -456,10 +480,34 @@ jobs:
             | tee repack-report.txt
           ./repack-boot inspect boot-k510.img | tee boot-k510-report.txt
           grep -q 'qcdt.*v3' boot-k510-report.txt
-          # Retain the donor header/ramdisk; intentional changes are the kernel,
-          # QCDT table + dt_size, the cmdline word, and the informational id.
+          # Keep the proven QCDT image, and also produce a separate diagnostic
+          # using the Medusa image's observed layout: a mainline-compatible FDT
+          # appended to the kernel payload, with the boot-header dt_size zero.
+          ./repack-boot repack donor/boot.img \
+            --kernel-new out/kernel.payload \
+            --append-dtb "${BOARD_DTB:?compiled mainline DTB missing}" \
+            --out boot-k510-appended-dtb.img \
+            --cmdline-append 'systemd.unified_cgroup_hierarchy=1' \
+            | tee appended-dtb-repack-report.txt
+          ./repack-boot inspect boot-k510-appended-dtb.img \
+            | tee boot-k510-appended-dtb-report.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          image = Path('boot-k510-appended-dtb.img').read_bytes()
+          page, kernel_size, dt_size = (struct.unpack_from('<I', image, off)[0]
+                                        for off in (36, 8, 40))
+          dtb = Path('board-dtb/j4-board.dtb').read_bytes()
+          kernel = image[page:page + kernel_size]
+          assert dt_size == 0, f'expected dt_size=0, got {dt_size}'
+          assert kernel.endswith(dtb), 'mainline FDT is not appended to kernel payload'
+          print(f'validated raw-FDT handoff: {len(dtb)} FDT bytes in kernel_size; dt_size=0')
+          PY
+          # Retain the donor header/ramdisk in each output; checksums let the
+          # two BOOT-only variants be distinguished and rolled back safely.
           sha256sum boot-k510.img > boot-k510.img.sha256
-          cat boot-k510.img.sha256
+          sha256sum boot-k510-appended-dtb.img > boot-k510-appended-dtb.img.sha256
+          cat boot-k510.img.sha256 boot-k510-appended-dtb.img.sha256
 
       - name: Summarise
         if: always()
@@ -506,10 +554,18 @@ jobs:
               echo '</details>'
             fi
             if [ -f boot-k510-report.txt ]; then
-              echo '<details><summary>resulting boot image</summary>'
+              echo '<details><summary>QCDT boot image</summary>'
               echo
               echo '```'
               cat boot-k510-report.txt
+              echo '```'
+              echo '</details>'
+            fi
+            if [ -f boot-k510-appended-dtb-report.txt ]; then
+              echo '<details><summary>Medusa-layout diagnostic boot image</summary>'
+              echo
+              echo '```'
+              cat boot-k510-appended-dtb-report.txt
               echo '```'
               echo '</details>'
             fi
@@ -529,6 +585,10 @@ jobs:
             boot-k510.img
             boot-k510.img.sha256
             boot-k510-report.txt
+            boot-k510-appended-dtb.img
+            boot-k510-appended-dtb.img.sha256
+            boot-k510-appended-dtb-report.txt
+            appended-dtb-repack-report.txt
             repack-report.txt
             build.log
             out/config.full

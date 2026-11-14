@@ -71,7 +71,7 @@ branch before it is on `main`).
 | `sources.env` | all pins: tree, branch, commit, toolchain, donor boot image, boot header addresses | it is the only place pins live |
 | `verify-tree.sh` | rejects a tree that is not the pin, and separately **rejects a tree with no msm8917/8937 support** | run in CI: it correctly rejected the current CAF pin |
 | `config-audit.py` | checks a `.config` against systemd's documented requirements; `hard`/`systemd`/`userspace` severities, alias-aware, `--json` | run against the real 3.18 config (above) and in CI |
-| `repack-boot.c` | Qualcomm v0 Android boot image `inspect` / `build` / `repack`, including QCDT `dt_size` and after-ramdisk placement | synthetic QCDT image round-tripped and inspected in CI |
+| `repack-boot.c` | Qualcomm v0 Android boot image `inspect` / `build` / `repack`; supports both QCDT after ramdisk and raw FDT appended to kernel payload | both synthetic layouts round-trip and inspect in CI |
 | `qcdt.py` | validates the board FDT metadata and creates a Qualcomm QCDT v3 table | unit tests plus C packer integration self-test |
 | `fragment-audit.py` | checks every fragment symbol against the tree's own Kconfig **before** compiling, because `scripts/config` accepts nonsense and `olddefconfig` then drops it silently | run on the real tree: found that the fragment's `DRM_PANEL_SAMSUNG_S6D7AT0B01` does not exist there |
 | `build-kernel.sh` | defconfig → fragments → force the exact symbols systemd needs → build → stage kernel and board DTB → audit | CI kernel build; device boot still requires a hardware test |
@@ -148,9 +148,9 @@ of increasing cost:
 2. Run the workflow with `dry_run=true`. `verify-tree.sh` will say whether the
    tree has the SoC, which defconfig it would use, and whether a j4primelte DTS
    is present. This costs about a minute.
-3. Run it for real. The output `boot-k510.img` is the donor boot image with the
-   new kernel, the dm-verity-free pmOS ramdisk unchanged, and
-   `systemd.unified_cgroup_hierarchy=1` appended to the cmdline.
+3. Run it for real. CI uploads the original QCDT `boot-k510.img` and a
+   separate `boot-k510-appended-dtb.img` diagnostic. Both use the donor's pmOS
+   ramdisk unchanged and append `systemd.unified_cgroup_hierarchy=1` to cmdline.
 
 ## First green build: what it produced
 
@@ -174,31 +174,42 @@ That last one is the exact failure mode this pipeline exists to prevent: a
 kernel that builds perfectly, boots maybe, and cannot run systemd for a reason
 nothing in the build output mentions.
 
-## Device tree: required Qualcomm QCDT handoff
+## Device tree: QCDT and the Medusa kernel-appended layout
 
-The first hardware test reported `Can't get fdt` in Odin/Download Mode. That is
-before Linux starts. The earlier build treated a raw FDT appended to the kernel
-payload as sufficient (and the exact run used for that test had no usable J4+
-FDT handoff). That assumption was wrong for this Qualcomm LK boot path.
+The first hardware report was `Can't get fdt` in Odin/Download Mode. A QCDT v3
+image after the ramdisk, described by the Qualcomm `dt_size` word at boot-header
+offset 40, removed that bootloader error. USB still did not enumerate, so a
+second handoff layout is being tested rather than replacing the passing image.
 
-For the J4+ boot image, the board DT must be packaged as a Qualcomm **QCDT
-version 3 table** after the ramdisk/second-stage payload. The table length goes
-in the Qualcomm `dt_size` word at boot-header offset 40. It must not be appended
-after the gzip kernel as a bare FDT. The current build therefore:
+The user supplied a working Project Medusa J4+ boot image for comparison. Its
+kernel identifies as `3.18.140-ProjectMedusa-CodeAurora/LA.UM.8.6.r1-05300-89xx.0`.
+It contains six concatenated FDTs at the end of the kernel payload, with
+`dt_size=0`; the Rev06 FDT matches board `<8 6>` and PMIC ID `<0x10019 0 0 0>`.
+The other supplied `boot.txt` is a Kylepro/GT-S7580 image and is not used for
+J4+.
 
-1. Compiles `mainline/msm8917-samsung-j4primelte.dts` as the board FDT.
-2. Reads its root `qcom,msm-id`, `qcom,board-id`, and `qcom,pmic-id` tuples and
-   emits QCDT v3 match records (including the J4+ MSM8917/8217/8617 IDs and
-   board tuple `<8 6>`).
-3. Repackages the QCDT table after the donor ramdisk, updates `dt_size`, then
-   reads the image back and validates every record's offset, size, and FDT magic.
+The Rev06 Medusa DTB itself is **not copied verbatim** into the 7.1.3 image:
+its USB controller uses the downstream compatible `qcom,hsusb-otg`, whereas
+this mainline kernel binds `qcom,ci-hdrc` and the mainline 28 nm PHY. A raw
+vendor DTB could therefore prevent the mainline USB controller driver from
+probing. The mainline board FDT already carries the matching J4+ IDs and
+mainline-compatible controller/PHY nodes.
 
-This is now a **hard requirement** for a flashable artifact: if DTS compilation
-or QCDT validation fails, no boot image is produced or uploaded. The synthetic
-CI test validates the container and header placement, but it still cannot prove
-the proprietary bootloader accepts the board match. The next phone test is the
-actual acceptance check; only after the bootloader gets past the FDT handoff can
-we learn anything about kernel bring-up or userspace.
+CI now emits two separate BOOT-only candidates from the same kernel, donor
+ramdisk and mainline board DTB:
+
+1. `boot-k510.img`: QCDT v3 after ramdisk, `dt_size` set to the QCDT length;
+   this is the format that got past the reported FDT error.
+2. `boot-k510-appended-dtb.img`: the mainline-compatible raw FDT appended to
+the kernel payload, `dt_size=0`, matching the layout observed in the Medusa
+boot image. This tests the handoff placement without feeding a 3.18 vendor DTB
+to the 7.1.3 drivers.
+
+Both variants are validated by readback and uploaded separately. The synthetic
+CI test proves their container layout only; it cannot prove that LK selects the
+FDT or that the kernel boots. They are not interchangeable with the Medusa
+kernel's actual six downstream FDTs, and neither should be treated as a proven
+USB fix until tested on the phone.
 
 ### Screen and USB diagnostics
 
@@ -215,10 +226,11 @@ network interface and DHCP.
 
 ## Testing on the phone (no UART; pstore is best-effort)
 
-1. Keep the known-good 3.18 `boot.img` next to you. Flashing is reversible: the
-   BOOT partition is the only thing that changes.
-2. Flash `boot-k510.img` to BOOT only. Do **not** touch SYSTEM: the rootfs stays
-   the working OpenRC armv7 install.
+1. Keep the known-good Medusa 3.18 `boot.img` and the current QCDT image next
+   to you. Flashing is reversible: change BOOT only.
+2. To test the newly observed handoff layout, flash
+   `boot-k510-appended-dtb.img` to BOOT only. Do **not** touch SYSTEM. Test the
+   QCDT `boot-k510.img` separately; never combine their payloads.
 3. Record the screen from power-on and observe USB on the host:
    * **Samsung logo remains** → expected with the M1 simple-framebuffer; it does
      not by itself prove a hang.
