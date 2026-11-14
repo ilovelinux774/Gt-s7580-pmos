@@ -171,6 +171,19 @@ jobs:
             echo 'The build validates the image format and size; it does not establish hardware boot success.'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Surface failed kernel build log tail
+        if: failure()
+        run: |
+          set -uo pipefail
+          if [ -s boot-build.log ]; then
+            tail -n 100 boot-build.log | while IFS= read -r line; do
+              escaped=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r/%0D/g')
+              echo "::error title=4.19 kernel build log::$escaped"
+            done
+          else
+            echo '::error title=4.19 kernel build log::boot-build.log was not created'
+          fi
+
       - name: Upload failed-build diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
