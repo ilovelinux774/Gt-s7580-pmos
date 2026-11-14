@@ -68,6 +68,8 @@ def main() -> None:
         if source_path.endswith("msm8917-sec-j4primelte-sea-open-r06.dts"):
             text = text.replace('../qcom/msm8917.dtsi', '../vendor-legacy/qcom/msm8917.dtsi')
             text = text.replace('../qcom/msm8917-audio.dtsi', '../vendor-legacy/qcom/msm8917-audio.dtsi')
+        if source_path.endswith("msm8917-sec-j4primelte-display-r03.dtsi"):
+            text = text.replace('"samsung/msm8917-mdss-panels.dtsi"', '"msm8917-mdss-panels.dtsi"')
         if source_path.endswith("msm8917-sec-j4primelte-sea-open-r06.dtsi"):
             # The 4.19 reference has no Samsung sec_ts driver. Keep the I2C bus
             # but suppress this nonessential device for the initial boot test.
