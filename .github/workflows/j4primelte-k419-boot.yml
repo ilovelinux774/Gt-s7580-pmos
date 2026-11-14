@@ -171,6 +171,21 @@ jobs:
             echo 'The build validates the image format and size; it does not establish hardware boot success.'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Upload failed-build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-k419-boot-failure-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            boot-build.log
+            systemd-debug-initramfs.cpio.xz
+            out/.config
+            out/config.full
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/dts/samsung/msm8917-sec-j4primelte-sea-open-r06.dtb
+
       - name: Upload J4+ BOOT image and verification reports
         uses: actions/upload-artifact@v4
         with:
