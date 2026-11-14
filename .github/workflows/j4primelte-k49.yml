@@ -124,8 +124,12 @@ jobs:
           rc=${PIPESTATUS[0]}
           set -e
           if [ "$rc" -ne 0 ]; then
-            grep -m 20 -E 'error:|Error [0-9]+|fatal:|No rule to make|required for systemd|incompatible Android|missing compressed kernel|missing J4' kernel-build.log \
-              | while IFS= read -r line; do echo "::error title=Linux 4.9 build failure::$line"; done
+            grep -m 20 -E 'error:|Error [0-9]+|fatal:|No rule to make|required for systemd|incompatible Android|missing compressed kernel|missing J4|undefined reference|cannot find' kernel-build.log \
+              | while IFS= read -r line; do echo "::error title=Linux 4.9 build failure::$line"; done || true
+            while IFS= read -r line; do
+              escaped=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r/%0D/g')
+              echo "::error title=Linux 4.9 build log tail::$escaped"
+            done < <(tail -n 40 kernel-build.log)
             {
               echo '### Linux 4.9 build failure details'
               echo '```text'
