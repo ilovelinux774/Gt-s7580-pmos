@@ -301,3 +301,15 @@ jobs:
             source-report.txt
             initramfs-build.log
             boot-build.log
+
+      - name: Upload lightweight USB diagnostic BOOT image
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-k419-debug-boot-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            out/j4primelte-k419-debug-boot.img
+            out/j4primelte-k419-debug-boot.img.sha256
+            out/debug-boot-report.txt
+            out/debug-cmdline.txt
