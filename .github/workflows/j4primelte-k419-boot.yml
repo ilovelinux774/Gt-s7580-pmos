@@ -149,11 +149,31 @@ jobs:
       - name: Build diagnostic and Arch root-switch initramfs images
         run: |
           set -euo pipefail
+          set +e
           bash "$J4_DIR/build-debug-initramfs.sh" \
-            systemd-debs systemd-debug-build systemd-debug-initramfs.cpio.xz
-          bash "$J4_DIR/build-rootfs-initramfs.sh" \
-            systemd-debs arch-root-initramfs-build arch-root-initramfs.cpio.xz \
-            "$ARCHLINUXARM_ROOT_LABEL"
+            systemd-debs systemd-debug-build systemd-debug-initramfs.cpio.xz \
+            2>&1 | tee initramfs-build.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -eq 0 ]; then
+            bash "$J4_DIR/build-rootfs-initramfs.sh" \
+              systemd-debs arch-root-initramfs-build arch-root-initramfs.cpio.xz \
+              "$ARCHLINUXARM_ROOT_LABEL" 2>&1 | tee -a initramfs-build.log
+            rc=${PIPESTATUS[0]}
+          fi
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            tail -n 100 initramfs-build.log | while IFS= read -r line; do
+              escaped=$(printf '%s' "$line" | sed 's/%/%25/g; s/::/%3A%3A/g; s/\r/%0D/g')
+              echo "::error title=initramfs build log::$escaped"
+            done
+            {
+              echo '### Initramfs build failure details'
+              echo '```text'
+              tail -n 120 initramfs-build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
           xz -t systemd-debug-initramfs.cpio.xz
           xz -t arch-root-initramfs.cpio.xz
           sha256sum systemd-debug-initramfs.cpio.xz > initramfs.sha256
@@ -221,6 +241,7 @@ jobs:
           retention-days: 7
           path: |
             boot-build.log
+            initramfs-build.log
             systemd-debug-initramfs.cpio.xz
             arch-root-initramfs.cpio.xz
             ArchLinuxARM-aarch64-rootfs.tar.gz
@@ -264,4 +285,5 @@ jobs:
             rootfs.img
             rootfs.img.sha256
             source-report.txt
+            initramfs-build.log
             boot-build.log
