@@ -13,7 +13,8 @@ The `J4+ Linux 4.19 Arch Linux ARM BOOT image` workflow now produces:
 * `j4primelte-k419-arch-boot.img` — kernel, J4+ QCDT, and root-switch initramfs;
 * `rootfs.img` — a 2,400 MiB ext4 filesystem labeled `ARCHROOT`, populated
   from the official rootfs and checked to retain at least 5% free space;
-* `ArchLinuxARM-aarch64-rootfs.tar.gz` — the upstream aarch64 archive, checked
+* `ArchLinuxARM-aarch64-rootfs.tar.gz` — the upstream aarch64 archive,
+  authenticated with its detached signature and pinned builder key, then checked
   for AArch64 ELF executables;
 * the root-switch initramfs, checksums, config, source and image reports;
 * the former systemd diagnostic initramfs as a separate troubleshooting artifact.
@@ -22,8 +23,10 @@ The boot command line selects `root=LABEL=ARCHROOT rootfstype=ext4 rootwait rw`.
 The initramfs waits for that filesystem, mounts it read-write, and switches to
 `/sbin/init`. The kernel config requires built-in MMC, the J4+ Qualcomm MMC
 host driver, and ext4. The rootfs source is the upstream rolling
-`ArchLinuxARM-aarch64-latest.tar.gz`; CI records the exact downloaded archive's
-SHA-256, but the upstream URL itself is not version-pinned.
+`ArchLinuxARM-aarch64-latest.tar.gz`. The upstream serves it over HTTP, so CI
+verifies the detached signature using a pinned Arch Linux ARM builder key and
+keyring before inspecting the archive. CI records the downloaded archive's
+SHA-256; the upstream rootfs itself is rolling, not version-pinned.
 
 A successful CI build validates source/build inputs, image structure and BOOT
 size only. It does not prove hardware boot success.

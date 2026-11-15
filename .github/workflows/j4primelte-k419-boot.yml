@@ -43,7 +43,8 @@ jobs:
             RIVA_KERNEL_VERSION J4_DTS_SOURCE_REPO J4_DTS_SOURCE_BRANCH J4_DTS_SOURCE_COMMIT \
             J4_DTS_SOURCE_BOARD J4_BOOT_PARTITION_BYTES J4_BOOT_DONOR_PATH \
             J4_BOOT_DONOR_SHA256 J4_BOOT_PAGE_SIZE J4_DEBUG_SYSTEMD_VERSION \
-            ARCHLINUXARM_ROOTFS_URL ARCHLINUXARM_ROOT_LABEL \
+            ARCHLINUXARM_ROOTFS_URL ARCHLINUXARM_BUILDER_FINGERPRINT \
+            ARCHLINUXARM_KEYRING_SHA256 ARCHLINUXARM_ROOT_LABEL \
             ARCHLINUXARM_ROOTFS_IMAGE_MIB J4_ARCH_SYSTEM_PARTITION_BYTES; do
             printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
           done
@@ -55,7 +56,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev libelf-dev rsync device-tree-compiler \
             gcc gcc-aarch64-linux-gnu libc6-dev python3 dpkg-dev cpio xz-utils \
-            curl ca-certificates e2fsprogs
+            curl ca-certificates e2fsprogs gpgv
           sudo update-ca-certificates
           gcc -O2 -Wall -Wextra -Werror -o repack-boot ci/j4primelte/k510/repack-boot.c
           ./repack-boot inspect "$J4_BOOT_DONOR_PATH" >/dev/null
@@ -187,7 +188,7 @@ jobs:
           sha256sum "$J4_DIR/sources.env" "$J4_DIR/import-j4-dts.py" \
             "$J4_DIR/patch-riva-kernel.py" "$J4_DIR/build-boot-image.sh" \
             "$J4_DIR/build-rootfs-initramfs.sh" "$J4_DIR/build-archlinuxarm-rootfs.sh" \
-            "$J4_DIR/build-rootfs-image.sh" \
+            "$J4_DIR/build-rootfs-image.sh" "$J4_DIR/archlinuxarm.gpg" \
             "$J4_DIR/arch-root-cmdline.py" "$J4_DIR/debug-cmdline.py" \
             > out/port-inputs.sha256
           {
@@ -224,6 +225,8 @@ jobs:
             arch-root-initramfs.cpio.xz
             ArchLinuxARM-aarch64-rootfs.tar.gz
             ArchLinuxARM-aarch64-rootfs.tar.gz.sha256
+            ArchLinuxARM-aarch64-rootfs.tar.gz.sig
+            ci/j4primelte/k419/archlinuxarm.gpg
             rootfs.img
             rootfs.img.sha256
             out/.config
@@ -256,6 +259,8 @@ jobs:
             arch-root-initramfs.sha256
             ArchLinuxARM-aarch64-rootfs.tar.gz
             ArchLinuxARM-aarch64-rootfs.tar.gz.sha256
+            ArchLinuxARM-aarch64-rootfs.tar.gz.sig
+            ci/j4primelte/k419/archlinuxarm.gpg
             rootfs.img
             rootfs.img.sha256
             source-report.txt

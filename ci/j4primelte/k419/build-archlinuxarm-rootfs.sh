@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fetch and validate the official Arch Linux ARM aarch64 rootfs archive.
+# Fetch and authenticate the official Arch Linux ARM aarch64 rootfs archive.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -13,29 +13,62 @@ source "$HERE/sources.env"
 out=$(realpath -m "$1")
 mkdir -p "$(dirname "$out")"
 tmp=$(mktemp "${TMPDIR:-/tmp}/j4-archroot.XXXXXX")
+sig_tmp=$(mktemp "${TMPDIR:-/tmp}/j4-archroot-sig.XXXXXX")
 curl_error=$(mktemp "${TMPDIR:-/tmp}/j4-archroot-curl.XXXXXX")
-trap 'rm -f "$tmp" "$curl_error"' EXIT
+verify_error=$(mktemp "${TMPDIR:-/tmp}/j4-archroot-gpgv.XXXXXX")
+verify_status=$(mktemp "${TMPDIR:-/tmp}/j4-archroot-status.XXXXXX")
+trap 'rm -f "$tmp" "$sig_tmp" "$curl_error" "$verify_error" "$verify_status"' EXIT
 
-command -v curl >/dev/null || { echo "curl is required" >&2; exit 1; }
-command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
+for tool in curl python3 gpgv sha256sum; do
+  command -v "$tool" >/dev/null || { echo "$tool is required" >&2; exit 1; }
+done
 
-if curl --fail --location --retry 4 --retry-delay 2 --connect-timeout 30 \
-  --output "$tmp" "$ARCHLINUXARM_ROOTFS_URL" 2>"$curl_error"; then
-  cat "$curl_error" >&2
-else
-  curl_rc=$?
-  cat "$curl_error" >&2
-  detail=$(tail -n 5 "$curl_error" | tr '\r\n' ' ' | sed 's/%/%25/g; s/::/%3A%3A/g')
-  echo "::error title=Arch Linux ARM rootfs download::curl exited $curl_rc: $detail"
-  if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
-    printf '\nArch Linux ARM rootfs download failed (curl %s): `%s`\n' "$curl_rc" "$detail" >> "$GITHUB_STEP_SUMMARY"
+download() {
+  local url=$1 destination=$2 description=$3 curl_rc detail
+  : > "$curl_error"
+  if curl --fail --location --retry 4 --retry-delay 2 --connect-timeout 30 \
+    --output "$destination" "$url" 2>"$curl_error"; then
+    cat "$curl_error" >&2
+  else
+    curl_rc=$?
+    cat "$curl_error" >&2
+    detail=$(tail -n 5 "$curl_error" | tr '\r\n' ' ' | sed 's/%/%25/g; s/::/%3A%3A/g')
+    echo "::error title=Arch Linux ARM $description download::curl exited $curl_rc: $detail"
+    if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+      printf '\nArch Linux ARM %s download failed (curl %s): `%s`\n' \
+        "$description" "$curl_rc" "$detail" >> "$GITHUB_STEP_SUMMARY"
+    fi
+    return "$curl_rc"
   fi
-  exit "$curl_rc"
-fi
-test -s "$tmp"
+  [[ -s $destination ]] || { echo "downloaded $description is empty" >&2; return 1; }
+}
 
-# Validate the archive without extracting an untrusted tarball onto the runner.
-# Arch Linux ARM aarch64 binaries use ELF64 with e_machine=183 (EM_AARCH64).
+download "$ARCHLINUXARM_ROOTFS_URL" "$tmp" rootfs
+download "$ARCHLINUXARM_ROOTFS_URL.sig" "$sig_tmp" signature
+
+echo "$ARCHLINUXARM_KEYRING_SHA256  $HERE/archlinuxarm.gpg" | sha256sum -c -
+set +e
+gpgv --status-fd 1 --keyring "$HERE/archlinuxarm.gpg" \
+  "$sig_tmp" "$tmp" >"$verify_status" 2>"$verify_error"
+gpgv_rc=$?
+set -e
+cat "$verify_error" >&2
+if ((gpgv_rc != 0)); then
+  detail=$(tail -n 5 "$verify_error" | tr '\r\n' ' ' | sed 's/%/%25/g; s/::/%3A%3A/g')
+  echo "::error title=Arch Linux ARM rootfs signature invalid::gpgv exited $gpgv_rc: $detail"
+  exit "$gpgv_rc"
+fi
+if ! awk -v expected="$ARCHLINUXARM_BUILDER_FINGERPRINT" \
+  '$1 == "[GNUPG:]" && $2 == "VALIDSIG" && (toupper($3) == expected || toupper($NF) == expected) { valid = 1 } END { exit !valid }' \
+  "$verify_status"; then
+  echo "::error title=Arch Linux ARM signer mismatch::signature is not by pinned builder $ARCHLINUXARM_BUILDER_FINGERPRINT"
+  exit 1
+fi
+printf 'Verified rootfs detached signature from pinned Arch Linux ARM builder %s\n' \
+  "$ARCHLINUXARM_BUILDER_FINGERPRINT"
+
+# Validate the authenticated archive without extracting it yet. Arch Linux ARM
+# aarch64 binaries use ELF64 with e_machine=183 (EM_AARCH64).
 python3 - "$tmp" <<'PY'
 import sys
 import tarfile
@@ -67,6 +100,7 @@ with tarfile.open(archive, "r:gz") as tf:
 PY
 
 install -m 0644 "$tmp" "$out"
+install -m 0644 "$sig_tmp" "$out.sig"
 sha256sum "$out" > "$out.sha256"
 printf 'rootfs: %s\nlabel required by boot initramfs: %s\n' \
   "$out" "$ARCHLINUXARM_ROOT_LABEL"
