@@ -63,7 +63,7 @@ busybox="$root/bin/busybox"
 mkdir -p "$root/bin"
 ln -sfn "${busybox#"$root"}" "$root/bin/sh"
 ln -sfn "${busybox#"$root"}" "$root/bin/ash"
-for applet in grep mkdir mount seq sleep umount; do
+for applet in cat dmesg grep head ls mkdir mount seq sleep tail umount uname; do
   ln -sfn "${busybox#"$root"}" "$root/bin/$applet"
 done
 
