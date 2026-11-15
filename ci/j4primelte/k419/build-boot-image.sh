@@ -2,10 +2,11 @@
 # Build a Linux 4.19.325 J4+ kernel/DTB and package the Arch ARM root-switch initramfs.
 set -euo pipefail
 
-tree=${1:?usage: build-boot-image.sh <kernel-tree> <out-dir> <J4-donor-boot.img> <arch-root-initramfs.cpio.xz>}
+tree=${1:?usage: build-boot-image.sh <kernel-tree> <out-dir> <J4-donor-boot.img> <arch-root-initramfs.cpio.xz> <systemd-debug-initramfs.cpio.xz>}
 out=${2:?output directory}
 donor=${3:?J4+ donor boot image}
 ramdisk=${4:?Arch root-switch initramfs}
+debug_ramdisk=${5:?systemd USB diagnostic initramfs}
 
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(cd -- "$HERE/../../.." && pwd)
@@ -20,7 +21,10 @@ make_args=(ARCH=arm64 "CROSS_COMPILE=$cross" PYTHON=python3
 [[ -x "$(command -v "${cross}gcc" || true)" ]] || {
   echo "missing cross compiler: ${cross}gcc" >&2; exit 1;
 }
-[[ -s "$donor" && -s "$ramdisk" ]] || { echo "donor boot image or initramfs is empty/missing" >&2; exit 1; }
+[[ -s "$donor" && -s "$ramdisk" && -s "$debug_ramdisk" ]] || {
+  echo "donor boot image or initramfs is empty/missing" >&2
+  exit 1
+}
 version=$(sed -n 's/^VERSION *= *//p' "$tree/Makefile" | head -1)
 patchlevel=$(sed -n 's/^PATCHLEVEL *= *//p' "$tree/Makefile" | head -1)
 sublevel=$(sed -n 's/^SUBLEVEL *= *//p' "$tree/Makefile" | head -1)
@@ -30,6 +34,7 @@ sublevel=$(sed -n 's/^SUBLEVEL *= *//p' "$tree/Makefile" | head -1)
 }
 echo "$J4_BOOT_DONOR_SHA256  $donor" | sha256sum -c -
 xz -t "$ramdisk"
+xz -t "$debug_ramdisk"
 
 export ARCH=arm64 CROSS_COMPILE="$cross"
 export KBUILD_BUILD_USER=pmos-ci KBUILD_BUILD_HOST=j4primelte
@@ -120,5 +125,31 @@ if grep -Eq '(^| )(init|rdinit)=' "$out/arch-root-cmdline.txt"; then
   exit 1
 fi
 sha256sum "$out/j4primelte-k419-arch-boot.img" > "$out/j4primelte-k419-arch-boot.img.sha256"
-printf 'BOOT image size: %s / %s bytes\n' "$bytes" "$J4_BOOT_PARTITION_BYTES"
+printf 'Arch BOOT image size: %s / %s bytes\n' "$bytes" "$J4_BOOT_PARTITION_BYTES"
 cat "$out/j4primelte-k419-arch-boot.img.sha256"
+
+# Build a temporary diagnostic BOOT image from the exact same kernel and QCDT.
+# Its initramfs never mounts ARCHROOT; it starts systemd in emergency mode and
+# exposes USB ACM/RNDIS for bring-up diagnosis when the framebuffer is silent.
+python3 "$HERE/debug-cmdline.py" "$donor" > "$out/debug-cmdline.txt"
+"$out/repack-boot" repack "$donor" \
+  --kernel-new "$out/kernel.payload" \
+  --ramdisk-new "$debug_ramdisk" \
+  --dt "$out/j4primelte-rev06.qcdt" \
+  --cmdline-replace "$(cat "$out/debug-cmdline.txt")" \
+  --cmdline-clear-extra \
+  --out "$out/j4primelte-k419-debug-boot.img" | tee "$out/debug-repack-report.txt"
+"$out/repack-boot" inspect "$out/j4primelte-k419-debug-boot.img" \
+  | tee "$out/debug-boot-report.txt"
+debug_bytes=$(stat -c %s "$out/j4primelte-k419-debug-boot.img")
+if (( debug_bytes > J4_BOOT_PARTITION_BYTES )); then
+  echo "diagnostic BOOT image exceeds the J4+ limit: $debug_bytes > $J4_BOOT_PARTITION_BYTES bytes" >&2
+  exit 1
+fi
+if grep -Eq '(^| )(root|rootfstype|rootflags|init|rdinit)=' "$out/debug-cmdline.txt"; then
+  echo 'root/init override unexpectedly present in diagnostic command line' >&2
+  exit 1
+fi
+sha256sum "$out/j4primelte-k419-debug-boot.img" > "$out/j4primelte-k419-debug-boot.img.sha256"
+printf 'Diagnostic BOOT image size: %s / %s bytes\n' "$debug_bytes" "$J4_BOOT_PARTITION_BYTES"
+cat "$out/j4primelte-k419-debug-boot.img.sha256"

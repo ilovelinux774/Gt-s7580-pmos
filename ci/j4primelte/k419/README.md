@@ -11,13 +11,22 @@ the 32 MiB BOOT partition.
 The `J4+ Linux 4.19 Arch Linux ARM BOOT image` workflow now produces:
 
 * `j4primelte-k419-arch-boot.img` — kernel, J4+ QCDT, and root-switch initramfs;
+* `j4primelte-k419-debug-boot.img` — the same kernel and QCDT with a temporary
+  systemd emergency initramfs that does not mount or write `ARCHROOT`;
 * `rootfs.img` — a 2,400 MiB ext4 filesystem labeled `ARCHROOT`, populated
   from the official rootfs and checked to retain at least 5% free space;
 * `ArchLinuxARM-aarch64-rootfs.tar.gz` — the upstream aarch64 archive,
   authenticated with its detached signature and pinned builder key, then checked
   for AArch64 ELF executables;
-* the root-switch initramfs, checksums, config, source and image reports;
-* the former systemd diagnostic initramfs as a separate troubleshooting artifact.
+* the root-switch and diagnostic initramfs images, checksums, config, source
+  and image reports.
+
+The diagnostic BOOT image starts a systemd emergency shell in its initramfs and
+never mounts `ARCHROOT`. It tries to expose a USB ACM shell and an RNDIS network
+interface so early boot can be diagnosed even if the display remains on the
+bootloader splash. The ACM shell is an unauthenticated root shell: use only over
+a direct USB connection to a trusted host, and restore the Arch BOOT image when
+done testing. This debug image is not the Arch boot image.
 
 The boot command line selects `root=LABEL=ARCHROOT rootfstype=ext4 rootwait rw`.
 The initramfs waits for that filesystem, mounts it read-write, and switches to
@@ -39,8 +48,10 @@ provided this read-only recovery output for `/system`:
 
 * `/dev/block/by-name/system` resolves to `/dev/block/mmcblk0p47`;
 * size: `2,617,245,696` bytes;
-* filesystem: ext4, currently labeled `pmOS_root` with UUID
+* the initial read-only inspection showed ext4 label `pmOS_root` and UUID
   `86e7262b-b628-4b89-8a6e-e96ef9b1aab6`;
+* after installing the rootfs, the user confirmed ext4 label `ARCHROOT` and UUID
+  `a7c241bc-709c-413c-baa1-1a0dceb431bb`;
 * the user reports that a backup has already been made.
 
 The generated `rootfs.img` is 2,400 MiB (2,516,582,400 bytes), which is

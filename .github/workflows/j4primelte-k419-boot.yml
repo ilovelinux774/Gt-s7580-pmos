@@ -187,7 +187,7 @@ jobs:
           set +e
           bash "$J4_DIR/build-boot-image.sh" kernel "$PWD/out" \
             "$J4_BOOT_DONOR_PATH" "$PWD/arch-root-initramfs.cpio.xz" \
-            2>&1 | tee boot-build.log
+            "$PWD/systemd-debug-initramfs.cpio.xz" 2>&1 | tee boot-build.log
           rc=${PIPESTATUS[0]}
           set -e
           if [ "$rc" -ne 0 ]; then
@@ -207,7 +207,8 @@ jobs:
           fi
           sha256sum "$J4_DIR/sources.env" "$J4_DIR/import-j4-dts.py" \
             "$J4_DIR/patch-riva-kernel.py" "$J4_DIR/build-boot-image.sh" \
-            "$J4_DIR/build-rootfs-initramfs.sh" "$J4_DIR/build-archlinuxarm-rootfs.sh" \
+            "$J4_DIR/build-rootfs-initramfs.sh" "$J4_DIR/build-debug-initramfs.sh" \
+            "$J4_DIR/build-archlinuxarm-rootfs.sh" \
             "$J4_DIR/build-rootfs-image.sh" "$J4_DIR/archlinuxarm.asc" \
             "$J4_DIR/arch-root-cmdline.py" "$J4_DIR/debug-cmdline.py" \
             > out/port-inputs.sha256
@@ -216,7 +217,12 @@ jobs:
             echo '```text'
             cat out/boot-report.txt
             echo '```'
-            echo 'The build validates the image format and size; it does not establish hardware boot success.'
+            echo '### Temporary USB diagnostic BOOT image'
+            echo '```text'
+            cat out/debug-boot-report.txt
+            echo '```'
+            echo 'The diagnostic image shares the kernel and QCDT but does not mount ARCHROOT; it provides a USB ACM/RNDIS debug path.'
+            echo 'The build validates image format and size only; it does not establish hardware boot success.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Surface failed kernel build log tail
@@ -252,6 +258,9 @@ jobs:
             rootfs.img.sha256
             out/.config
             out/config.full
+            out/j4primelte-k419-debug-boot.img
+            out/debug-boot-report.txt
+            out/debug-cmdline.txt
             out/arch/arm64/boot/Image.gz
             out/arch/arm64/boot/dts/samsung/msm8917-sec-j4primelte-sea-open-r06.dtb
 
@@ -264,6 +273,11 @@ jobs:
           path: |
             out/j4primelte-k419-arch-boot.img
             out/j4primelte-k419-arch-boot.img.sha256
+            out/j4primelte-k419-debug-boot.img
+            out/j4primelte-k419-debug-boot.img.sha256
+            out/debug-boot-report.txt
+            out/debug-repack-report.txt
+            out/debug-cmdline.txt
             out/boot-report.txt
             out/repack-report.txt
             out/donor-report.txt
