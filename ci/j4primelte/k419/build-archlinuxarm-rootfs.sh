@@ -17,7 +17,8 @@ sig_tmp=$(mktemp "${TMPDIR:-/tmp}/j4-archroot-sig.XXXXXX")
 curl_error=$(mktemp "${TMPDIR:-/tmp}/j4-archroot-curl.XXXXXX")
 verify_error=$(mktemp "${TMPDIR:-/tmp}/j4-archroot-gpgv.XXXXXX")
 verify_status=$(mktemp "${TMPDIR:-/tmp}/j4-archroot-status.XXXXXX")
-trap 'rm -f "$tmp" "$sig_tmp" "$curl_error" "$verify_error" "$verify_status"' EXIT
+keyring_tmp=$(mktemp "${TMPDIR:-/tmp}/j4-archroot-keyring.XXXXXX")
+trap 'rm -f "$tmp" "$sig_tmp" "$curl_error" "$verify_error" "$verify_status" "$keyring_tmp"' EXIT
 
 for tool in curl python3 gpgv sha256sum; do
   command -v "$tool" >/dev/null || { echo "$tool is required" >&2; exit 1; }
@@ -46,9 +47,38 @@ download() {
 download "$ARCHLINUXARM_ROOTFS_URL" "$tmp" rootfs
 download "$ARCHLINUXARM_ROOTFS_URL.sig" "$sig_tmp" signature
 
-echo "$ARCHLINUXARM_KEYRING_SHA256  $HERE/archlinuxarm.gpg" | sha256sum -c -
+echo "$ARCHLINUXARM_KEYRING_SHA256  $HERE/archlinuxarm.asc" | sha256sum -c -
+python3 - "$HERE/archlinuxarm.asc" "$keyring_tmp" <<'PY'
+import base64
+import sys
+from pathlib import Path
+
+source, target = map(Path, sys.argv[1:])
+lines = source.read_text(encoding="ascii").splitlines()
+inside = False
+ended = False
+payload = []
+for line in lines:
+    if line == "-----BEGIN PGP PUBLIC KEY BLOCK-----":
+        if inside:
+            raise SystemExit("nested ASCII-armored key block")
+        inside = True
+        continue
+    if line == "-----END PGP PUBLIC KEY BLOCK-----":
+        ended = True
+        break
+    if not inside or not line or line.startswith("=") or ":" in line:
+        continue
+    payload.append(line)
+if not inside or not ended or not payload:
+    raise SystemExit("invalid ASCII-armored Arch Linux ARM keyring")
+data = base64.b64decode("".join(payload), validate=True)
+if not data or data[0] not in (0x98, 0x99, 0xC6):
+    raise SystemExit("dearmored keyring has no OpenPGP public-key packet")
+target.write_bytes(data)
+PY
 set +e
-gpgv --status-fd 1 --keyring "$HERE/archlinuxarm.gpg" \
+gpgv --status-fd 1 --keyring "$keyring_tmp" \
   "$sig_tmp" "$tmp" >"$verify_status" 2>"$verify_error"
 gpgv_rc=$?
 set -e

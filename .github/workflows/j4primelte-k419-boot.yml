@@ -188,7 +188,7 @@ jobs:
           sha256sum "$J4_DIR/sources.env" "$J4_DIR/import-j4-dts.py" \
             "$J4_DIR/patch-riva-kernel.py" "$J4_DIR/build-boot-image.sh" \
             "$J4_DIR/build-rootfs-initramfs.sh" "$J4_DIR/build-archlinuxarm-rootfs.sh" \
-            "$J4_DIR/build-rootfs-image.sh" "$J4_DIR/archlinuxarm.gpg" \
+            "$J4_DIR/build-rootfs-image.sh" "$J4_DIR/archlinuxarm.asc" \
             "$J4_DIR/arch-root-cmdline.py" "$J4_DIR/debug-cmdline.py" \
             > out/port-inputs.sha256
           {
@@ -226,7 +226,7 @@ jobs:
             ArchLinuxARM-aarch64-rootfs.tar.gz
             ArchLinuxARM-aarch64-rootfs.tar.gz.sha256
             ArchLinuxARM-aarch64-rootfs.tar.gz.sig
-            ci/j4primelte/k419/archlinuxarm.gpg
+            ci/j4primelte/k419/archlinuxarm.asc
             rootfs.img
             rootfs.img.sha256
             out/.config
@@ -260,7 +260,7 @@ jobs:
             ArchLinuxARM-aarch64-rootfs.tar.gz
             ArchLinuxARM-aarch64-rootfs.tar.gz.sha256
             ArchLinuxARM-aarch64-rootfs.tar.gz.sig
-            ci/j4primelte/k419/archlinuxarm.gpg
+            ci/j4primelte/k419/archlinuxarm.asc
             rootfs.img
             rootfs.img.sha256
             source-report.txt
