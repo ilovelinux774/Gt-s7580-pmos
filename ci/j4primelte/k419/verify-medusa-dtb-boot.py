@@ -26,6 +26,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("boot", type=Path)
     parser.add_argument("dtb", type=Path)
+    parser.add_argument("--expect-kernel-version", help="require this Linux version string in the gzip image")
     args = parser.parse_args()
     try:
         image = args.boot.read_bytes()
@@ -62,10 +63,13 @@ def main() -> int:
             raise ValueError("the Medusa DTB is not appended to the kernel payload")
         gzip_kernel = kernel[:-len(dtb)]
         decoder = zlib.decompressobj(31)
-        decoder.decompress(gzip_kernel)
-        decoder.flush()
+        uncompressed = decoder.decompress(gzip_kernel) + decoder.flush()
         if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
             raise ValueError("kernel payload is not exactly gzip Image followed by the appended DTB")
+        if args.expect_kernel_version:
+            marker = f"Linux version {args.expect_kernel_version}".encode("ascii")
+            if marker not in uncompressed:
+                raise ValueError(f"kernel does not contain expected version {args.expect_kernel_version}")
 
         cmdline = image[64:64 + 512].split(b"\0", 1)[0].decode("ascii")
         forbidden = ("root=", "rootfstype=", "rootflags=", "init=", "rdinit=", "pmos_", "pmos.")

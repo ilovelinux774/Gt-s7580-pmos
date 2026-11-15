@@ -43,8 +43,9 @@ jobs:
             RIVA_KERNEL_VERSION J4_DTS_SOURCE_REPO J4_DTS_SOURCE_BRANCH J4_DTS_SOURCE_COMMIT \
             J4_DTS_SOURCE_BOARD J4_BOOT_PARTITION_BYTES J4_BOOT_DONOR_PATH \
             J4_BOOT_DONOR_SHA256 J4_BOOT_PAGE_SIZE J4_DEBUG_SYSTEMD_VERSION \
-            MEDUSA_J4_DTB_SHA256 MEDUSA_BOOT_PAGE_SIZE MEDUSA_BOOT_KERNEL_ADDR \
-            MEDUSA_BOOT_RAMDISK_ADDR MEDUSA_BOOT_SECOND_ADDR MEDUSA_BOOT_TAGS_ADDR \
+            MEDUSA_J4_DTB_SHA256 MEDUSA_KERNEL_PAYLOAD_SHA256 MEDUSA_KERNEL_VERSION \
+            MEDUSA_BOOT_PAGE_SIZE MEDUSA_BOOT_KERNEL_ADDR MEDUSA_BOOT_RAMDISK_ADDR \
+            MEDUSA_BOOT_SECOND_ADDR MEDUSA_BOOT_TAGS_ADDR \
             ARCHLINUXARM_ROOTFS_URL ARCHLINUXARM_BUILDER_FINGERPRINT \
             ARCHLINUXARM_KEYRING_SHA256 ARCHLINUXARM_ROOT_LABEL \
             ARCHLINUXARM_ROOTFS_IMAGE_MIB J4_ARCH_SYSTEM_PARTITION_BYTES; do
@@ -261,9 +262,9 @@ jobs:
             out/.config
             out/config.full
             out/j4primelte-k419-debug-boot.img
-            out/j4primelte-k419-medusa-dtb-debug-boot.img
-            out/medusa-dtb-build-report.txt
-            out/medusa-dtb-boot-report.txt
+            out/j4primelte-medusa-matched-debug-boot.img
+            out/medusa-debug-build-report.txt
+            out/medusa-debug-boot-report.txt
             out/debug-boot-report.txt
             out/debug-cmdline.txt
             out/arch/arm64/boot/Image.gz
@@ -280,12 +281,11 @@ jobs:
             out/j4primelte-k419-arch-boot.img.sha256
             out/j4primelte-k419-debug-boot.img
             out/j4primelte-k419-debug-boot.img.sha256
-            out/j4primelte-k419-medusa-dtb-debug-boot.img
-            out/j4primelte-k419-medusa-dtb-debug-boot.img.sha256
-            out/medusa-dtb-build-report.txt
-            out/medusa-dtb-boot-report.txt
+            out/j4primelte-medusa-matched-debug-boot.img
+            out/j4primelte-medusa-matched-debug-boot.img.sha256
+            out/medusa-debug-build-report.txt
+            out/medusa-debug-boot-report.txt
             out/medusa-debug-cmdline.txt
-            out/kernel-medusa-appended.payload
             out/debug-boot-report.txt
             out/debug-repack-report.txt
             out/debug-cmdline.txt
@@ -325,15 +325,15 @@ jobs:
             out/debug-boot-report.txt
             out/debug-cmdline.txt
 
-      - name: Upload Medusa-DTB diagnostic BOOT image separately
+      - name: Upload matched Medusa diagnostic BOOT image separately
         uses: actions/upload-artifact@v4
         with:
-          name: j4primelte-k419-medusa-dtb-debug-${{ github.run_id }}
+          name: j4primelte-medusa-matched-debug-${{ github.run_id }}
           if-no-files-found: error
           retention-days: 30
           path: |
-            out/j4primelte-k419-medusa-dtb-debug-boot.img
-            out/j4primelte-k419-medusa-dtb-debug-boot.img.sha256
-            out/medusa-dtb-build-report.txt
-            out/medusa-dtb-boot-report.txt
+            out/j4primelte-medusa-matched-debug-boot.img
+            out/j4primelte-medusa-matched-debug-boot.img.sha256
+            out/medusa-debug-build-report.txt
+            out/medusa-debug-boot-report.txt
             out/medusa-debug-cmdline.txt

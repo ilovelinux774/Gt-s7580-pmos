@@ -13,11 +13,11 @@ The `J4+ Linux 4.19 Arch Linux ARM BOOT image` workflow now produces:
 * `j4primelte-k419-arch-boot.img` — kernel, J4+ QCDT, and root-switch initramfs;
 * `j4primelte-k419-debug-boot.img` — the same kernel and QCDT with a temporary
   systemd emergency initramfs that does not mount or write `ARCHROOT`;
-* `j4primelte-k419-medusa-dtb-debug-boot.img` — an experimental comparison
-  image using that same 4.19 kernel, but with the actual J4 Rev06 DTB extracted
-  from the user-supplied booting Medusa image appended after the gzip stream,
-  plus its observed 2048-byte page size and load addresses. It also uses only
-  the diagnostic initramfs and never mounts or writes `ARCHROOT`;
+* `j4primelte-medusa-matched-debug-boot.img` — a diagnostic-only image using
+  the exact 3.18.120 Medusa kernel payload together with its own embedded J4
+  Rev06 DTB, and the 2048-byte page size/load addresses observed in the image
+  that booted. It replaces only the ramdisk and command line and never mounts
+  or writes `ARCHROOT`;
 * `rootfs.img` — a 2,400 MiB ext4 filesystem labeled `ARCHROOT`, populated
   from the official rootfs and checked to retain at least 5% free space;
 * `ArchLinuxARM-aarch64-rootfs.tar.gz` — the upstream aarch64 archive,
@@ -33,16 +33,19 @@ splash. The ACM shell is an unauthenticated root shell: use only over a direct
 USB connection to a trusted host. These debug images are not the Arch boot
 image.
 
-The Medusa-DTB candidate is an experiment, not a known-working combination: the
-user-supplied image's kernel identifies as `3.18.120-j4-medusa64-debug+`, while
-this candidate keeps the Riva-derived 4.19 kernel and substitutes the Medusa
-DTB. The DTB reports model `Samsung J4PRIMELTE SEA OPEN PROJECT Rev06`, board
-`<8 6>`, and PMIC `<0x10019 0 0 0>`. The alternate uses the known-booting
-image's observed 2048-byte page size, kernel/ramdisk/tags addresses, and its
-kernel-appended DTB layout (`dt_size=0`). CI validates those fields and the DTB
-identity. This does not establish that the 4.19 kernel is compatible with that
-vendor DTB or that the bootloader accepts the resulting image; only a hardware
-boot can answer that.
+The matched Medusa diagnostic image is based on the user-supplied boot image
+that was reported to boot. Its kernel identifies as
+`3.18.120-j4-medusa64-debug+`; the extracted DTB reports model
+`Samsung J4PRIMELTE SEA OPEN PROJECT Rev06`, board `<8 6>`, and PMIC
+`<0x10019 0 0 0>`. CI verifies the kernel/DTB pair, kernel version, 2048-byte
+page size, load addresses, appended-FDT placement, and the replacement ramdisk.
+The new image is still an untested repack: CI cannot prove that the changed
+ramdisk/command line boots on hardware.
+
+This 3.18.120 image is for diagnosis, not the final Arch Linux ARM setup. The
+current Arch systemd baseline requires a newer kernel; use the separate
+`j4primelte-k510` mainline track for the eventual Arch image rather than
+assuming this legacy diagnostic kernel can run the current Arch userspace.
 
 The boot command line selects `root=LABEL=ARCHROOT rootfstype=ext4 rootwait rw`.
 The initramfs waits for that filesystem, mounts it read-write, and switches to
@@ -99,10 +102,10 @@ with compatibility trims documented in `import-j4-dts.py`.
 
 The standard Arch and diagnostic images use the J4+ v0 boot header, a
 Qualcomm QCDT v3 DT payload, the 4 KiB page size from the existing CI donor, and
-the 33,554,432-byte BOOT limit. The separate Medusa-DTB debug candidate uses the
+the 33,554,432-byte BOOT limit. The separate matched Medusa diagnostic uses the
 2048-byte page size and addresses measured from the user-supplied booting image.
-It is deliberately not substituted for the standard artifacts. Neither image
-flashes the phone; CI only builds and validates files.
+It is deliberately not substituted for the standard artifacts. CI only builds
+and validates files; it never flashes the phone.
 
 ## Build locally
 

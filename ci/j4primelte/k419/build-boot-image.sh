@@ -155,12 +155,13 @@ sha256sum "$out/j4primelte-k419-debug-boot.img" > "$out/j4primelte-k419-debug-bo
 printf 'Diagnostic BOOT image size: %s / %s bytes\n' "$debug_bytes" "$J4_BOOT_PARTITION_BYTES"
 cat "$out/j4primelte-k419-debug-boot.img.sha256"
 
-# Experimental comparison candidate: keep the current Riva-derived 4.19 kernel,
-# but use the raw J4 Rev06 DTB extracted from a booting Medusa image and the exact
-# v0 header geometry recorded in that image. Medusa stores its DTB immediately
-# after the gzip kernel stream, so mirror that layout and leave dt_size zero.
+# Matched Medusa diagnostic candidate: use the exact Linux 3.18.120 kernel
+# payload, including its embedded J4 Rev06 DTB, from the user-supplied image that
+# booted. Replace only the ramdisk/cmdline and reproduce its observed v0 header.
 medusa_dtb="$HERE/medusa-j4primelte-sea-open-r06.dtb"
+medusa_kernel="$HERE/medusa-kernel-with-dtb.payload"
 echo "$MEDUSA_J4_DTB_SHA256  $medusa_dtb" | sha256sum -c -
+echo "$MEDUSA_KERNEL_PAYLOAD_SHA256  $medusa_kernel" | sha256sum -c -
 python3 - "$medusa_dtb" "$ROOT/ci/j4primelte/k510" <<'PY'
 import sys
 from pathlib import Path
@@ -174,29 +175,29 @@ if b"Samsung J4PRIMELTE SEA OPEN PROJECT Rev06" not in blob:
     raise SystemExit("Medusa DTB model string is missing")
 print(f"Medusa DTB: {len(blob)} bytes; ids={ids}")
 PY
-cat "$out/kernel.payload" "$medusa_dtb" > "$out/kernel-medusa-appended.payload"
 medusa_debug_cmdline='console=ttyMSM0,115200n8 console=tty0 loglevel=8 fbcon=map:0,scrollback:256k consoleblank=0 rd.systemd.unit=emergency.target systemd.gpt_auto=0 rd.fstab=no systemd.show_status=1'
 printf '%s\n' "$medusa_debug_cmdline" > "$out/medusa-debug-cmdline.txt"
 "$out/repack-boot" build \
-  --kernel "$out/kernel-medusa-appended.payload" \
+  --kernel "$medusa_kernel" \
   --ramdisk "$debug_ramdisk" \
-  --out "$out/j4primelte-k419-medusa-dtb-debug-boot.img" \
+  --out "$out/j4primelte-medusa-matched-debug-boot.img" \
   --page-size "$MEDUSA_BOOT_PAGE_SIZE" \
   --kernel-addr "$MEDUSA_BOOT_KERNEL_ADDR" \
   --ramdisk-addr "$MEDUSA_BOOT_RAMDISK_ADDR" \
   --second-addr "$MEDUSA_BOOT_SECOND_ADDR" \
   --tags-addr "$MEDUSA_BOOT_TAGS_ADDR" \
-  --cmdline "$medusa_debug_cmdline" | tee "$out/medusa-dtb-build-report.txt"
+  --cmdline "$medusa_debug_cmdline" | tee "$out/medusa-debug-build-report.txt"
 python3 "$HERE/verify-medusa-dtb-boot.py" \
-  "$out/j4primelte-k419-medusa-dtb-debug-boot.img" "$medusa_dtb" \
-  | tee "$out/medusa-dtb-boot-report.txt"
-medusa_debug_bytes=$(stat -c %s "$out/j4primelte-k419-medusa-dtb-debug-boot.img")
+  "$out/j4primelte-medusa-matched-debug-boot.img" "$medusa_dtb" \
+  --expect-kernel-version "$MEDUSA_KERNEL_VERSION" \
+  | tee "$out/medusa-debug-boot-report.txt"
+medusa_debug_bytes=$(stat -c %s "$out/j4primelte-medusa-matched-debug-boot.img")
 if (( medusa_debug_bytes > J4_BOOT_PARTITION_BYTES )); then
-  echo "Medusa-DTB diagnostic image exceeds the BOOT limit: $medusa_debug_bytes > $J4_BOOT_PARTITION_BYTES bytes" >&2
+  echo "Matched Medusa diagnostic image exceeds the BOOT limit: $medusa_debug_bytes > $J4_BOOT_PARTITION_BYTES bytes" >&2
   exit 1
 fi
-sha256sum "$out/j4primelte-k419-medusa-dtb-debug-boot.img" \
-  > "$out/j4primelte-k419-medusa-dtb-debug-boot.img.sha256"
-printf 'Medusa-DTB diagnostic BOOT image size: %s / %s bytes\n' \
+sha256sum "$out/j4primelte-medusa-matched-debug-boot.img" \
+  > "$out/j4primelte-medusa-matched-debug-boot.img.sha256"
+printf 'Matched Medusa diagnostic BOOT image size: %s / %s bytes\n' \
   "$medusa_debug_bytes" "$J4_BOOT_PARTITION_BYTES"
-cat "$out/j4primelte-k419-medusa-dtb-debug-boot.img.sha256"
+cat "$out/j4primelte-medusa-matched-debug-boot.img.sha256"
