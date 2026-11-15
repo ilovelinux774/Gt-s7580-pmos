@@ -1,4 +1,4 @@
-name: J4+ Linux 4.19 diagnostic BOOT image
+name: J4+ Linux 4.19 Arch Linux ARM BOOT image
 
 on:
   push:
@@ -42,7 +42,9 @@ jobs:
             RIVA_ANDROID16_DEVICE_URL RIVA_ANDROID16_DEVICE_BRANCH RIVA_ANDROID16_DEVICE_COMMIT \
             RIVA_KERNEL_VERSION J4_DTS_SOURCE_REPO J4_DTS_SOURCE_BRANCH J4_DTS_SOURCE_COMMIT \
             J4_DTS_SOURCE_BOARD J4_BOOT_PARTITION_BYTES J4_BOOT_DONOR_PATH \
-            J4_BOOT_DONOR_SHA256 J4_BOOT_PAGE_SIZE J4_DEBUG_SYSTEMD_VERSION; do
+            J4_BOOT_DONOR_SHA256 J4_BOOT_PAGE_SIZE J4_DEBUG_SYSTEMD_VERSION \
+            ARCHLINUXARM_ROOTFS_URL ARCHLINUXARM_ROOT_LABEL \
+            ARCHLINUXARM_ROOTFS_IMAGE_MIB J4_ARCH_SYSTEM_PARTITION_BYTES; do
             printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
           done
 
@@ -52,7 +54,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev libelf-dev rsync device-tree-compiler \
-            gcc gcc-aarch64-linux-gnu libc6-dev python3 dpkg-dev cpio xz-utils
+            gcc gcc-aarch64-linux-gnu libc6-dev python3 dpkg-dev cpio xz-utils curl e2fsprogs
           gcc -O2 -Wall -Wextra -Werror -o repack-boot ci/j4primelte/k510/repack-boot.c
           ./repack-boot inspect "$J4_BOOT_DONOR_PATH" >/dev/null
 
@@ -106,7 +108,7 @@ jobs:
           )
           sudo apt-get "${apt_opts[@]}" update
           sudo apt-get "${apt_opts[@]}" --download-only --no-install-recommends -y install \
-            systemd busybox-static iproute2
+            systemd busybox-static iproute2 util-linux
           cp "$aptroot"/archives/*.deb systemd-debs/
           python3 - <<'PY'
           from pathlib import Path
@@ -123,16 +125,36 @@ jobs:
               raise SystemExit('missing arm64 busybox-static package')
           if not any(r[1:3] == ('iproute2', 'arm64') for r in records):
               raise SystemExit('missing arm64 iproute2 package')
+          if not any(r[1:3] == ('util-linux', 'arm64') for r in records):
+              raise SystemExit('missing arm64 util-linux package (blkid is needed for root=LABEL)')
           print(f'systemd package pin: {systemd[0][3]}; {len(records)} arm64/all packages')
           PY
 
-      - name: Build standalone systemd diagnostic initramfs
+      - name: Download and validate Arch Linux ARM rootfs
+        run: |
+          set -euo pipefail
+          bash "$J4_DIR/build-archlinuxarm-rootfs.sh" \
+            "$PWD/ArchLinuxARM-aarch64-rootfs.tar.gz"
+
+      - name: Create the labeled Arch rootfs ext4 image
+        run: |
+          set -euo pipefail
+          sudo bash "$J4_DIR/build-rootfs-image.sh" \
+            "$PWD/ArchLinuxARM-aarch64-rootfs.tar.gz" "$PWD/rootfs.img" \
+            "$ARCHLINUXARM_ROOTFS_IMAGE_MIB"
+
+      - name: Build diagnostic and Arch root-switch initramfs images
         run: |
           set -euo pipefail
           bash "$J4_DIR/build-debug-initramfs.sh" \
             systemd-debs systemd-debug-build systemd-debug-initramfs.cpio.xz
+          bash "$J4_DIR/build-rootfs-initramfs.sh" \
+            systemd-debs arch-root-initramfs-build arch-root-initramfs.cpio.xz \
+            "$ARCHLINUXARM_ROOT_LABEL"
           xz -t systemd-debug-initramfs.cpio.xz
+          xz -t arch-root-initramfs.cpio.xz
           sha256sum systemd-debug-initramfs.cpio.xz > initramfs.sha256
+          sha256sum arch-root-initramfs.cpio.xz > arch-root-initramfs.sha256
 
       - name: Build kernel, QCDT and J4+ v0 BOOT image
         run: |
@@ -141,12 +163,12 @@ jobs:
           export JOBS="$(nproc)"
           set +e
           bash "$J4_DIR/build-boot-image.sh" kernel "$PWD/out" \
-            "$J4_BOOT_DONOR_PATH" "$PWD/systemd-debug-initramfs.cpio.xz" \
+            "$J4_BOOT_DONOR_PATH" "$PWD/arch-root-initramfs.cpio.xz" \
             2>&1 | tee boot-build.log
           rc=${PIPESTATUS[0]}
           set -e
           if [ "$rc" -ne 0 ]; then
-            grep -m 20 -E 'error:|Error [0-9]+|fatal:|FAILED|missing |required diagnostic|undefined reference|No rule to make' boot-build.log \
+            grep -m 20 -E 'error:|Error [0-9]+|fatal:|FAILED|missing |required Arch|undefined reference|No rule to make' boot-build.log \
               | while IFS= read -r line; do echo "::error title=Linux 4.19 BOOT build failure::$line"; done || true
             while IFS= read -r line; do
               escaped=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r/%0D/g')
@@ -162,10 +184,12 @@ jobs:
           fi
           sha256sum "$J4_DIR/sources.env" "$J4_DIR/import-j4-dts.py" \
             "$J4_DIR/patch-riva-kernel.py" "$J4_DIR/build-boot-image.sh" \
-            "$J4_DIR/debug-cmdline.py" \
+            "$J4_DIR/build-rootfs-initramfs.sh" "$J4_DIR/build-archlinuxarm-rootfs.sh" \
+            "$J4_DIR/build-rootfs-image.sh" \
+            "$J4_DIR/arch-root-cmdline.py" "$J4_DIR/debug-cmdline.py" \
             > out/port-inputs.sha256
           {
-            echo '### J4+ Linux 4.19 diagnostic BOOT image'
+            echo '### J4+ Linux 4.19 Arch Linux ARM BOOT image'
             echo '```text'
             cat out/boot-report.txt
             echo '```'
@@ -195,6 +219,11 @@ jobs:
           path: |
             boot-build.log
             systemd-debug-initramfs.cpio.xz
+            arch-root-initramfs.cpio.xz
+            ArchLinuxARM-aarch64-rootfs.tar.gz
+            ArchLinuxARM-aarch64-rootfs.tar.gz.sha256
+            rootfs.img
+            rootfs.img.sha256
             out/.config
             out/config.full
             out/arch/arm64/boot/Image.gz
@@ -203,17 +232,17 @@ jobs:
       - name: Upload J4+ BOOT image and verification reports
         uses: actions/upload-artifact@v4
         with:
-          name: j4primelte-k419-diagnostic-boot-${{ github.run_id }}
+          name: j4primelte-k419-arch-boot-${{ github.run_id }}
           if-no-files-found: error
           retention-days: 30
           path: |
-            out/j4primelte-k419-debug-boot.img
-            out/j4primelte-k419-debug-boot.img.sha256
+            out/j4primelte-k419-arch-boot.img
+            out/j4primelte-k419-arch-boot.img.sha256
             out/boot-report.txt
             out/repack-report.txt
             out/donor-report.txt
             out/qcdt-report.txt
-            out/debug-cmdline.txt
+            out/arch-root-cmdline.txt
             out/config.full
             out/kernel.payload
             out/j4primelte-rev06.dtb
@@ -221,5 +250,11 @@ jobs:
             out/port-inputs.sha256
             systemd-debug-initramfs.cpio.xz
             initramfs.sha256
+            arch-root-initramfs.cpio.xz
+            arch-root-initramfs.sha256
+            ArchLinuxARM-aarch64-rootfs.tar.gz
+            ArchLinuxARM-aarch64-rootfs.tar.gz.sha256
+            rootfs.img
+            rootfs.img.sha256
             source-report.txt
             boot-build.log

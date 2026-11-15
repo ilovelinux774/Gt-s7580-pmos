@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Build a Linux 4.19.325 J4+ kernel/DTB and package a standalone debug initramfs.
+# Build a Linux 4.19.325 J4+ kernel/DTB and package the Arch ARM root-switch initramfs.
 set -euo pipefail
 
-tree=${1:?usage: build-boot-image.sh <kernel-tree> <out-dir> <J4-donor-boot.img> <debug-initramfs.cpio.xz>}
+tree=${1:?usage: build-boot-image.sh <kernel-tree> <out-dir> <J4-donor-boot.img> <arch-root-initramfs.cpio.xz>}
 out=${2:?output directory}
 donor=${3:?J4+ donor boot image}
-ramdisk=${4:?standalone debug initramfs}
+ramdisk=${4:?Arch root-switch initramfs}
 
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(cd -- "$HERE/../../.." && pwd)
@@ -43,13 +43,13 @@ make -C "$tree" O="$out" "${make_args[@]}" vendor/msm8937-perf_defconfig
 cfg="$tree/scripts/config"
 [[ -x "$cfg" || -f "$cfg" ]] || { echo "missing kernel scripts/config" >&2; exit 1; }
 required=(BLK_DEV_INITRD RD_XZ DEVTMPFS DEVTMPFS_MOUNT PROC_FS SYSFS TMPFS
-  CGROUPS INOTIFY_USER SIGNALFD TIMERFD EPOLL FHANDLE NET UNIX TTY VT
-  VT_CONSOLE FRAMEBUFFER_CONSOLE USB_GADGET USB_CI13XXX_MSM USB_CONFIGFS
-  USB_CONFIGFS_RNDIS USB_CONFIGFS_SERIAL)
+  MMC MMC_BLOCK EXT4_FS CGROUPS INOTIFY_USER SIGNALFD TIMERFD EPOLL FHANDLE
+  NET UNIX TTY VT VT_CONSOLE FRAMEBUFFER_CONSOLE USB_GADGET USB_CI13XXX_MSM
+  USB_CONFIGFS USB_CONFIGFS_RNDIS USB_CONFIGFS_SERIAL)
 for symbol in "${required[@]}"; do
   "$cfg" --file "$out/.config" --enable "$symbol" 2>/dev/null || true
 done
-"$cfg" --file "$out/.config" --set-str LOCALVERSION '-j4-k419-debug'
+"$cfg" --file "$out/.config" --set-str LOCALVERSION '-j4-k419-arch'
 "$cfg" --file "$out/.config" --disable LOCALVERSION_AUTO 2>/dev/null || true
 # GCC 11 tightened FORTIFY_SOURCE diagnostics for this 4.19 vendor tree and
 # promotes known-size legacy copy warnings to hard errors. This kernel remains
@@ -64,10 +64,14 @@ done
 make -C "$tree" O="$out" "${make_args[@]}" olddefconfig
 for symbol in "${required[@]}"; do
   if ! grep -qx "CONFIG_${symbol}=y" "$out/.config"; then
-    echo "required diagnostic-initramfs option is unavailable: CONFIG_${symbol}" >&2
+    echo "required Arch rootfs boot option is unavailable: CONFIG_${symbol}" >&2
     exit 1
   fi
 done
+if ! grep -Eq '^CONFIG_MMC_(MSM|SDHCI_MSM)=y$' "$out/.config"; then
+  echo "J4+ Qualcomm MMC host driver is not built in; the root partition cannot be mounted" >&2
+  exit 1
+fi
 for symbol in FORTIFY_SOURCE IPA KSU_MANUAL_HOOK; do
   if grep -qx "CONFIG_${symbol}=y" "$out/.config"; then
     echo "CONFIG_${symbol} remained enabled; the 4.19 bring-up compatibility trim did not apply" >&2
@@ -92,25 +96,29 @@ python3 "$ROOT/ci/j4primelte/k510/qcdt.py" --dtb "$out/j4primelte-rev06.dtb" \
   | tee "$out/qcdt-report.txt"
 gcc -O2 -Wall -Wextra -Werror -o "$out/repack-boot" "$ROOT/ci/j4primelte/k510/repack-boot.c"
 "$out/repack-boot" inspect "$donor" > "$out/donor-report.txt"
-python3 "$HERE/debug-cmdline.py" "$donor" > "$out/debug-cmdline.txt"
+python3 "$HERE/arch-root-cmdline.py" "$donor" "$ARCHLINUXARM_ROOT_LABEL" > "$out/arch-root-cmdline.txt"
 "$out/repack-boot" repack "$donor" \
   --kernel-new "$out/kernel.payload" \
   --ramdisk-new "$ramdisk" \
   --dt "$out/j4primelte-rev06.qcdt" \
-  --cmdline-replace "$(cat "$out/debug-cmdline.txt")" \
+  --cmdline-replace "$(cat "$out/arch-root-cmdline.txt")" \
   --cmdline-clear-extra \
-  --out "$out/j4primelte-k419-debug-boot.img" | tee "$out/repack-report.txt"
-"$out/repack-boot" inspect "$out/j4primelte-k419-debug-boot.img" \
+  --out "$out/j4primelte-k419-arch-boot.img" | tee "$out/repack-report.txt"
+"$out/repack-boot" inspect "$out/j4primelte-k419-arch-boot.img" \
   | tee "$out/boot-report.txt"
-bytes=$(stat -c %s "$out/j4primelte-k419-debug-boot.img")
+bytes=$(stat -c %s "$out/j4primelte-k419-arch-boot.img")
 if (( bytes > J4_BOOT_PARTITION_BYTES )); then
   echo "BOOT image exceeds the J4+ limit: $bytes > $J4_BOOT_PARTITION_BYTES bytes" >&2
   exit 1
 fi
-if grep -Eq '(^| )(root|rootfstype|rootflags|init|rdinit)=' "$out/debug-cmdline.txt"; then
-  echo 'root/init argument survived diagnostic command-line filtering' >&2
+if ! grep -Fq "root=LABEL=$ARCHLINUXARM_ROOT_LABEL" "$out/arch-root-cmdline.txt"; then
+  echo 'Arch root label is missing from the kernel command line' >&2
   exit 1
 fi
-sha256sum "$out/j4primelte-k419-debug-boot.img" > "$out/j4primelte-k419-debug-boot.img.sha256"
+if grep -Eq '(^| )(init|rdinit)=' "$out/arch-root-cmdline.txt"; then
+  echo 'init/rdinit override survived Arch command-line filtering' >&2
+  exit 1
+fi
+sha256sum "$out/j4primelte-k419-arch-boot.img" > "$out/j4primelte-k419-arch-boot.img.sha256"
 printf 'BOOT image size: %s / %s bytes\n' "$bytes" "$J4_BOOT_PARTITION_BYTES"
-cat "$out/j4primelte-k419-debug-boot.img.sha256"
+cat "$out/j4primelte-k419-arch-boot.img.sha256"
