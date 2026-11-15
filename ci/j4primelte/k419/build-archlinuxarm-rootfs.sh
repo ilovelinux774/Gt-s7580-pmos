@@ -13,13 +13,25 @@ source "$HERE/sources.env"
 out=$(realpath -m "$1")
 mkdir -p "$(dirname "$out")"
 tmp=$(mktemp "${TMPDIR:-/tmp}/j4-archroot.XXXXXX")
-trap 'rm -f "$tmp"' EXIT
+curl_error=$(mktemp "${TMPDIR:-/tmp}/j4-archroot-curl.XXXXXX")
+trap 'rm -f "$tmp" "$curl_error"' EXIT
 
 command -v curl >/dev/null || { echo "curl is required" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
 
-curl --fail --location --retry 4 --retry-delay 2 --connect-timeout 30 \
-  --output "$tmp" "$ARCHLINUXARM_ROOTFS_URL"
+if curl --fail --location --retry 4 --retry-delay 2 --connect-timeout 30 \
+  --output "$tmp" "$ARCHLINUXARM_ROOTFS_URL" 2>"$curl_error"; then
+  cat "$curl_error" >&2
+else
+  curl_rc=$?
+  cat "$curl_error" >&2
+  detail=$(tail -n 5 "$curl_error" | tr '\r\n' ' ' | sed 's/%/%25/g; s/::/%3A%3A/g')
+  echo "::error title=Arch Linux ARM rootfs download::curl exited $curl_rc: $detail"
+  if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+    printf '\nArch Linux ARM rootfs download failed (curl %s): `%s`\n' "$curl_rc" "$detail" >> "$GITHUB_STEP_SUMMARY"
+  fi
+  exit "$curl_rc"
+fi
 test -s "$tmp"
 
 # Validate the archive without extracting an untrusted tarball onto the runner.

@@ -54,7 +54,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev libelf-dev rsync device-tree-compiler \
-            gcc gcc-aarch64-linux-gnu libc6-dev python3 dpkg-dev cpio xz-utils curl e2fsprogs
+            gcc gcc-aarch64-linux-gnu libc6-dev python3 dpkg-dev cpio xz-utils \
+            curl ca-certificates e2fsprogs
+          sudo update-ca-certificates
           gcc -O2 -Wall -Wextra -Werror -o repack-boot ci/j4primelte/k510/repack-boot.c
           ./repack-boot inspect "$J4_BOOT_DONOR_PATH" >/dev/null
 
