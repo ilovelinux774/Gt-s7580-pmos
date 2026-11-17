@@ -1,12 +1,13 @@
 # LK2ND-first bring-up for the J4+
 
 The Geckyn LK2ND tree explicitly contains an MSM8917 secondary target with a
-J4+ Rev06 device tree matching `J415*` and board ID `<8 6>`. This repository's
-manual workflow, `.github/workflows/j4primelte-lk2nd.yml`, builds that target
-from pinned source commit `7bc82f56d1339b1d081c48ad3c664ec6119257af` and checks
-the Android boot header, QCDT payload, page size, and BOOT-partition size. A
-successful CI build only establishes that the image was built and checked; it
-does not prove it boots on this phone.
+J4+ Rev06 device tree matching `J415*` and board ID `<8 6>`. The existing manual workflow, `.github/workflows/j4primelte-k510.yml`, now has
+an independent `Build standalone J4+ LK2ND bootloader` job. Dispatch it on this
+branch with `selftest_only=true` to avoid the long Linux kernel build; the job
+builds pinned source commit `7bc82f56d1339b1d081c48ad3c664ec6119257af` and
+checks the Android boot header, QCDT payload, page size, and BOOT-partition
+size. A successful CI build only establishes that the image was built and
+checked; it does not prove it boots on this phone.
 
 ## Two-stage test plan
 

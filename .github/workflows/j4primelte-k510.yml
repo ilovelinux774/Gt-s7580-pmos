@@ -746,3 +746,64 @@ jobs:
             board-dtb/
           if-no-files-found: warn
           retention-days: 14
+
+  build-lk2nd:
+    name: Build standalone J4+ LK2ND bootloader
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Install LK2ND build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-arm-none-eabi binutils-arm-none-eabi \
+            device-tree-compiler git python3
+
+      - name: Fetch pinned J4+-supporting LK2ND source
+        run: |
+          set -euo pipefail
+          git clone https://github.com/geckyn/lk2nd.git lk2nd-src
+          git -C lk2nd-src checkout --detach 7bc82f56d1339b1d081c48ad3c664ec6119257af
+          test "$(git -C lk2nd-src rev-parse HEAD)" = 7bc82f56d1339b1d081c48ad3c664ec6119257af
+          grep -Fq 'lk2nd,match-bootloader = "J415*"' \
+            lk2nd-src/dts/msm8917-sec-j4primelte-sea-open-r06.dts
+          grep -Fq 'qcom,board-id = <8 6>' \
+            lk2nd-src/dts/msm8917-sec-j4primelte-sea-open-r06.dts
+          git -C lk2nd-src rev-parse HEAD > lk2nd-source-commit.txt
+
+      - name: Build and validate LK2ND
+        run: |
+          set -euo pipefail
+          make -C lk2nd-src TOOLCHAIN_PREFIX=arm-none-eabi- msm8917-secondary \
+            2>&1 | tee lk2nd-build.log
+          test -s lk2nd-src/build-msm8917-secondary/lk2nd.img
+          cp lk2nd-src/build-msm8917-secondary/lk2nd.img lk2nd-j4primelte.img
+          sha256sum lk2nd-j4primelte.img > lk2nd-j4primelte.img.sha256
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+
+          image = Path('lk2nd-j4primelte.img').read_bytes()
+          assert image[:8] == b'ANDROID!', 'output is not an Android boot image'
+          page_size = struct.unpack_from('<I', image, 36)[0]
+          kernel_size = struct.unpack_from('<I', image, 8)[0]
+          dt_size = struct.unpack_from('<I', image, 40)[0]
+          assert page_size == 2048, f'unexpected LK2ND page size {page_size}'
+          assert kernel_size > 0 and dt_size > 0, 'LK2ND kernel or QCDT is missing'
+          assert len(image) <= 32 * 1024 * 1024, f'image exceeds BOOT partition: {len(image)} bytes'
+          print(f'LK2ND image: {len(image)} bytes; page={page_size}; kernel={kernel_size}; QCDT={dt_size}')
+          PY
+          cat lk2nd-j4primelte.img.sha256
+
+      - name: Upload LK2ND standalone boot image
+        uses: actions/upload-artifact@v4
+        with:
+          name: lk2nd-j4primelte-${{ github.run_id }}
+          path: |
+            lk2nd-j4primelte.img
+            lk2nd-j4primelte.img.sha256
+            lk2nd-source-commit.txt
+            lk2nd-build.log
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
