@@ -100,11 +100,10 @@ checked locally and the tool's behaviour is re-checked on every CI run.
 
 ## Which tree: mainline msm89x7, not 5.10
 
-The local work only contains 3.18 trees (armv7 **and** arm64). It does not
-contain a 5.10 anything, and no public 5.10 Qualcomm tree with this SoC was
-found. So the pin is not 5.10: it is the **msm89x7 mainline tree this
-repository's own `pmos-j4primelte-20260927` branch already builds**, at commit
-`15c904f9ffe0` on `msm89x7/7.1.3`.
+The vendor-kernel prototype is Linux 3.18 (armv7 and arm64), but the Arch
+systemd target now uses the **msm89x7 mainline tree this repository's own
+`pmos-j4primelte-20260927` branch builds**, at commit `15c904f9ffe0` on
+`msm89x7/7.1.3`.
 
 That satisfies the actual requirement (kernel ≥ 5.10) and brings hardware
 support that no 5.10 vendor tree would have: MSM8917/8937 support, and the
@@ -139,18 +138,13 @@ What was checked, for the record:
 * `msm89x7-mainline/linux` — **the chosen base**. Branches run 6.6 … 7.1.3; there
   is no 5.10 branch and there never needed to be.
 
-**The next concrete step** is a real build of the pinned mainline tree. In order
-of increasing cost:
-
-1. Put it in `sources.env` (or use the workflow's `kernel_tarball_url` +
-   `kernel_tarball_sha256` inputs, so a tree that only exists on your disk does
-   not have to be pushed anywhere).
-2. Run the workflow with `dry_run=true`. `verify-tree.sh` will say whether the
-   tree has the SoC, which defconfig it would use, and whether a j4primelte DTS
-   is present. This costs about a minute.
-3. Run it for real. CI uploads the original QCDT `boot-k510.img` and a
-   separate `boot-k510-appended-dtb.img` diagnostic. Both use the donor's pmOS
-   ramdisk unchanged and append `systemd.unified_cgroup_hierarchy=1` to cmdline.
+The pinned mainline kernel and its debug images already have a successful CI
+build. This branch now extends that workflow with a separate full Arch Linux
+ARM image: authenticated rolling rootfs, ext4 image, root-switch initramfs,
+and QCDT boot image. The new combined rootfs/BOOT workflow has not yet run in
+CI or been boot-tested on hardware. The existing `boot-k510.img` and appended-
+FDT image remain pmOS diagnostic candidates; `boot-k510-arch-systemd.img` is
+the separate Arch/systemd candidate.
 
 ## First green build: what it produced
 
@@ -248,8 +242,9 @@ Its components are:
   the emergency shell remains on `/dev/console`.
 
 There is no pmOS `/init`, rootfs discovery, rootfs mount, or switch-root in this
-ramdisk, and the workflow does not build or package an installed rootfs. The
-systemd emergency shell is also assigned to `/dev/console`. RNDIS has no DHCP
+diagnostic ramdisk. The separate Arch BOOT artifact uses a different initramfs
+and is documented below. The systemd emergency shell is also assigned to
+`/dev/console`. RNDIS has no DHCP
 server or SSH daemon; for a network test, configure the host side as
 `172.16.42.2/24`. The ACM function is the direct interactive debug channel.
 
@@ -260,6 +255,28 @@ the debug image if it exceeds that limit. CI validates package/image structure
 only; phone boot, USB enumeration, and interactive console behavior still need
 hardware testing. Keep the known-good recovery image available and flash BOOT
 only.
+
+## Full Arch Linux ARM image with systemd as PID 1
+
+The workflow now also builds `boot-k510-arch-systemd.img`, paired with
+`rootfs.img`. It uses the signature-verified, rolling Arch Linux ARM aarch64
+rootfs and its normal `/sbin/init` (systemd) after the root-switch initramfs.
+The minimal root-switch initramfs only discovers `LABEL=ARCHROOT`, mounts ext4,
+and executes `switch_root`; it is not a replacement init system. The standalone
+Ubuntu/systemd emergency image remains a separate diagnostic artifact.
+
+The rootfs is 2,400 MiB, ext4, labeled `ARCHROOT`, and the BOOT image retains
+the J4 donor header while replacing the kernel, ramdisk, and Qualcomm QCDT.
+CI verifies the Arch ARM archive signature, AArch64 userspace, rootfs filesystem,
+boot-image structure, root label/cmdline, and the 32 MiB BOOT size limit. The
+rootfs tarball, disk image, boot image, initramfs, and checksums are attached to
+the workflow run. Nothing is written to the handset by CI.
+
+This is now the intended Arch Linux target: current Arch userspace + current
+systemd on the pinned Linux 7.1.3 kernel, rather than trying to make the 3.18
+prototype run current systemd. A successful workflow proves only build and
+packaging consistency; there has not yet been a hardware boot of this combined
+Arch/systemd image. The earlier LK2ND-Tux-only observation remains inconclusive.
 
 ## Testing the pmOS-rootfs images on the phone (no UART; pstore is best-effort)
 
@@ -282,6 +299,7 @@ only.
 4. Boot back into the 3.18 image afterwards. A failed 5.10 attempt costs one
    flash cycle and tells you exactly which of the three cases above happened.
 
-Do not attempt to run systemd on the 3.18 kernel in the meantime: it is exactly
-the configuration whose missing symbols are listed above, and cgroup v2 does not
-exist there at all.
+The 3.18 artifact is still only a kernel prototype; its output package does not
+contain an Arch rootfs or establish a supported systemd boot. The Arch target in
+this workflow deliberately pairs current Arch/systemd with the mainline 7.1.3
+kernel and cgroup-v2 configuration.

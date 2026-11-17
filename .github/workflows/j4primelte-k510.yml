@@ -1,26 +1,28 @@
-name: j4primelte 5.10 bring-up (systemd-capable kernel)
+name: J4+ mainline Arch Linux ARM + systemd boot candidate
 
 # What this workflow is, precisely:
 #
 #   * It builds a Linux 7.1.3 kernel (5.10 is the minimum supported floor) for
 #     the Galaxy J4+ (SM-J415F) from the tree pinned in ci/j4primelte/k510/sources.env,
 #     audits the config, and makes several BOOT-only test images.
-#   * The QCDT and appended-FDT candidates retain the donor pmOS initramfs. A
-#     separate systemd-debug image replaces it with a minimal arm64 systemd
-#     initramfs and never mounts or switches to an installed rootfs.
+#   * The QCDT and appended-FDT candidates retain the donor pmOS initramfs. The
+#     systemd-debug image never mounts the installed rootfs. The Arch image uses
+#     the authenticated Arch Linux ARM rootfs and switches into its systemd PID 1.
 #   * A path-scoped push trigger and workflow_dispatch run the pipeline.
 #     Nothing is released or flashed automatically, and a green run means
 #     "the images were built and are self-consistent", never "this boots on the phone".
-#   * The arm32 vs arm64 question is settled in sources.env: the kernel is
-#     arm64 with CONFIG_COMPAT so the existing armv7 pmOS rootfs keeps running.
-#     systemd requires kernel >= 5.10 and cgroup v2; neither cares about the
-#     kernel's bitness.
+#   * The production candidate is an arm64 kernel plus an Arch Linux ARM
+#     aarch64 rootfs. The current Arch systemd uses cgroup v2; the kernel config
+#     audit gates the interfaces it needs. CONFIG_COMPAT remains enabled for
+#     the separate legacy pmOS diagnostic image.
 #   * Boot images are attached to the run as artifacts with checksums, plus a
 #     flash-and-report procedure that works without UART (see REPORTING.md).
 
 on:
-  # Retained for reproducibility, but disabled on push while the 4.9 device
-  # kernel is the active bring-up path. It can still be run manually.
+  push:
+    paths:
+      - '.github/workflows/j4primelte-k510.yml'
+      - 'ci/j4primelte/k510/**'
   workflow_dispatch:
     inputs:
       defconfig:
@@ -72,6 +74,7 @@ env:
   GIT_TERMINAL_PROMPT: '0'
   PYTHONUNBUFFERED: '1'
   J4_DIR: ci/j4primelte/k510
+  K419_DIR: ci/j4primelte/k419
 
 jobs:
   build:
@@ -105,7 +108,15 @@ jobs:
           fi
           # shellcheck disable=SC1091
           source "$J4_DIR/sources.env"
+          # The same verified Arch Linux ARM rootfs/initramfs builders are used
+          # here, but this K510 image runs the current Arch systemd on a kernel
+          # that meets its contemporary cgroup and syscall baseline.
+          source "$K419_DIR/sources.env"
           {
+            echo "ARCH_ROOT_LABEL=$ARCHLINUXARM_ROOT_LABEL"
+            echo "ARCH_ROOTFS_IMAGE_MIB=$ARCHLINUXARM_ROOTFS_IMAGE_MIB"
+            echo "ARCH_ROOTFS_URL=$ARCHLINUXARM_ROOTFS_URL"
+            echo "BOOT_PARTITION_BYTES=$J4_BOOT_PARTITION_BYTES"
             echo "KERNEL_URL=$J4_K510_KERNEL_URL"
             echo "KERNEL_BRANCH=${kernel_ref:-}"
             echo "KERNEL_BRANCH=$J4_K510_KERNEL_BRANCH"
@@ -176,13 +187,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev libelf-dev rsync zip unzip xz-utils cpio \
-            device-tree-compiler gcc libc6-dev python3 gcc-aarch64-linux-gnu
+            device-tree-compiler gcc libc6-dev python3 gcc-aarch64-linux-gnu \
+            e2fsprogs gpgv
           gcc -O2 -Wall -Wextra -Werror -o repack-boot "$J4_DIR/repack-boot.c"
           ./repack-boot inspect "$J4_DIR/../../boot.img" >/dev/null 2>&1 || true
           echo "repack-boot built"
 
       - name: Download arm64 systemd debug userspace packages
-        if: env.J4_DRY_RUN != 'true' && inputs.selftest_only != true
+        if: env.J4_DRY_RUN != 'true' && inputs.config_only != true && inputs.selftest_only != true
         run: |
           set -euo pipefail
           codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
@@ -205,7 +217,7 @@ jobs:
           )
           sudo apt-get "${apt_opts[@]}" update
           sudo apt-get "${apt_opts[@]}" --download-only --no-install-recommends -y install \
-            systemd busybox-static iproute2
+            systemd busybox-static iproute2 util-linux
           cp "$aptroot"/archives/*.deb systemd-debs/
           python3 - <<'PY'
           from pathlib import Path
@@ -314,6 +326,7 @@ jobs:
           print(f'systemd debug repack self-test passed: ramdisk={ramdisk_size} bytes, cmdline replaced')
           PY
           echo "QCDT/boot-image self-test passed"
+          bash "$J4_DIR/test-arch-systemd-boot.sh" ./repack-boot | tee -a selftest-report.txt
 
       - name: Self-test only (skips kernel, donor and repack)
         if: ${{ inputs.selftest_only }}
@@ -542,7 +555,7 @@ jobs:
           fi
 
       - name: Build standalone systemd debug initramfs
-        if: env.J4_DRY_RUN != 'true'
+        if: env.J4_DRY_RUN != 'true' && inputs.config_only != true && inputs.selftest_only != true
         run: |
           set -euo pipefail
           bash "$J4_DIR/build-systemd-debug-initramfs.sh" \
@@ -557,8 +570,33 @@ jobs:
           sha256sum systemd-debug-initramfs.cpio.xz > systemd-debug-initramfs.cpio.xz.sha256
           cat systemd-debug-cmdline.txt systemd-debug-initramfs.cpio.xz.sha256
 
+      - name: Download and authenticate Arch Linux ARM aarch64 rootfs
+        if: env.J4_DRY_RUN != 'true' && inputs.config_only != true && inputs.selftest_only != true
+        run: |
+          set -euo pipefail
+          bash "$K419_DIR/build-archlinuxarm-rootfs.sh" \
+            "$PWD/ArchLinuxARM-aarch64-rootfs.tar.gz"
+          sha256sum ArchLinuxARM-aarch64-rootfs.tar.gz \
+            ArchLinuxARM-aarch64-rootfs.tar.gz.sig \
+            ArchLinuxARM-aarch64-rootfs.tar.gz.sha256
+
+      - name: Create Arch rootfs image and root-switch initramfs
+        if: env.J4_DRY_RUN != 'true' && inputs.config_only != true && inputs.selftest_only != true
+        run: |
+          set -euo pipefail
+          sudo bash "$K419_DIR/build-rootfs-image.sh" \
+            "$PWD/ArchLinuxARM-aarch64-rootfs.tar.gz" "$PWD/rootfs.img" \
+            "$ARCH_ROOTFS_IMAGE_MIB"
+          bash "$K419_DIR/build-rootfs-initramfs.sh" \
+            systemd-debs arch-root-initramfs-build arch-root-initramfs.cpio.xz \
+            "$ARCH_ROOT_LABEL"
+          xz -t arch-root-initramfs.cpio.xz
+          sha256sum rootfs.img arch-root-initramfs.cpio.xz \
+            > arch-root-artifacts.sha256
+          cat arch-root-artifacts.sha256
+
       - name: Repack kernel and debug initramfs
-        if: env.J4_DRY_RUN != 'true'
+        if: env.J4_DRY_RUN != 'true' && inputs.config_only != true && inputs.selftest_only != true
         run: |
           set -euo pipefail
           test -s "${QCDT_IMAGE:?required Qualcomm QCDT table missing}"
@@ -643,12 +681,35 @@ jobs:
           sha256sum boot-k510-systemd-debug.img > boot-k510-systemd-debug.img.sha256
           cat boot-k510.img.sha256 boot-k510-appended-dtb.img.sha256 boot-k510-systemd-debug.img.sha256
 
+      - name: Build systemd Arch Linux ARM BOOT image
+        if: env.J4_DRY_RUN != 'true' && inputs.config_only != true && inputs.selftest_only != true
+        run: |
+          set -euo pipefail
+          test -s rootfs.img
+          test -s arch-root-initramfs.cpio.xz
+          test -s "${QCDT_IMAGE:?required Qualcomm QCDT table missing}"
+          bash "$J4_DIR/build-arch-systemd-boot.sh" ./repack-boot donor/boot.img out/kernel.payload arch-root-initramfs.cpio.xz "$QCDT_IMAGE" "$ARCH_ROOT_LABEL" "$BOOT_PARTITION_BYTES" boot-k510-arch-systemd.img
+          cp boot-k510-arch-systemd.img.report.txt boot-k510-arch-systemd-report.txt
+          cp boot-k510-arch-systemd.img.repack-report.txt boot-k510-arch-systemd-repack-report.txt
+          cp boot-k510-arch-systemd.img.cmdline.txt arch-root-cmdline.txt
+          sha256sum rootfs.img > rootfs.img.sha256
+          cat boot-k510-arch-systemd.img.sha256 rootfs.img.sha256
+          {
+            echo '### Arch Linux ARM + systemd image'
+            echo '```text'
+            cat boot-k510-arch-systemd-report.txt
+            echo '```'
+            echo "Root filesystem: ext4 label=$ARCH_ROOT_LABEL, ${ARCH_ROOTFS_IMAGE_MIB} MiB"
+            echo 'PID 1 after switch_root: the installed Arch Linux ARM /sbin/init (systemd).'
+            echo 'Build/format checks do not establish that this image boots on the handset.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Summarise
         if: always()
         run: |
           set -euo pipefail
           {
-            echo '## J4+ 5.10 bring-up'
+            echo '## J4+ mainline Arch Linux ARM + systemd bring-up'
             echo
             echo "- branch: \`${{ github.ref_name }}\` / run \`${{ github.run_id }}\`"
             echo "- tree: \`$KERNEL_URL\` @ \`$KERNEL_BRANCH\`"
@@ -711,6 +772,15 @@ jobs:
               echo '```'
               echo '</details>'
             fi
+            if [ -f boot-k510-arch-systemd-report.txt ]; then
+              echo '<details><summary>Arch Linux ARM + systemd boot image</summary>'
+              echo
+              echo '```'
+              cat boot-k510-arch-systemd-report.txt
+              echo '```'
+              echo '</details>'
+              echo 'This image boots the authenticated Arch Linux ARM rootfs; systemd is its PID 1.'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifacts
@@ -733,6 +803,18 @@ jobs:
             boot-k510-systemd-debug.img
             boot-k510-systemd-debug.img.sha256
             boot-k510-systemd-debug-report.txt
+            boot-k510-arch-systemd.img
+            boot-k510-arch-systemd.img.sha256
+            boot-k510-arch-systemd-report.txt
+            boot-k510-arch-systemd-repack-report.txt
+            rootfs.img
+            rootfs.img.sha256
+            ArchLinuxARM-aarch64-rootfs.tar.gz
+            ArchLinuxARM-aarch64-rootfs.tar.gz.sig
+            ArchLinuxARM-aarch64-rootfs.tar.gz.sha256
+            arch-root-initramfs.cpio.xz
+            arch-root-artifacts.sha256
+            arch-root-cmdline.txt
             systemd-debug-initramfs.cpio.xz
             systemd-debug-initramfs.cpio.xz.sha256
             systemd-debug-cmdline.txt
