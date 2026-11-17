@@ -817,7 +817,7 @@ jobs:
                   assert count == 1, f'expected one header enum object: {relative}:{name}'
               path.write_text(text)
           PY
-          make -C lk2nd-src TOOLCHAIN_PREFIX=arm-none-eabi- msm8917-secondary \
+          make -C lk2nd-src TOOLCHAIN_PREFIX=arm-none-eabi- NOECHO= msm8917-secondary \
             2>&1 | tee lk2nd-build.log
           test -s lk2nd-src/build-msm8917-secondary/lk2nd.img
           cp lk2nd-src/build-msm8917-secondary/lk2nd.img lk2nd-j4primelte.img
@@ -842,9 +842,10 @@ jobs:
         if: failure()
         run: |
           if [ -f lk2nd-build.log ]; then
-            tail -n 45 lk2nd-build.log | while IFS= read -r line; do
-              echo "::error title=LK2ND build log::$line"
-            done
+            { grep -Ei 'error:|fatal error|multiple definition|undefined reference|No such file|cannot find|not found|killed|make.*Error|error [0-9]+' lk2nd-build.log || true; tail -n 12 lk2nd-build.log; } \
+              | tail -n 35 | while IFS= read -r line; do
+                echo "::error title=LK2ND failure detail::$line"
+              done
           fi
 
       - name: Upload LK2ND build output and diagnostics
