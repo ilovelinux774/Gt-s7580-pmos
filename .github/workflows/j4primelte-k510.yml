@@ -688,7 +688,23 @@ jobs:
           test -s rootfs.img
           test -s arch-root-initramfs.cpio.xz
           test -s "${QCDT_IMAGE:?required Qualcomm QCDT table missing}"
-          bash "$J4_DIR/build-arch-systemd-boot.sh" ./repack-boot donor/boot.img out/kernel.payload arch-root-initramfs.cpio.xz "$QCDT_IMAGE" "$ARCH_ROOT_LABEL" "$BOOT_PARTITION_BYTES" boot-k510-arch-systemd.img
+          set +e
+          bash "$J4_DIR/build-arch-systemd-boot.sh" ./repack-boot donor/boot.img out/kernel.payload arch-root-initramfs.cpio.xz "$QCDT_IMAGE" "$ARCH_ROOT_LABEL" "$BOOT_PARTITION_BYTES" boot-k510-arch-systemd.img 2>&1 | tee arch-boot-build.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            tail -n 80 arch-boot-build.log | while IFS= read -r line; do
+              escaped=$(printf '%s' "$line" | sed 's/%/%25/g; s/::/%3A%3A/g')
+              echo "::error title=Arch systemd BOOT packaging::$escaped"
+            done
+            {
+              echo '### Arch systemd BOOT packaging failure'
+              echo '```text'
+              tail -n 80 arch-boot-build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
           cp boot-k510-arch-systemd.img.report.txt boot-k510-arch-systemd-report.txt
           cp boot-k510-arch-systemd.img.repack-report.txt boot-k510-arch-systemd-repack-report.txt
           cp boot-k510-arch-systemd.img.cmdline.txt arch-root-cmdline.txt
@@ -807,6 +823,7 @@ jobs:
             boot-k510-arch-systemd.img.sha256
             boot-k510-arch-systemd-report.txt
             boot-k510-arch-systemd-repack-report.txt
+            arch-boot-build.log
             rootfs.img
             rootfs.img.sha256
             ArchLinuxARM-aarch64-rootfs.tar.gz
