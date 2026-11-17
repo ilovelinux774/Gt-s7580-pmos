@@ -816,6 +816,15 @@ jobs:
                   )
                   assert count == 1, f'expected one header enum object: {relative}:{name}'
               path.write_text(text)
+
+          # Both PMIC implementations provide the same display-name buffer;
+          # keep the existing definition and make the other translation unit
+          # refer to it instead of emitting a duplicate symbol.
+          pmi = Path('lk2nd-src/dev/pmic/pmi8994/pm_app_smbchg.c')
+          text = pmi.read_text()
+          assert text.count('char panel_name[256];') == 1
+          pmi.write_text(text.replace('char panel_name[256];',
+                                      'extern char panel_name[256];', 1))
           PY
           make -C lk2nd-src TOOLCHAIN_PREFIX=arm-none-eabi- NOECHO= msm8917-secondary \
             2>&1 | tee lk2nd-build.log
