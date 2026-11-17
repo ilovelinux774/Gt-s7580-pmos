@@ -795,7 +795,8 @@ jobs:
           PY
           cat lk2nd-j4primelte.img.sha256
 
-      - name: Upload LK2ND standalone boot image
+      - name: Upload LK2ND build output and diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: lk2nd-j4primelte-${{ github.run_id }}
@@ -804,6 +805,7 @@ jobs:
             lk2nd-j4primelte.img.sha256
             lk2nd-source-commit.txt
             lk2nd-build.log
-          if-no-files-found: error
+            lk2nd-src/build-msm8917-secondary/
+          if-no-files-found: warn
           compression-level: 0
           retention-days: 30
