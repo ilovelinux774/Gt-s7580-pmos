@@ -831,6 +831,11 @@ jobs:
           test -s lk2nd-src/build-msm8917-secondary/lk2nd.img
           cp lk2nd-src/build-msm8917-secondary/lk2nd.img lk2nd-j4primelte.img
           sha256sum lk2nd-j4primelte.img > lk2nd-j4primelte.img.sha256
+          mkdir odin-package
+          cp lk2nd-j4primelte.img odin-package/boot.img
+          tar -C odin-package -cf lk2nd-j4primelte-odin.tar boot.img
+          sha256sum lk2nd-j4primelte-odin.tar > lk2nd-j4primelte-odin.tar.sha256
+          test "$(tar -tf lk2nd-j4primelte-odin.tar)" = boot.img
           python3 - <<'PY'
           from pathlib import Path
           import struct
@@ -865,6 +870,8 @@ jobs:
           path: |
             lk2nd-j4primelte.img
             lk2nd-j4primelte.img.sha256
+            lk2nd-j4primelte-odin.tar
+            lk2nd-j4primelte-odin.tar.sha256
             lk2nd-source-commit.txt
             lk2nd-build.log
             lk2nd-src/build-msm8917-secondary/
