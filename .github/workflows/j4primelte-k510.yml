@@ -774,6 +774,11 @@ jobs:
       - name: Build and validate LK2ND
         run: |
           set -euo pipefail
+          # This pinned legacy tree predates GCC's default -fno-common. Its
+          # headers intentionally define tentative globals in multiple units;
+          # restore the historical common-symbol behavior for current GCC.
+          sed -i 's/^CFLAGS := /CFLAGS := -fcommon /' lk2nd-src/makefile
+          grep -q '^CFLAGS := -fcommon ' lk2nd-src/makefile
           make -C lk2nd-src TOOLCHAIN_PREFIX=arm-none-eabi- msm8917-secondary \
             2>&1 | tee lk2nd-build.log
           test -s lk2nd-src/build-msm8917-secondary/lk2nd.img
