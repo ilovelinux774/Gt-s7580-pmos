@@ -2,6 +2,11 @@
 # Replace the donor initramfs with the Arch root-switch initramfs and add QCDT.
 set -euo pipefail
 
+# CI uploads the complete build log, but also surface the exact failing shell
+# command in GitHub's step annotations so failures remain diagnosable when log
+# artifact downloads are unavailable.
+trap 'rc=$?; printf "::error title=Arch BOOT builder failed::line %s: %s (exit %s)\\n" "$LINENO" "$BASH_COMMAND" "$rc"; exit "$rc"' ERR
+
 if [[ $# -ne 8 ]]; then
   echo "usage: $0 <repack-boot> <donor.img> <kernel> <root-initramfs> <qcdt> <root-label> <boot-limit-bytes> <output.img>" >&2
   exit 2

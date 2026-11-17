@@ -685,9 +685,14 @@ jobs:
         if: env.J4_DRY_RUN != 'true' && inputs.config_only != true && inputs.selftest_only != true
         run: |
           set -euo pipefail
-          test -s rootfs.img
-          test -s arch-root-initramfs.cpio.xz
-          test -s "${QCDT_IMAGE:?required Qualcomm QCDT table missing}"
+          for input in rootfs.img arch-root-initramfs.cpio.xz "${QCDT_IMAGE:?required Qualcomm QCDT table missing}"; do
+            if [ ! -s "$input" ]; then
+              echo "::error title=Missing Arch BOOT input::$input is missing or empty"
+              ls -l "$input" 2>&1 || true
+              exit 1
+            fi
+            stat -c 'Arch BOOT input: %n (%s bytes)' "$input"
+          done
           set +e
           bash "$J4_DIR/build-arch-systemd-boot.sh" ./repack-boot donor/boot.img out/kernel.payload arch-root-initramfs.cpio.xz "$QCDT_IMAGE" "$ARCH_ROOT_LABEL" "$BOOT_PARTITION_BYTES" boot-k510-arch-systemd.img 2>&1 | tee arch-boot-build.log
           rc=${PIPESTATUS[0]}
