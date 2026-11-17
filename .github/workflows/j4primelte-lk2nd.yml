@@ -1,6 +1,11 @@
 name: Build LK2ND for Galaxy J4+
 
 on:
+  push:
+    branches:
+      - arena/cd201f8f-gt-s7580-pmos
+    paths:
+      - .github/workflows/j4primelte-lk2nd.yml
   workflow_dispatch:
 
 permissions:
