@@ -795,6 +795,15 @@ jobs:
           PY
           cat lk2nd-j4primelte.img.sha256
 
+      - name: Surface LK2ND compiler failure details
+        if: failure()
+        run: |
+          if [ -f lk2nd-build.log ]; then
+            tail -n 45 lk2nd-build.log | while IFS= read -r line; do
+              echo "::error title=LK2ND build log::$line"
+            done
+          fi
+
       - name: Upload LK2ND build output and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
