@@ -800,6 +800,19 @@ jobs:
           assert text.count(old) == 1 and text.count('} scm_arg_type;') == 1
           text = text.replace(old, 'enum scm_arg_type\n{\n\tSMC_PARAM_TYPE_VALUE = 0,', 1)
           scm.write_text(text.replace('} scm_arg_type;', '};', 1))
+
+          # The same legacy enum-as-global-object pattern occurs in SDHCI.
+          sdhci = Path('lk2nd-src/platform/msm_shared/include/sdhci.h')
+          text = sdhci.read_text()
+          for variable, tag, first_entry in (
+              ('sdhci_cmd_type', 'sdhci_cmd_type', 'SDHCI_CMD_TYPE_NORMAL = 0,'),
+              ('sdhci_resp_type', 'sdhci_resp_type', 'SDHCI_CMD_RESP_NONE = 0,'),
+          ):
+              old = f'enum {{\n\t{first_entry}'
+              assert text.count(old) == 1 and text.count(f'}} {variable};') == 1
+              text = text.replace(old, f'enum {tag} {{\n\t{first_entry}', 1)
+              text = text.replace(f'}} {variable};', '};', 1)
+          sdhci.write_text(text)
           PY
           make -C lk2nd-src TOOLCHAIN_PREFIX=arm-none-eabi- msm8917-secondary \
             2>&1 | tee lk2nd-build.log
