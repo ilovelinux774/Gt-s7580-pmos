@@ -8,9 +8,9 @@ builds pinned source commit `7bc82f56d1339b1d081c48ad3c664ec6119257af` and
 checks the Android boot header, QCDT payload, page size, and BOOT-partition
 size. The build applies two small, explicit compatibility fixes to the pinned
 legacy source: it makes the stack-canary global a single definition and
-changes header-level SCM and SDHCI enum objects into tagged enum types. A
-successful CI build only establishes that the image was built and checked; it
-does not prove it boots on this phone.
+converts header-level anonymous enum objects (SCM, SDHCI, BLSP, GPIO) to tagged
+enum types. A successful CI build only establishes that the image was built
+and checked; it does not prove it boots on this phone.
 
 ## Two-stage test plan
 

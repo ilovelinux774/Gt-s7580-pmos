@@ -779,6 +779,7 @@ jobs:
           # declare the SCM enum as a type rather than a global variable.
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           header = Path('lk2nd-src/include/debug.h')
           text = header.read_text()
@@ -792,27 +793,29 @@ jobs:
           assert text.count(anchor) == 1
           main.write_text(text.replace(anchor, anchor + '\nuintptr_t __stack_chk_guard;\n', 1))
 
-          scm = Path('lk2nd-src/platform/msm_shared/include/scm.h')
-          text = scm.read_text()
-          # Keep the enumerators visible in every translation unit, but define
-          # an enum type instead of a tentative object in this header.
-          old = 'enum\n{\n\tSMC_PARAM_TYPE_VALUE = 0,'
-          assert text.count(old) == 1 and text.count('} scm_arg_type;') == 1
-          text = text.replace(old, 'enum scm_arg_type\n{\n\tSMC_PARAM_TYPE_VALUE = 0,', 1)
-          scm.write_text(text.replace('} scm_arg_type;', '};', 1))
-
-          # The same legacy enum-as-global-object pattern occurs in SDHCI.
-          sdhci = Path('lk2nd-src/platform/msm_shared/include/sdhci.h')
-          text = sdhci.read_text()
-          for variable, tag, first_entry in (
-              ('sdhci_cmd_type', 'sdhci_cmd_type', 'SDHCI_CMD_TYPE_NORMAL = 0,'),
-              ('sdhci_resp_type', 'sdhci_resp_type', 'SDHCI_CMD_RESP_NONE = 0,'),
-          ):
-              old = f'enum {{\n\t{first_entry}'
-              assert text.count(old) == 1 and text.count(f'}} {variable};') == 1
-              text = text.replace(old, f'enum {tag} {{\n\t{first_entry}', 1)
-              text = text.replace(f'}} {variable};', '};', 1)
-          sdhci.write_text(text)
+          # These headers declare anonymous enum objects at file scope. Those
+          # become duplicate linker symbols when included in multiple units.
+          # Keep the constants, but make each declaration a tagged enum type.
+          enum_objects = {
+              'platform/msm_shared/include/scm.h': ['scm_arg_type'],
+              'platform/msm_shared/include/sdhci.h': ['sdhci_cmd_type', 'sdhci_resp_type'],
+              'platform/msm_shared/include/blsp_qup.h': ['qup_instance', 'blsp_instance'],
+              'platform/msm_shared/include/gpio.h': [
+                  'tlmm_drive_config', 'tlmm_pull_values',
+                  'tlmm_sdc_drv_ctrl', 'tlmm_ebi2_drv_ctrl',
+              ],
+          }
+          for relative, names in enum_objects.items():
+              path = Path('lk2nd-src') / relative
+              text = path.read_text()
+              for name in names:
+                  pattern = rf'enum\s*\{{(.*?)\}}\s*{name};'
+                  text, count = re.subn(
+                      pattern, lambda match: f'enum {name} {{{match.group(1)}}};',
+                      text, count=1, flags=re.S,
+                  )
+                  assert count == 1, f'expected one header enum object: {relative}:{name}'
+              path.write_text(text)
           PY
           make -C lk2nd-src TOOLCHAIN_PREFIX=arm-none-eabi- msm8917-secondary \
             2>&1 | tee lk2nd-build.log
