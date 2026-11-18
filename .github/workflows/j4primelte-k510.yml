@@ -806,6 +806,23 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Prepare standalone boot.img deliverable
+        if: env.J4_DRY_RUN != 'true' && inputs.config_only != true && inputs.selftest_only != true
+        run: |
+          set -euo pipefail
+          mkdir -p deliverable
+          cp boot-k510-arch-systemd.img deliverable/boot.img
+          sha256sum deliverable/boot.img > deliverable/boot.img.sha256
+
+      - name: Upload standalone boot.img deliverable
+        if: success() && env.J4_DRY_RUN != 'true' && inputs.config_only != true && inputs.selftest_only != true
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4-arch-systemd-boot-${{ github.run_id }}
+          path: deliverable/boot.img*
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4

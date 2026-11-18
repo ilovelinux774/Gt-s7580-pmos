@@ -31,6 +31,13 @@
 + BPF_SYSCALL
 + CGROUP_BPF
 
+# Disable fbcon for a hardware A/B test: it caused problems in both earlier
+# pmOS builds. Keep the framebuffer/display drivers enabled; only disable the
+# text console renderer. The standalone debug image's status text will no
+# longer be visible on the phone screen, so use UART/log capture for progress.
+- FRAMEBUFFER_CONSOLE
+- FRAMEBUFFER_CONSOLE_DETECT_PRIMARY
+
 # The donor initramfs configures RNDIS using the downstream android_usb path,
 # which upstream mainline does not provide. Build the generic g_ether gadget in
 # so it binds automatically when the ChipIdea UDC appears; configfs function
