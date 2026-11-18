@@ -713,7 +713,9 @@ jobs:
           cp boot-k510-arch-systemd.img.report.txt boot-k510-arch-systemd-report.txt
           cp boot-k510-arch-systemd.img.repack-report.txt boot-k510-arch-systemd-repack-report.txt
           cp boot-k510-arch-systemd.img.cmdline.txt arch-root-cmdline.txt
-          sha256sum rootfs.img > rootfs.img.sha256
+          # build-rootfs-image.sh runs under sudo and has already written this
+          # checksum. Do not overwrite its root-owned file as the runner user.
+          test -s rootfs.img.sha256
           cat boot-k510-arch-systemd.img.sha256 rootfs.img.sha256
           {
             echo '### Arch Linux ARM + systemd image'
