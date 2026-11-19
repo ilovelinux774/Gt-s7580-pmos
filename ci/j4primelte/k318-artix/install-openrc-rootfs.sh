@@ -43,25 +43,38 @@ else
   ln -sfn /usr/bin/openrc-init "$mnt/sbin/init"
 fi
 
+# Install the legacy Samsung Android composite RNDIS setup and its SSH
+# listener. Configfs is unavailable in this 3.18 kernel; userspace activates
+# the already-built-in android_usb function via its class sysfs attributes.
+install -D -m 0755 "$(dirname "$0")/j4-rndis.sh" "$mnt/usr/libexec/j4-rndis"
+install -D -m 0755 "$(dirname "$0")/j4-rndis.initd" "$mnt/etc/init.d/j4-rndis"
+install -D -m 0600 "$(dirname "$0")/sshd-rndis.conf" "$mnt/etc/ssh/sshd_config.j4-rndis"
+mkdir -p "$mnt/etc/runlevels/default"
+ln -sfn /etc/init.d/j4-rndis "$mnt/etc/runlevels/default/j4-rndis"
+
+# Fail the image build rather than silently shipping a service that cannot
+# configure the link or provide SSH access.
+for required in usr/bin/ip usr/bin/sshd usr/bin/ssh-keygen usr/bin/start-stop-daemon; do
+  [[ -x "$mnt/$required" ]] || {
+    echo "RNDIS access requires missing rootfs executable: /$required" >&2
+    exit 1
+  }
+done
+grep -q '^alarm:' "$mnt/etc/passwd" || {
+  echo "RNDIS SSH setup requires the Arch Linux ARM alarm account" >&2
+  exit 1
+}
+
 # OpenRC's upstream SysV-compatible inittab is supplied by the source tree in
-# the overlay. Add the J4 Qualcomm serial console; fbcon is intentionally not
-# relied upon for this bring-up.
+# the overlay. No UART is assumed; the RNDIS/SSH link is the access path.
 if [[ ! -s "$mnt/etc/inittab" ]]; then
   echo "OpenRC install did not provide /etc/inittab" >&2
   exit 1
 fi
-if ! grep -q 'ttyMSM0' "$mnt/etc/inittab"; then
-  cat >> "$mnt/etc/inittab" <<'EOF'
-
-# J4+ MSM serial console (115200 8N1), for first-boot diagnostics.
-s0:12345:respawn:/sbin/agetty -L 115200 ttyMSM0 vt100
-EOF
-fi
 
 mkdir -p "$mnt/etc/runlevels"/{sysinit,boot,default,shutdown}
 # Keep the first boot deliberately small: the initramfs already mounts /,
-# devtmpfs, procfs and sysfs. Start the stock Arch ARM udev daemon and a serial
-# login if the corresponding OpenRC scripts are present.
+# devtmpfs, procfs and sysfs. Start the stock Arch ARM udev daemon if present.
 if [[ -x "$mnt/etc/init.d/udev" ]]; then
   ln -sfn /etc/init.d/udev "$mnt/etc/runlevels/sysinit/udev"
 fi

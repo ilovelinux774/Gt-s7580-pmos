@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+# Provide a direct USB RNDIS link and a restricted SSH login for bring-up.
+
+description="J4+ USB RNDIS and SSH access"
+
+depend() {
+  need localmount
+  after hostname udev
+}
+
+start() {
+  ebegin "Starting J4+ USB RNDIS access"
+  /usr/libexec/j4-rndis start
+  eend $?
+}
+
+stop() {
+  ebegin "Stopping J4+ USB RNDIS access"
+  /usr/libexec/j4-rndis stop
+  eend $?
+}
