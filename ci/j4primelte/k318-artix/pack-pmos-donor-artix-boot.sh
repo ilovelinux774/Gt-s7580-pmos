@@ -4,7 +4,7 @@
 set -euo pipefail
 
 if [[ $# -lt 5 || $# -gt 6 ]]; then
-  echo "usage: $0 <repack-boot> <pmos-donor.img> <artix-initramfs> <output.img> <root-label> [disable-fbcon]" >&2
+  echo "usage: $0 <repack-boot> <pmos-donor.img> <artix-initramfs> <output.img> <root-label> [disable-fbcon|initcall-debug]" >&2
   exit 2
 fi
 
@@ -19,9 +19,9 @@ donor=$(realpath "$2")
 ramdisk=$(realpath "$3")
 out=$(realpath -m "$4")
 label=$5
-fbcon_mode=${6:-keep}
-[[ $fbcon_mode == keep || $fbcon_mode == disable-fbcon ]] || {
-  echo "unsupported optional mode: $fbcon_mode" >&2; exit 2;
+diagnostic_mode=${6:-normal}
+[[ $diagnostic_mode == normal || $diagnostic_mode == disable-fbcon || $diagnostic_mode == initcall-debug ]] || {
+  echo "unsupported diagnostic mode: $diagnostic_mode" >&2; exit 2;
 }
 [[ -x $repack && -s $donor && -s $ramdisk ]] || {
   echo "repacker, donor, or Artix initramfs is missing" >&2; exit 1;
@@ -35,12 +35,12 @@ trap 'rm -rf "$tmp"' EXIT
 
 # repack-boot currently requires a kernel input even when preserving the
 # donor. Extract that payload byte-for-byte and pass it back unchanged.
-python3 - "$donor" "$tmp/donor-kernel" "$tmp/cmdline" "$label" "$fbcon_mode" <<'PY'
+python3 - "$donor" "$tmp/donor-kernel" "$tmp/cmdline" "$label" "$diagnostic_mode" <<'PY'
 from pathlib import Path
 import struct
 import sys
 
-image_path, kernel_path, cmdline_path, label, fbcon_mode = sys.argv[1:]
+image_path, kernel_path, cmdline_path, label, diagnostic_mode = sys.argv[1:]
 data = Path(image_path).read_bytes()
 if len(data) < 1632 or data[:8] != b"ANDROID!":
     raise SystemExit("pmOS donor is not a complete Android v0 boot image")
@@ -72,12 +72,14 @@ for token in inherited.split():
     key = token.split("=", 1)[0]
     if (key in remove or key.startswith(("pmos.", "pmos_", "plymouth.",
                                          "systemd.", "rd.systemd."))
-            or (fbcon_mode == "disable-fbcon" and key == "fbcon")):
+            or (diagnostic_mode in {"disable-fbcon", "initcall-debug"} and key == "fbcon")):
         continue
     if token not in kept:
         kept.append(token)
-if fbcon_mode == "disable-fbcon":
+if diagnostic_mode in {"disable-fbcon", "initcall-debug"}:
     kept.append("fbcon=disable")
+if diagnostic_mode == "initcall-debug":
+    kept.extend(("initcall_debug", "ignore_loglevel"))
 kept.extend((f"root=LABEL={label}", "rootfstype=ext4", "rootwait", "rw", "loglevel=8"))
 cmdline = " ".join(kept)
 if len(cmdline.encode("ascii")) >= 512:
@@ -86,7 +88,7 @@ if any(t.split("=", 1)[0] in {"init", "rdinit"} for t in cmdline.split()):
     raise SystemExit("pmOS init override survived filtering")
 Path(cmdline_path).write_text(cmdline + "\n", encoding="ascii")
 print(f"Preserving pmOS donor kernel unchanged ({kernel_size} bytes)")
-print(f"fbcon mode: {fbcon_mode}")
+print(f"diagnostic mode: {diagnostic_mode}")
 print(f"Artix root-switch command line: {cmdline}")
 PY
 

@@ -43,6 +43,10 @@ alternative BOOT images:
   boot layout, but adds `fbcon=disable` as a diagnostic for the early
   `mdss_fb_probe` stall. Expect no Linux framebuffer text; use RNDIS/SSH if this
   lets userspace proceed.
+* `pmos-kernel-artix-initcall-debug-boot.img` — additionally enables
+  `initcall_debug ignore_loglevel` (and disables fbcon) to reveal the last
+  kernel initcall if the early probe still stalls. This makes a verbose boot
+  log and is diagnostic only.
 
 The previous #37 rollback donor produced a pstore console log that ended at
 `mdss_fb_probe`, before any initramfs/rootfs messages. That points to an early
