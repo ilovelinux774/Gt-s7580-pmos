@@ -109,12 +109,27 @@ jobs:
       - name: Build minimal Arch root-switch initramfs
         run: |
           set -euo pipefail
+          build_log="$PWD/initramfs-build.log"
+          report_failure() {
+            rc=$?
+            echo "::error title=initramfs build::failed at: $BASH_COMMAND"
+            if [[ -f $build_log ]]; then
+              while IFS= read -r line; do
+                escaped=$(printf '%s' "$line" | sed 's/%/%25/g; s/::/%3A%3A/g; s/\r/%0D/g')
+                echo "::error title=initramfs diagnostic::$escaped"
+              done < <(tail -n 30 "$build_log")
+            fi
+            exit "$rc"
+          }
+          trap report_failure ERR
           mkdir -p initramfs-debs
-          (cd initramfs-debs && apt-get download busybox-static:arm64)
+          (cd initramfs-debs && apt-get download busybox-static:arm64) 2>&1 | tee -a "$build_log"
+          dpkg-deb -f initramfs-debs/*.deb Package Architecture Version | tee -a "$build_log"
           bash "$K318_ARTIX_DIR/build-rootfs-initramfs.sh" \
             initramfs-debs initramfs-work arch-root-initramfs.cpio.xz \
-            "$ARCHLINUXARM_ROOT_LABEL"
+            "$ARCHLINUXARM_ROOT_LABEL" 2>&1 | tee -a "$build_log"
           xz -t arch-root-initramfs.cpio.xz
+          trap - ERR
 
       - name: Package the matched Medusa kernel with OpenRC rootfs handoff
         run: |
