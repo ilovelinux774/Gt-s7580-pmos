@@ -147,17 +147,18 @@ jobs:
             exit "$rc"
           }
           trap report_failure ERR
+          mkdir -p artifacts-out
           bash "$K318_ARTIX_DIR/pack-medusa-openrc-boot.sh" \
-            ./repack-boot arch-root-initramfs.cpio.xz boot.img \
+            ./repack-boot arch-root-initramfs.cpio.xz artifacts-out/boot.img \
             "$ARCHLINUXARM_ROOT_LABEL" 2>&1 | tee -a "$build_log"
-          sha256sum boot.img rootfs.img > SHA256SUMS
+          sha256sum artifacts-out/boot.img rootfs.img > SHA256SUMS
           cat SHA256SUMS
           {
             echo '### J4+ 3.18.120 + Artix OpenRC experimental image'
             echo
             echo "- Kernel: $MEDUSA_KERNEL_VERSION (matched Medusa payload/DTB)."
             echo "- PID 1: /usr/bin/openrc-init; ext4 root label: $ARCHLINUXARM_ROOT_LABEL."
-            echo "- BOOT image: $(stat -c %s boot.img) bytes; rootfs image: $(stat -c %s rootfs.img) bytes."
+            echo "- BOOT image: $(stat -c %s artifacts-out/boot.img) bytes; rootfs image: $(stat -c %s rootfs.img) bytes."
             echo '- CI proves build/container consistency only; handset boot remains untested.'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -166,10 +167,10 @@ jobs:
         with:
           name: j4primelte-318-artix-openrc-boot-${{ github.run_id }}
           path: |
-            boot.img
-            boot.img.sha256
-            boot.img.report.txt
-            boot.img.build-report.txt
+            artifacts-out/boot.img
+            artifacts-out/boot.img.sha256
+            artifacts-out/boot.img.report.txt
+            artifacts-out/boot.img.build-report.txt
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
