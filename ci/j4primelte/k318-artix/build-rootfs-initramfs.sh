@@ -13,7 +13,13 @@ out=$(realpath -m "$3")
 root_label=$4
 [[ $root_label =~ ^[A-Za-z0-9_-]+$ ]] || { echo "invalid ext4 label: $root_label" >&2; exit 1; }
 root="$work_dir/root"
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 command -v dpkg-deb >/dev/null || { echo "dpkg-deb is required" >&2; exit 1; }
+command -v gcc >/dev/null || { echo "gcc is required to build the static root-label helper" >&2; exit 1; }
+[[ $(uname -m) == aarch64 ]] || {
+  echo "build the J4+ initramfs on AArch64; host is $(uname -m)" >&2
+  exit 1
+}
 shopt -s nullglob
 packages=("$deb_dir"/*.deb)
 ((${#packages[@]} > 0)) || { echo "no .deb packages in $deb_dir" >&2; exit 1; }
@@ -40,7 +46,7 @@ busybox="$root/bin/busybox"
 [[ -x $busybox ]] || { echo "arm64 busybox-static is missing" >&2; exit 1; }
 if [[ $(uname -m) == aarch64 ]]; then
   applets=$("$busybox" --list)
-  for applet in blkid sh cat echo head ls mkdir mount sleep switch_root umount; do
+  for applet in sh cat echo head ls mkdir mount sleep switch_root umount; do
     grep -Fxq "$applet" <<<"$applets" || {
       echo "BusyBox static is missing required applet: $applet" >&2
       exit 1
@@ -50,12 +56,19 @@ fi
 mkdir -p "$root"/{dev,proc,sys,run,newroot,tmp,etc}
 mkdir -p "$root/bin" "$root/sbin" "$root/usr/libexec"
 ln -sfn "${busybox#"$root"}" "$root/bin/sh"
-ln -sfn "${busybox#"$root"}" "$root/sbin/blkid"
+gcc -std=c11 -O2 -Wall -Wextra -Werror -static \
+  -o "$root/sbin/find-ext4-root" "$script_dir/find-ext4-root.c"
+readelf -h "$root/sbin/find-ext4-root" | grep -q 'Machine:.*AArch64' || {
+  echo "find-ext4-root is not AArch64" >&2; exit 1;
+}
+if readelf -l "$root/sbin/find-ext4-root" | grep -q INTERP; then
+  echo "find-ext4-root is not statically linked" >&2; exit 1
+fi
 for applet in cat echo head ls mkdir mount sleep switch_root umount; do
   ln -sfn "${busybox#"$root"}" "$root/bin/$applet"
 done
 # Do not execute this arm64 BusyBox on x86_64 build hosts. The static BusyBox
-# package supplies blkid and these applets; the target image links them by name.
+# package supplies these applets; the target image links them by name.
 
 cat > "$root/init" <<'EOF'
 #!/bin/sh
@@ -82,24 +95,16 @@ done
 [ -n "$root_spec" ] || root_spec='LABEL=@ROOT_LABEL@'
 
 root_device=''
-root_key=''
-root_value=''
+root_label=''
 case "$root_spec" in
-  LABEL=*) root_key=LABEL; root_value=${root_spec#LABEL=} ;;
-  UUID=*) root_key=UUID; root_value=${root_spec#UUID=} ;;
+  LABEL=*) root_label=${root_spec#LABEL=} ;;
   /dev/*) [ -b "$root_spec" ] && root_device=$root_spec ;;
   *) say "unsupported root= value: $root_spec" ;;
 esac
 tries=0
 while [ -z "$root_device" ] && [ "$tries" -lt 60 ]; do
-  if [ -n "$root_key" ]; then
-    for candidate in /dev/mmcblk* /dev/sd* /dev/vd* /dev/nvme* /dev/block/*; do
-      [ -b "$candidate" ] || continue
-      metadata=$(blkid "$candidate" 2>/dev/null || true)
-      case "$metadata" in
-        *"$root_key=\"$root_value\""*) root_device=$candidate; break ;;
-      esac
-    done
+  if [ -n "$root_label" ]; then
+    root_device=$(find-ext4-root "$root_label" 2>/dev/null || true)
   fi
   [ -b "$root_device" ] && break
   root_device=''
@@ -144,4 +149,4 @@ mkdir -p "$(dirname "$out")"
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 python3 "$script_dir/../k419/mknewc.py" "$root" "$out"
 test -s "$out"
-printf 'contents: static BusyBox PID 1 and blkid, ext4 root discovery (LABEL=%s), switch_root\n' "$root_label"
+printf 'contents: static BusyBox PID 1, static ext4-label scanner, ext4 root handoff (LABEL=%s), switch_root\n' "$root_label"

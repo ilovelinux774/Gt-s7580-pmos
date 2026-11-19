@@ -26,8 +26,9 @@ distro image.
 ## Build and artifacts
 
 The `J4+ Linux 3.18 Artix/OpenRC` workflow emits separate `boot.img` and
-`rootfs.img` artifacts. The dedicated static-BusyBox boot initramfs discovers `LABEL=ARCHROOT`,
-mounts ext4, and switches to `/sbin/init` (OpenRC). The rootfs image replaces `/system`
+`rootfs.img` artifacts. The dedicated initramfs uses static BusyBox plus a small statically linked ext4
+label scanner to discover `LABEL=ARCHROOT`, mount ext4, and switch to `/sbin/init`
+(OpenRC). The rootfs image replaces `/system`
 when installed there; verify the live partition mapping and keep a full backup.
 CI validates build inputs, the boot container, the appended J4 Rev06 DTB, the
 root label, and sizes. It does **not** establish that this image boots on the
