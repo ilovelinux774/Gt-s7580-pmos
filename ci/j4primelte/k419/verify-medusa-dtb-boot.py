@@ -27,6 +27,7 @@ def main() -> int:
     parser.add_argument("boot", type=Path)
     parser.add_argument("dtb", type=Path)
     parser.add_argument("--expect-kernel-version", help="require this Linux version string in the gzip image")
+    parser.add_argument("--root-label", help="verify a production root-switch image instead of a rootless debug image")
     args = parser.parse_args()
     try:
         image = args.boot.read_bytes()
@@ -72,11 +73,26 @@ def main() -> int:
                 raise ValueError(f"kernel does not contain expected version {args.expect_kernel_version}")
 
         cmdline = image[64:64 + 512].split(b"\0", 1)[0].decode("ascii")
-        forbidden = ("root=", "rootfstype=", "rootflags=", "init=", "rdinit=", "pmos_", "pmos.")
-        if any(token.startswith(forbidden) for token in cmdline.split()):
-            raise ValueError(f"debug image has a root/init override: {cmdline}")
-        if not any(token.startswith("console=") for token in cmdline.split()):
-            raise ValueError("debug image has no kernel console")
+        tokens = cmdline.split()
+        if args.root_label:
+            if not args.root_label or not all(c.isalnum() or c in "_-" for c in args.root_label):
+                raise ValueError(f"invalid expected root label: {args.root_label!r}")
+            forbidden = ("rootflags=", "init=", "rdinit=", "pmos_", "pmos.", "systemd.", "rd.systemd.")
+            if any(token.startswith(forbidden) for token in tokens):
+                raise ValueError(f"production image has a forbidden root/init override: {cmdline}")
+            expected_root = f"root=LABEL={args.root_label}"
+            roots = [token for token in tokens if token.startswith("root=")]
+            if roots != [expected_root]:
+                raise ValueError(f"expected only {expected_root}: {cmdline}")
+            for required in ("rootfstype=ext4", "rootwait", "rw"):
+                if required not in tokens:
+                    raise ValueError(f"production image is missing {required}: {cmdline}")
+        else:
+            forbidden = ("root=", "rootfstype=", "rootflags=", "init=", "rdinit=", "pmos_", "pmos.")
+            if any(token.startswith(forbidden) for token in tokens):
+                raise ValueError(f"debug image has a root/init override: {cmdline}")
+        if not any(token.startswith("console=") for token in tokens):
+            raise ValueError("image has no kernel console")
         print(f"OK: {args.boot} ({len(image)} bytes)")
         print(f"  page={page_size}, kernel=0x{kernel_addr:08x}, ramdisk=0x{ramdisk_addr:08x}, tags=0x{tags_addr:08x}")
         print(f"  appended Medusa J4 Rev06 DTB: {len(dtb)} bytes; ids={ids}")

@@ -1,0 +1,165 @@
+name: J4+ Linux 3.18 Artix/OpenRC ARM experiment
+
+on:
+  push:
+    paths:
+      - '.github/workflows/j4primelte-k318-artix.yml'
+      - 'ci/j4primelte/k318-artix/**'
+      - 'ci/j4primelte/k419/**'
+      - 'ci/j4primelte/k510/repack-boot.c'
+      - 'ci/j4primelte/k510/qcdt.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: j4primelte-k318-artix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build 3.18.120 Medusa + Artix OpenRC image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      K419_DIR: ci/j4primelte/k419
+      K318_ARTIX_DIR: ci/j4primelte/k318-artix
+    steps:
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Load pinned J4+ / Arch ARM inputs
+        run: |
+          set -euo pipefail
+          source "$K419_DIR/sources.env"
+          source "$K318_ARTIX_DIR/sources.env"
+          {
+            echo "ARTIX_OPENRC_REPO=$ARTIX_OPENRC_REPO"
+            echo "ARTIX_OPENRC_COMMIT=$ARTIX_OPENRC_COMMIT"
+            echo "ARTIX_OPENRC_VERSION=$ARTIX_OPENRC_VERSION"
+            echo "ARTIX_OPENRC_ARCHIVE_SHA256=$ARTIX_OPENRC_ARCHIVE_SHA256"
+            echo "ARCHLINUXARM_ROOTFS_URL=$ARCHLINUXARM_ROOTFS_URL"
+            echo "ARCHLINUXARM_BUILDER_FINGERPRINT=$ARCHLINUXARM_BUILDER_FINGERPRINT"
+            echo "ARCHLINUXARM_KEYRING_SHA256=$ARCHLINUXARM_KEYRING_SHA256"
+            echo "ARCHLINUXARM_ROOT_LABEL=$ARCHLINUXARM_ROOT_LABEL"
+            echo "ARCHLINUXARM_ROOTFS_IMAGE_MIB=$ARCHLINUXARM_ROOTFS_IMAGE_MIB"
+            echo "J4_ARCH_SYSTEM_PARTITION_BYTES=$J4_ARCH_SYSTEM_PARTITION_BYTES"
+            echo "J4_BOOT_PARTITION_BYTES=$J4_BOOT_PARTITION_BYTES"
+            echo "MEDUSA_J4_DTB_SHA256=$MEDUSA_J4_DTB_SHA256"
+            echo "MEDUSA_KERNEL_PAYLOAD_SHA256=$MEDUSA_KERNEL_PAYLOAD_SHA256"
+            echo "MEDUSA_KERNEL_VERSION=$MEDUSA_KERNEL_VERSION"
+            echo "MEDUSA_BOOT_PAGE_SIZE=$MEDUSA_BOOT_PAGE_SIZE"
+            echo "MEDUSA_BOOT_KERNEL_ADDR=$MEDUSA_BOOT_KERNEL_ADDR"
+            echo "MEDUSA_BOOT_RAMDISK_ADDR=$MEDUSA_BOOT_RAMDISK_ADDR"
+            echo "MEDUSA_BOOT_SECOND_ADDR=$MEDUSA_BOOT_SECOND_ADDR"
+            echo "MEDUSA_BOOT_TAGS_ADDR=$MEDUSA_BOOT_TAGS_ADDR"
+          } >> "$GITHUB_ENV"
+          test "$(uname -m)" = aarch64
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils build-essential cpio curl device-tree-compiler \
+            e2fsprogs file gpgv libcap-dev libmount-dev libncurses-dev \
+            libpam0g-dev make pkg-config python3 xz-utils
+          gcc -O2 -Wall -Wextra -Werror -o repack-boot "$K419_DIR/../k510/repack-boot.c"
+          ./repack-boot inspect boot.img >/dev/null
+
+      - name: Download and authenticate Arch Linux ARM rootfs
+        run: |
+          set -euo pipefail
+          bash "$K419_DIR/build-archlinuxarm-rootfs.sh" \
+            "$PWD/ArchLinuxARM-aarch64-rootfs.tar.gz"
+
+      - name: Build the Artix OpenRC AArch64 overlay
+        run: |
+          set -euo pipefail
+          archive="artix-openrc-${ARTIX_OPENRC_COMMIT}.tar.gz"
+          curl -fL --retry 3 --max-time 180 \
+            -o "$archive" "https://codeload.github.com/artix-linux/openrc/tar.gz/$ARTIX_OPENRC_COMMIT"
+          echo "$ARTIX_OPENRC_ARCHIVE_SHA256  $archive" | sha256sum -c -
+          tar -xzf "$archive"
+          source_dir=$(find . -maxdepth 1 -type d -name "openrc-${ARTIX_OPENRC_COMMIT}*" -print -quit)
+          test -n "$source_dir"
+          bash "$K318_ARTIX_DIR/build-openrc-overlay.sh" "$source_dir" "$PWD/openrc-stage"
+          find openrc-stage -type f -name openrc-init -exec sha256sum {} \;
+
+      - name: Create and convert the ARCHROOT ext4 image
+        run: |
+          set -euo pipefail
+          sudo bash "$K419_DIR/build-rootfs-image.sh" \
+            "$PWD/ArchLinuxARM-aarch64-rootfs.tar.gz" "$PWD/rootfs.img" \
+            "$ARCHLINUXARM_ROOTFS_IMAGE_MIB"
+          sudo bash "$K318_ARTIX_DIR/install-openrc-rootfs.sh" \
+            "$PWD/rootfs.img" "$PWD/openrc-stage"
+          test "$(e2label rootfs.img)" = "$ARCHLINUXARM_ROOT_LABEL"
+          stat -c 'OpenRC rootfs image: %n (%s bytes)' rootfs.img
+          sha256sum rootfs.img
+
+      - name: Build minimal Arch root-switch initramfs
+        run: |
+          set -euo pipefail
+          mkdir -p initramfs-apt/archives/partial initramfs-debs
+          sudo apt-get \
+            -o Dir::Cache::archives="$PWD/initramfs-apt/archives" \
+            --download-only --no-install-recommends -y install busybox-static util-linux
+          cp initramfs-apt/archives/*.deb initramfs-debs/
+          bash "$K419_DIR/build-rootfs-initramfs.sh" \
+            initramfs-debs initramfs-work arch-root-initramfs.cpio.xz \
+            "$ARCHLINUXARM_ROOT_LABEL"
+          xz -t arch-root-initramfs.cpio.xz
+
+      - name: Package the matched Medusa kernel with OpenRC rootfs handoff
+        run: |
+          set -euo pipefail
+          bash "$K318_ARTIX_DIR/pack-medusa-openrc-boot.sh" \
+            ./repack-boot arch-root-initramfs.cpio.xz boot.img \
+            "$ARCHLINUXARM_ROOT_LABEL"
+          sha256sum boot.img rootfs.img > SHA256SUMS
+          cat SHA256SUMS
+          {
+            echo '### J4+ 3.18.120 + Artix OpenRC experimental image'
+            echo
+            echo "- Kernel: $MEDUSA_KERNEL_VERSION (matched Medusa payload/DTB)."
+            echo "- PID 1: /usr/bin/openrc-init; ext4 root label: $ARCHLINUXARM_ROOT_LABEL."
+            echo "- BOOT image: $(stat -c %s boot.img) bytes; rootfs image: $(stat -c %s rootfs.img) bytes."
+            echo '- CI proves build/container consistency only; handset boot remains untested.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload standalone BOOT image
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-318-artix-openrc-boot-${{ github.run_id }}
+          path: |
+            boot.img
+            boot.img.sha256
+            boot.img.report.txt
+            boot.img.build-report.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload converted rootfs
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-318-artix-openrc-rootfs-${{ github.run_id }}
+          path: |
+            rootfs.img
+            rootfs.img.sha256
+            SHA256SUMS
+            arch-root-initramfs.cpio.xz
+            openrc-stage/usr/bin/openrc-init
+            openrc-stage/usr/bin/openrc
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
