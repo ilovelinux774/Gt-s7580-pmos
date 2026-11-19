@@ -109,12 +109,9 @@ jobs:
       - name: Build minimal Arch root-switch initramfs
         run: |
           set -euo pipefail
-          mkdir -p initramfs-apt/archives/partial initramfs-debs
-          sudo apt-get \
-            -o Dir::Cache::archives="$PWD/initramfs-apt/archives" \
-            --download-only --no-install-recommends -y install busybox-static util-linux
-          cp initramfs-apt/archives/*.deb initramfs-debs/
-          bash "$K419_DIR/build-rootfs-initramfs.sh" \
+          mkdir -p initramfs-debs
+          (cd initramfs-debs && apt-get download busybox-static:arm64)
+          bash "$K318_ARTIX_DIR/build-rootfs-initramfs.sh" \
             initramfs-debs initramfs-work arch-root-initramfs.cpio.xz \
             "$ARCHLINUXARM_ROOT_LABEL"
           xz -t arch-root-initramfs.cpio.xz
