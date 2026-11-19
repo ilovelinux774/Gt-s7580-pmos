@@ -29,19 +29,34 @@ distro image.
 
 ## Build and artifacts
 
-The `J4+ Linux 3.18 Artix/OpenRC` workflow emits separate `boot.img` and
-`rootfs.img` artifacts. The dedicated initramfs uses static BusyBox plus a small statically linked ext4
-label scanner to discover `LABEL=ARCHROOT`, mount ext4, and switch to `/sbin/init`
-(OpenRC). The rootfs image replaces `/system`
-when installed there; verify the live partition mapping and keep a full backup.
-CI validates build inputs, the boot container, the appended J4 Rev06 DTB, the
-root label, and sizes. It does **not** establish that this image boots on the
-handset.
+The `J4+ Linux 3.18 Artix/OpenRC` workflow emits a shared `rootfs.img` and two
+alternative BOOT images:
+
+* `boot.img` — matched Medusa kernel/DTB with the Artix root-switch initramfs.
+* `pmos-kernel-artix-boot.img` — preserves the pinned J4 pmOS rollback
+  donor's kernel payload byte-for-byte and retains its boot-header layout and
+  load addresses. It replaces the pmOS ramdisk and root command line with the
+  Artix root-switch initramfs and `LABEL=ARCHROOT` handoff, updating the header
+  sizes/checksum metadata. This is the pmOS-kernel + Artix-userspace
+  Frankenstein variant.
+
+Both BOOT choices use the same `rootfs.img`. The dedicated initramfs uses
+static BusyBox plus a small statically linked ext4 label scanner to discover
+`LABEL=ARCHROOT`, mount ext4, and switch to `/sbin/init` (OpenRC). Install the
+rootfs image as an ext4 block filesystem labeled `ARCHROOT`; copying it as an
+ordinary file is not sufficient. Retain a known-good recovery image and verify
+the live partition mapping before replacing `/system`. CI checks the pinned
+donor hash, verifies the pmOS kernel is unchanged in the Frankenstein image,
+and validates image layout/size. It does **not** establish that either image
+boots on the handset.
 
 ## USB RNDIS access
 
-Flash the matching BOOT and `rootfs.img` pair (retain a known-good recovery
-image first). The rootfs must be written as an ext4 block filesystem labeled
+For the requested pmOS-kernel + Artix test, flash
+`pmos-kernel-artix-boot.img` together with the matching `rootfs.img` (retain a
+known-good recovery image first; do not flash the untouched donor artifact).
+The alternative `boot.img` uses the Medusa kernel. The rootfs must be written
+as an ext4 block filesystem labeled
 `ARCHROOT`; copying `rootfs.img` as an ordinary file is not sufficient. The
 RNDIS service is started by OpenRC during boot. Use a known data-capable USB
 cable connected directly to the host, and select the phone's USB data mode if
