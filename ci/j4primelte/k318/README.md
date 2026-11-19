@@ -106,7 +106,11 @@ inspection:
 
 Local verification on 2026-11-13 (x86_64 host, GCC 4.9.4 Android prebuilt from
 `LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9`,
-installed by hand because this sandbox cannot run `apt-get`):
+installed by hand because this sandbox cannot run `apt-get`). Note that this
+local pass used a slightly different config sequence than `build.sh` and came
+out with `MEMCG`/`CPUSETS`/`FHANDLE` cleared by `olddefconfig`; the exact
+`build.sh` sequence was re-run afterwards and keeps all four enabled, so trust
+`build.sh` (and the CI job) as the reference:
 
 - Pinned tree `4fcc1090e5e07e7ccf877793e1bfe151641424bf` plus patches 0000-0002
   and the headless `scripts/config` edits: `make ARCH=arm64 Image.gz dtbs`

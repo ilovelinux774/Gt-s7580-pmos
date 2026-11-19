@@ -1,0 +1,168 @@
+name: J4+ 3.18 headless kernel (display stack removed)
+
+# What this builds, and what it does not prove:
+#
+#   * It rebuilds the pinned wonderful-mobile 3.18.120-A11 arm64 tree with
+#     ci/j4primelte/k318/build.sh, which now disables the legacy framebuffer
+#     MDSS/panel path, MSM_DBA, the LCD/backlight classes and the Samsung incell
+#     touchscreen. DRM/KMS was never enabled in this config.
+#   * CONFIG_EXTRA_FIRMWARE is cleared: build2.config references a300_pm4.fw /
+#     a300_pfp.fw, which are not in the tree.
+#   * It does NOT pack, flash or validate a BOOT image. Nothing here shows the
+#     kernel boots on the handset or that any userspace runs on it.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/j4primelte-k318-headless.yml'
+      - 'ci/j4primelte/k318/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: j4primelte-k318-headless-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build 3.18.120 arm64 headless kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      GIT_TERMINAL_PROMPT: "0"
+      KERNEL_TREE: ${{ github.workspace }}/k318-tree
+      TC_DIR: ${{ github.workspace }}/k318-toolchain
+      OUT: ${{ github.workspace }}/out/j4primelte-k318-headless
+    steps:
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install host tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex cpio git wget ca-certificates \
+            libssl-dev libelf-dev libncurses-dev device-tree-compiler python3
+          df -h
+
+      - name: Read the pinned kernel source and toolchain
+        run: |
+          set -euo pipefail
+          source ci/j4primelte/k318/sources.env
+          {
+            echo "KERNEL_REPO=$J4_K318_KERNEL_REPO"
+            echo "KERNEL_REF=$J4_K318_KERNEL_REF"
+            echo "KERNEL_COMMIT=$J4_K318_KERNEL_COMMIT"
+            echo "KERNEL_VERSION_EXPECTED=$J4_K318_KERNEL_VERSION"
+            echo "J4_DTB_NAME=msm8917-sec-j4primelte-sea-open-r06.dtb"
+            echo "BUILD2_CONFIG_SHA256=$J4_BUILD2_CONFIG_SHA256"
+          } >> "$GITHUB_ENV"
+
+      - name: Fetch the kernel tree at the pinned commit
+        run: |
+          set -euo pipefail
+          # The tree is ~155 MB compressed; a full clone of all branches is much
+          # larger, so fetch just the pinned commit.
+          git init --quiet "$KERNEL_TREE"
+          git -C "$KERNEL_TREE" remote add origin "$KERNEL_REPO"
+          git -C "$KERNEL_TREE" fetch --depth=1 origin "$KERNEL_COMMIT"
+          git -C "$KERNEL_TREE" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$KERNEL_TREE" rev-parse HEAD)" = "$KERNEL_COMMIT" \
+            || { echo "::error title=Kernel pin::fetched commit does not match the pin"; exit 1; }
+          head -4 "$KERNEL_TREE/Makefile"
+          grep -q "^VERSION = ${KERNEL_VERSION_EXPECTED%%.*}" "$KERNEL_TREE/Makefile" \
+            || { echo "::error title=Kernel version::tree version does not match the pin"; exit 1; }
+
+      - name: Fetch the AArch64 GCC 4.9 Android prebuilt
+        run: |
+          set -euo pipefail
+          # Same compiler family the recorded Build 2 image was built with. This
+          # replaces ProjectMedusaAndroid/aarch64-gcc-4.9-brillo-m10-release,
+          # which no longer exists; the LineageOS prebuilt is public and pinned.
+          git init --quiet "$TC_DIR"
+          git -C "$TC_DIR" remote add origin \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9
+          git -C "$TC_DIR" fetch --depth=1 origin \
+            5e030eafe024784a73cdf47e6936ac0dbfc763dc
+          git -C "$TC_DIR" checkout --quiet --detach FETCH_HEAD
+          chmod +x "$TC_DIR"/bin/* 2>/dev/null || true
+          "$TC_DIR/bin/aarch64-linux-android-gcc" --version | head -1
+          "$TC_DIR/bin/aarch64-linux-android-gcc" -dumpmachine | grep -q aarch64 \
+            || { echo "::error title=Toolchain::prebuilt is not aarch64"; exit 1; }
+
+      - name: Verify the baseline config matches the recorded one
+        run: |
+          set -euo pipefail
+          actual=$(sha256sum ci/j4primelte/k318/build2.config | awk '{print $1}')
+          if [ "$actual" != "$BUILD2_CONFIG_SHA256" ]; then
+            echo "::error title=build2.config::recorded $BUILD2_CONFIG_SHA256, found $actual"
+            exit 1
+          fi
+          echo "build2.config matches the recorded sha256"
+
+      - name: Build Image.gz and the J4+ device tree
+        run: |
+          set -euo pipefail
+          CROSS_COMPILE="$TC_DIR/bin/aarch64-linux-android-" \
+            JOBS="$(nproc)" \
+            bash ci/j4primelte/k318/build.sh 2>&1 | tee kernel-build.log
+          test -s "$OUT/arch/arm64/boot/Image.gz"
+          test -s "$OUT/arch/arm64/boot/dts/samsung/msm8917/${J4_DTB_NAME}"
+
+      - name: Check that the display stack really is gone
+        run: |
+          set -euo pipefail
+          cfg="$OUT/.config"
+          fail=0
+          for sym in CONFIG_FB CONFIG_FB_MSM CONFIG_FB_MSM_MDSS \
+                     CONFIG_FB_MSM_MDSS_SAMSUNG CONFIG_MSM_DBA \
+                     CONFIG_LCD_CLASS_DEVICE CONFIG_BACKLIGHT_CLASS_DEVICE \
+                     CONFIG_TOUCHSCREEN_SEC_INCELL_TS CONFIG_DRM; do
+            if grep -qE "^${sym}=y" "$cfg"; then
+              echo "::error title=Config::${sym} is still enabled"
+              fail=1
+            fi
+          done
+          for sym in CONFIG_MEMBARRIER CONFIG_CPUSETS CONFIG_FHANDLE CONFIG_MEMCG \
+                     CONFIG_MSM_KGSL CONFIG_RNDIS_IPA CONFIG_EXT4_FS; do
+            grep -qE "^${sym}=y" "$cfg" \
+              || { echo "::error title=Config::${sym} was lost"; fail=1; }
+          done
+          grep -qE '^CONFIG_EXTRA_FIRMWARE=""' "$cfg" \
+            || { echo "::error title=Config::EXTRA_FIRMWARE must be empty"; fail=1; }
+          exit "$fail"
+
+      - name: Record artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/j4primelte-k318-headless
+          cp "$OUT/arch/arm64/boot/Image.gz" artifacts/j4primelte-k318-headless/
+          cp "$OUT/arch/arm64/boot/dts/samsung/msm8917/${J4_DTB_NAME}" \
+            artifacts/j4primelte-k318-headless/
+          cp "$OUT/.config" artifacts/j4primelte-k318-headless/kernel.config
+          cp kernel-build.log artifacts/j4primelte-k318-headless/build.log
+          cd artifacts/j4primelte-k318-headless
+          printf '%s\n' \
+            'Kernel build only. No BOOT image is packed and nothing was flashed.' \
+            'The kernel is NOT boot-tested on the handset.' > NOT-BOOT-TESTED.txt
+          sha256sum Image.gz "${J4_DTB_NAME}" kernel.config NOT-BOOT-TESTED.txt \
+            > SHA256SUMS
+          cat SHA256SUMS
+          stat -c '%n %s bytes' Image.gz "${J4_DTB_NAME}"
+
+      - name: Upload the kernel and its build report
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-k318-headless-${{ github.run_id }}
+          path: artifacts/j4primelte-k318-headless/
+          if-no-files-found: error
+          retention-days: 30

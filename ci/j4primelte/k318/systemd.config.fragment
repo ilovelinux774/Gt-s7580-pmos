@@ -1,0 +1,8 @@
+# Build-time enablement accompanying the source backports.
+CONFIG_MEMBARRIER=y
+CONFIG_CPUSETS=y
+CONFIG_FHANDLE=y
+CONFIG_MEMCG=y
+# The source archive omits these unrelated Adreno A300 firmware blobs; the J4+
+# uses Adreno 506. Do not make the kernel build depend on unprovided blobs.
+CONFIG_EXTRA_FIRMWARE=""
