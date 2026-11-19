@@ -11,7 +11,7 @@ fi
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(cd -- "$HERE/../../.." && pwd)
 # shellcheck disable=SC1091
-source "$ROOT/ci/j4primelte/k510/sources.env"
+source "$ROOT/ci/j4primelte/k318-artix/sources.env"
 # shellcheck disable=SC1091
 source "$ROOT/ci/j4primelte/k419/sources.env"
 repack=$(realpath "$1")
@@ -23,7 +23,7 @@ label=$5
   echo "repacker, donor, or Artix initramfs is missing" >&2; exit 1;
 }
 [[ $label =~ ^[A-Za-z0-9_-]+$ ]] || { echo "invalid root label: $label" >&2; exit 1; }
-echo "$J4_K510_DONOR_SHA256  $donor" | sha256sum -c -
+echo "$J4_ARTIX_PMO_DONOR_SHA256  $donor" | sha256sum -c -
 xz -t "$ramdisk"
 mkdir -p "$(dirname "$out")"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/j4-pmos-artix-boot.XXXXXX")

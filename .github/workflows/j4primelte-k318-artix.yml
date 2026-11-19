@@ -29,7 +29,6 @@ jobs:
     env:
       K419_DIR: ci/j4primelte/k419
       K318_ARTIX_DIR: ci/j4primelte/k318-artix
-      K510_DIR: ci/j4primelte/k510
     steps:
       - name: Checkout this branch
         uses: actions/checkout@v4
@@ -42,7 +41,6 @@ jobs:
           set -euo pipefail
           source "$K419_DIR/sources.env"
           source "$K318_ARTIX_DIR/sources.env"
-          source "$K510_DIR/sources.env"
           {
             echo "ARTIX_OPENRC_REPO=$ARTIX_OPENRC_REPO"
             echo "ARTIX_OPENRC_COMMIT=$ARTIX_OPENRC_COMMIT"
@@ -153,17 +151,17 @@ jobs:
           bash "$K318_ARTIX_DIR/pack-medusa-openrc-boot.sh" \
             ./repack-boot arch-root-initramfs.cpio.xz artifacts-out/boot.img \
             "$ARCHLINUXARM_ROOT_LABEL" 2>&1 | tee -a "$build_log"
-          # Keep the pinned J4 pmOS donor's kernel and header layout/addresses,
-          # replacing its pmOS ramdisk/cmdline with the Artix root handoff. This is
-          # an alternative BOOT artifact, paired with the same rootfs.img.
-          source "$K510_DIR/sources.env"
+          # Keep the display-fixed J4 pmOS #39 kernel and header layout/addresses,
+          # replacing its pmOS ramdisk/cmdline with the Artix root handoff. Do not
+          # use the older #37 rollback donor, which stalled before initramfs.
+          source "$K318_ARTIX_DIR/sources.env"
           mkdir -p donor
           curl --fail --location --retry 3 --retry-delay 2 --connect-timeout 30 \
-            -o donor/pmos-known-good-boot.img "$J4_K510_DONOR_URL"
-          echo "$J4_K510_DONOR_SHA256  donor/pmos-known-good-boot.img" | sha256sum -c -
-          ./repack-boot inspect donor/pmos-known-good-boot.img | tee -a "$build_log"
+            -o donor/pmos-j4-39-boot.img "$J4_ARTIX_PMO_DONOR_URL"
+          echo "$J4_ARTIX_PMO_DONOR_SHA256  donor/pmos-j4-39-boot.img" | sha256sum -c -
+          ./repack-boot inspect donor/pmos-j4-39-boot.img | tee -a "$build_log"
           bash "$K318_ARTIX_DIR/pack-pmos-donor-artix-boot.sh" \
-            ./repack-boot donor/pmos-known-good-boot.img \
+            ./repack-boot donor/pmos-j4-39-boot.img \
             arch-root-initramfs.cpio.xz \
             artifacts-out/pmos-kernel-artix-boot.img \
             "$ARCHLINUXARM_ROOT_LABEL" 2>&1 | tee -a "$build_log"

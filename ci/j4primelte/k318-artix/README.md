@@ -33,12 +33,17 @@ The `J4+ Linux 3.18 Artix/OpenRC` workflow emits a shared `rootfs.img` and two
 alternative BOOT images:
 
 * `boot.img` — matched Medusa kernel/DTB with the Artix root-switch initramfs.
-* `pmos-kernel-artix-boot.img` — preserves the pinned J4 pmOS rollback
-  donor's kernel payload byte-for-byte and retains its boot-header layout and
-  load addresses. It replaces the pmOS ramdisk and root command line with the
-  Artix root-switch initramfs and `LABEL=ARCHROOT` handoff, updating the header
-  sizes/checksum metadata. This is the pmOS-kernel + Artix-userspace
+* `pmos-kernel-artix-boot.img` — preserves the pinned J4 pmOS #39
+  display-fixed donor's kernel payload byte-for-byte and retains its boot-header
+  layout and load addresses. It replaces the pmOS ramdisk and root command line
+  with the Artix root-switch initramfs and `LABEL=ARCHROOT` handoff, updating the
+  header sizes/checksum metadata. This is the pmOS-kernel + Artix-userspace
   Frankenstein variant.
+
+The previous #37 rollback donor produced a pstore console log that ended at
+`mdss_fb_probe`, before any initramfs/rootfs messages. That points to an early
+kernel/framebuffer stall, not an OpenRC or RNDIS failure. The donor pin is now
+#39, whose release applies the J4 framebuffer-console late-bind fix.
 
 Both BOOT choices use the same `rootfs.img`. The dedicated initramfs uses
 static BusyBox plus a small statically linked ext4 label scanner to discover
