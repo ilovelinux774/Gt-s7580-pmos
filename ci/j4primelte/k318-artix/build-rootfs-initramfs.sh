@@ -46,7 +46,7 @@ busybox="$root/bin/busybox"
 [[ -x $busybox ]] || { echo "arm64 busybox-static is missing" >&2; exit 1; }
 if [[ $(uname -m) == aarch64 ]]; then
   applets=$("$busybox" --list)
-  for applet in sh cat echo head ls mkdir mount sleep switch_root umount; do
+  for applet in sh cat echo head ls mkdir mount readlink sleep switch_root umount; do
     grep -Fxq "$applet" <<<"$applets" || {
       echo "BusyBox static is missing required applet: $applet" >&2
       exit 1
@@ -64,7 +64,7 @@ readelf -h "$root/sbin/find-ext4-root" | grep -q 'Machine:.*AArch64' || {
 if readelf -l "$root/sbin/find-ext4-root" | grep -q INTERP; then
   echo "find-ext4-root is not statically linked" >&2; exit 1
 fi
-for applet in cat echo head ls mkdir mount sleep switch_root umount; do
+for applet in cat echo head ls mkdir mount readlink sleep switch_root umount; do
   ln -sfn "${busybox#"$root"}" "$root/bin/$applet"
 done
 # Do not execute this arm64 BusyBox on x86_64 build hosts. The static BusyBox
@@ -126,8 +126,11 @@ if ! mount -t ext4 -o rw "$root_device" /newroot; then
   exec /bin/sh
 fi
 
-if [ ! -x /newroot/sbin/init ]; then
-  say 'Arch rootfs is missing /sbin/init; entering initramfs shell'
+# Do not test /newroot/sbin/init directly: an absolute /usr/bin/init
+# symlink is resolved against the initramfs root until switch_root changes it.
+init_target=$(readlink /newroot/usr/bin/init 2>/dev/null || true)
+if [ ! -x /newroot/usr/bin/openrc-init ] || [ "$init_target" != /usr/bin/openrc-init ]; then
+  say "OpenRC init is missing or mislinked (target=$init_target); entering initramfs shell"
   umount /newroot 2>/dev/null || true
   exec /bin/sh
 fi
