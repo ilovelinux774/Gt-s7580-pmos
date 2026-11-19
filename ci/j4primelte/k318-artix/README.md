@@ -39,6 +39,10 @@ alternative BOOT images:
   with the Artix root-switch initramfs and `LABEL=ARCHROOT` handoff, updating the
   header sizes/checksum metadata. This is the pmOS-kernel + Artix-userspace
   Frankenstein variant.
+* `pmos-kernel-artix-nofbcon-boot.img` — same kernel, initramfs, rootfs, and
+  boot layout, but adds `fbcon=disable` as a diagnostic for the early
+  `mdss_fb_probe` stall. Expect no Linux framebuffer text; use RNDIS/SSH if this
+  lets userspace proceed.
 
 The previous #37 rollback donor produced a pstore console log that ended at
 `mdss_fb_probe`, before any initramfs/rootfs messages. That points to an early
@@ -57,10 +61,13 @@ boots on the handset.
 
 ## USB RNDIS access
 
-For the requested pmOS-kernel + Artix test, flash
-`pmos-kernel-artix-boot.img` together with the matching `rootfs.img` (retain a
-known-good recovery image first; do not flash the untouched donor artifact).
-The alternative `boot.img` uses the Medusa kernel. The rootfs must be written
+For the framebuffer diagnostic, flash
+`pmos-kernel-artix-nofbcon-boot.img` together with the matching `rootfs.img`
+(retain a known-good recovery image first; do not flash the untouched donor
+artifact). It intentionally disables framebuffer console output; the purpose
+is to determine whether the kernel reaches Artix/OpenRC and RNDIS beyond the
+`mdss_fb_probe` point. The normal pmOS-kernel variant is
+`pmos-kernel-artix-boot.img`; `boot.img` uses the Medusa kernel. The rootfs must be written
 as an ext4 block filesystem labeled
 `ARCHROOT`; copying `rootfs.img` as an ordinary file is not sufficient. The
 RNDIS service is started by OpenRC during boot. Use a known data-capable USB

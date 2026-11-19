@@ -3,8 +3,8 @@
 # with the minimal Artix/OpenRC root handoff.
 set -euo pipefail
 
-if [[ $# -ne 5 ]]; then
-  echo "usage: $0 <repack-boot> <pmos-donor.img> <artix-initramfs> <output.img> <root-label>" >&2
+if [[ $# -lt 5 || $# -gt 6 ]]; then
+  echo "usage: $0 <repack-boot> <pmos-donor.img> <artix-initramfs> <output.img> <root-label> [disable-fbcon]" >&2
   exit 2
 fi
 
@@ -19,6 +19,10 @@ donor=$(realpath "$2")
 ramdisk=$(realpath "$3")
 out=$(realpath -m "$4")
 label=$5
+fbcon_mode=${6:-keep}
+[[ $fbcon_mode == keep || $fbcon_mode == disable-fbcon ]] || {
+  echo "unsupported optional mode: $fbcon_mode" >&2; exit 2;
+}
 [[ -x $repack && -s $donor && -s $ramdisk ]] || {
   echo "repacker, donor, or Artix initramfs is missing" >&2; exit 1;
 }
@@ -31,12 +35,12 @@ trap 'rm -rf "$tmp"' EXIT
 
 # repack-boot currently requires a kernel input even when preserving the
 # donor. Extract that payload byte-for-byte and pass it back unchanged.
-python3 - "$donor" "$tmp/donor-kernel" "$tmp/cmdline" "$label" <<'PY'
+python3 - "$donor" "$tmp/donor-kernel" "$tmp/cmdline" "$label" "$fbcon_mode" <<'PY'
 from pathlib import Path
 import struct
 import sys
 
-image_path, kernel_path, cmdline_path, label = sys.argv[1:]
+image_path, kernel_path, cmdline_path, label, fbcon_mode = sys.argv[1:]
 data = Path(image_path).read_bytes()
 if len(data) < 1632 or data[:8] != b"ANDROID!":
     raise SystemExit("pmOS donor is not a complete Android v0 boot image")
@@ -67,10 +71,13 @@ kept = []
 for token in inherited.split():
     key = token.split("=", 1)[0]
     if (key in remove or key.startswith(("pmos.", "pmos_", "plymouth.",
-                                         "systemd.", "rd.systemd."))):
+                                         "systemd.", "rd.systemd."))
+            or (fbcon_mode == "disable-fbcon" and key == "fbcon")):
         continue
     if token not in kept:
         kept.append(token)
+if fbcon_mode == "disable-fbcon":
+    kept.append("fbcon=disable")
 kept.extend((f"root=LABEL={label}", "rootfstype=ext4", "rootwait", "rw", "loglevel=8"))
 cmdline = " ".join(kept)
 if len(cmdline.encode("ascii")) >= 512:
@@ -79,6 +86,7 @@ if any(t.split("=", 1)[0] in {"init", "rdinit"} for t in cmdline.split()):
     raise SystemExit("pmOS init override survived filtering")
 Path(cmdline_path).write_text(cmdline + "\n", encoding="ascii")
 print(f"Preserving pmOS donor kernel unchanged ({kernel_size} bytes)")
+print(f"fbcon mode: {fbcon_mode}")
 print(f"Artix root-switch command line: {cmdline}")
 PY
 

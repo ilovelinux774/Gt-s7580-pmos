@@ -165,7 +165,16 @@ jobs:
             arch-root-initramfs.cpio.xz \
             artifacts-out/pmos-kernel-artix-boot.img \
             "$ARCHLINUXARM_ROOT_LABEL" 2>&1 | tee -a "$build_log"
-          sha256sum artifacts-out/boot.img artifacts-out/pmos-kernel-artix-boot.img rootfs.img > SHA256SUMS
+          # Diagnostic A/B: suppress fbcon binding while keeping the same PMOS
+          # kernel, Artix initramfs and rootfs. This tests whether fbcon blocks
+          # boot before PID 1; it intentionally leaves no Linux text UI.
+          bash "$K318_ARTIX_DIR/pack-pmos-donor-artix-boot.sh" \
+            ./repack-boot donor/pmos-j4-39-boot.img \
+            arch-root-initramfs.cpio.xz \
+            artifacts-out/pmos-kernel-artix-nofbcon-boot.img \
+            "$ARCHLINUXARM_ROOT_LABEL" disable-fbcon 2>&1 | tee -a "$build_log"
+          sha256sum artifacts-out/boot.img artifacts-out/pmos-kernel-artix-boot.img \
+            artifacts-out/pmos-kernel-artix-nofbcon-boot.img rootfs.img > SHA256SUMS
           cat SHA256SUMS
           {
             echo '### J4+ 3.18.120 + Artix OpenRC experimental image'
@@ -174,8 +183,9 @@ jobs:
             echo "- PID 1: /usr/bin/openrc-init; ext4 root label: $ARCHLINUXARM_ROOT_LABEL."
             echo "- Medusa-kernel BOOT: $(stat -c %s artifacts-out/boot.img) bytes."
             echo "- pmOS-donor-kernel + Artix ramdisk BOOT: $(stat -c %s artifacts-out/pmos-kernel-artix-boot.img) bytes."
+            echo "- pmOS-donor-kernel + Artix no-fbcon diagnostic: $(stat -c %s artifacts-out/pmos-kernel-artix-nofbcon-boot.img) bytes."
             echo "- Shared rootfs: $(stat -c %s rootfs.img) bytes; label: $ARCHLINUXARM_ROOT_LABEL."
-            echo '- The pmOS-donor variant preserves the pinned donor kernel byte-for-byte and replaces its ramdisk/cmdline.'
+            echo '- Both pmOS variants preserve the pinned donor kernel; the no-fbcon image is a diagnostic A/B build.'
             echo '- CI proves build/container consistency only; handset boot remains untested.'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -192,6 +202,10 @@ jobs:
             artifacts-out/pmos-kernel-artix-boot.img.sha256
             artifacts-out/pmos-kernel-artix-boot.img.report.txt
             artifacts-out/pmos-kernel-artix-boot.img.build-report.txt
+            artifacts-out/pmos-kernel-artix-nofbcon-boot.img
+            artifacts-out/pmos-kernel-artix-nofbcon-boot.img.sha256
+            artifacts-out/pmos-kernel-artix-nofbcon-boot.img.report.txt
+            artifacts-out/pmos-kernel-artix-nofbcon-boot.img.build-report.txt
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
