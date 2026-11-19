@@ -134,9 +134,22 @@ jobs:
       - name: Package the matched Medusa kernel with OpenRC rootfs handoff
         run: |
           set -euo pipefail
+          build_log="$PWD/boot-package.log"
+          report_failure() {
+            rc=$?
+            echo "::error title=BOOT packaging::failed at: $BASH_COMMAND"
+            if [[ -f $build_log ]]; then
+              while IFS= read -r line; do
+                escaped=$(printf '%s' "$line" | sed 's/%/%25/g; s/::/%3A%3A/g; s/\r/%0D/g')
+                echo "::error title=BOOT packaging diagnostic::$escaped"
+              done < <(tail -n 30 "$build_log")
+            fi
+            exit "$rc"
+          }
+          trap report_failure ERR
           bash "$K318_ARTIX_DIR/pack-medusa-openrc-boot.sh" \
             ./repack-boot arch-root-initramfs.cpio.xz boot.img \
-            "$ARCHLINUXARM_ROOT_LABEL"
+            "$ARCHLINUXARM_ROOT_LABEL" 2>&1 | tee -a "$build_log"
           sha256sum boot.img rootfs.img > SHA256SUMS
           cat SHA256SUMS
           {
