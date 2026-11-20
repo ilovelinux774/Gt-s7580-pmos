@@ -127,3 +127,40 @@ out with `MEMCG`/`CPUSETS`/`FHANDLE` cleared by `olddefconfig`; the exact
 
 This kernel is **not boot-tested** and no BOOT image has been packed from it
 yet.
+
+## The DTB does not match the kernel
+
+Worth writing down because it invalidates a comfortable assumption.
+
+Every flashable image in this repository (the Medusa one and the pmOS-donor
+Frankenstein variants alike) pairs a kernel with
+`ci/j4primelte/k419/medusa-j4primelte-sea-open-r06.dtb`, sha256
+`6fca7cf5b5bbb142afb99c5e48dadaa4129ee961a06232d10089dd91710ff993`, which is
+the DTB extracted from a boot image that was reported to work on the phone.
+
+The pinned tree at `4fcc1090` does not compile that file. It compiles
+`msm8917-sec-j4primelte-sea-open-r06.dtb` with sha256
+`bd413438c5f8f216e736a3ecfb1d6f2082a5992e6f520cb3ce89dd80257f9763` -
+2,416,611 vs 2,416,663 bytes, 33,810 bytes differing. The two disagree about
+the base halves of several `reserved-memory` ranges (`splash_region`,
+`ramoops@86000000`, `sec_debug_region`, `klog_region`, ...), and both carry an
+empty `/memory` node (`reg = <0 0 0 0>`) that the bootloader is expected to
+fill in.
+
+So the kernel that dies at 1.159 s in `mdss_fb_probe` has never been run with
+the device tree its own source configures. That is a plausible cause, and it
+also means the earlier "headless" build changed two variables at once
+(framebuffer removed *and* a DTB that still did not match).
+
+`.github/workflows/j4primelte-k318-dtb-experiment.yml` builds the three-way set
+that separates those variables:
+
+| image | framebuffer | DTB |
+|---|---|---|
+| A | legacy FB kept | pinned `6fca7cf5` (control) |
+| B | legacy FB kept | configured `bd413438` |
+| C | stripped | configured `bd413438` |
+
+A vs B isolates the DTB; B vs C isolates the framebuffer removal. A and B keep
+the framebuffer on purpose, so a wrong DTB stays visible as a screen change
+rather than being silent.

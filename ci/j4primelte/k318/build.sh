@@ -6,6 +6,13 @@ HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 : "${CROSS_COMPILE:?set CROSS_COMPILE to the full cross-compiler prefix}"
 OUT=${OUT:-"$PWD/out/j4primelte-k318"}
 JOBS=${JOBS:-4}
+# VARIANT=display keeps the legacy framebuffer stack (the control arm of the
+# experiment); VARIANT=headless (default) strips it.
+VARIANT=${VARIANT:-headless}
+case $VARIANT in
+  headless|display) ;;
+  *) echo "VARIANT must be 'headless' or 'display'" >&2; exit 2 ;;
+esac
 EXPECTED=4fcc1090e5e07e7ccf877793e1bfe151641424bf
 ACTUAL=$(git -C "$KERNEL_TREE" rev-parse HEAD)
 if [[ "$ACTUAL" != "$EXPECTED" ]]; then
@@ -31,15 +38,18 @@ mkdir -p "$OUT"
 cp "$HERE/build2.config" "$OUT/.config"
 "$KERNEL_TREE/scripts/config" --file "$OUT/.config" \
   --enable MEMBARRIER --enable CPUSETS --enable FHANDLE --enable MEMCG \
-  --disable FB --disable FB_MSM --disable FB_MSM_MDSS_COMMON \
-  --disable FB_MSM_MDSS --disable FB_MSM_MDSS_WRITEBACK \
-  --disable FB_MSM_MDSS_XLOG_DEBUG --disable FB_MSM_MDSS_SAMSUNG \
-  --disable MSM_DBA --disable MSM_DBA_ADV7533 \
-  --disable BACKLIGHT_LCD_SUPPORT --disable LCD_CLASS_DEVICE \
-  --disable BACKLIGHT_CLASS_DEVICE --disable BACKLIGHT_GENERIC \
-  --disable SUPPORT_WHITERGB \
-  --disable TOUCHSCREEN_SEC_INCELL_TS \
   --set-str EXTRA_FIRMWARE ''
+if [[ $VARIANT == headless ]]; then
+  "$KERNEL_TREE/scripts/config" --file "$OUT/.config" \
+    --disable FB --disable FB_MSM --disable FB_MSM_MDSS_COMMON \
+    --disable FB_MSM_MDSS --disable FB_MSM_MDSS_WRITEBACK \
+    --disable FB_MSM_MDSS_XLOG_DEBUG --disable FB_MSM_MDSS_SAMSUNG \
+    --disable MSM_DBA --disable MSM_DBA_ADV7533 \
+    --disable BACKLIGHT_LCD_SUPPORT --disable LCD_CLASS_DEVICE \
+    --disable BACKLIGHT_CLASS_DEVICE --disable BACKLIGHT_GENERIC \
+    --disable SUPPORT_WHITERGB \
+    --disable TOUCHSCREEN_SEC_INCELL_TS
+fi
 make -C "$KERNEL_TREE" O="$OUT" ARCH=arm64 \
   CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
 PATH="${BUILD_PATH:-$PATH}" make -C "$KERNEL_TREE" O="$OUT" \

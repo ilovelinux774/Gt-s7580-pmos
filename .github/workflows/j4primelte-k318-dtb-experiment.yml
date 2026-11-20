@@ -1,0 +1,200 @@
+name: J4+ 3.18 unmatched-DTB A/B experiment
+
+# THE QUESTION THIS ANSWERS
+#
+#   Every flashable image in this repo pairs a kernel with
+#   ci/j4primelte/k419/medusa-j4primelte-sea-open-r06.dtb (sha256 6fca7cf5...),
+#   which is the DTB extracted from a boot image reported to work on the phone.
+#   The pinned wonderful-mobile tree at 4fcc1090 does NOT compile that file: it
+#   compiles msm8917-sec-j4primelte-sea-open-r06.dtb with sha256 bd413438...
+#   33,810 of 241,611 bytes differ. The two disagree about the reserved-memory
+#   base addresses (splash_region, ramoops@86000000, sec_debug_region...), and
+#   both have an empty /memory node.
+#
+#   So the kernel has been booted with a device tree that is not its own. That
+#   is a plausible cause of dying at 1.159 s inside the MDSS framebuffer probe,
+#   and it also means the "headless" build changes two variables at once.
+#
+# WHAT IS BUILT
+#
+#   Variant A  display  = legacy framebuffer kept, pinned 6fca7cf5 DTB  (control:
+#                        reproduces the existing Medusa pairing)
+#   Variant B  display  = legacy framebuffer kept, CONFIGURED bd413438 DTB
+#   Variant C  headless = framebuffer stripped,        CONFIGURED bd413438 DTB
+#
+#   A vs B isolates the DTB. B vs C isolates the framebuffer removal.
+#   Because A and B keep the framebuffer, a wrong DTB stays observable as a
+#   screen change instead of being invisible.
+#
+# NOTHING HERE IS BOOT-TESTED. CI proves the images are built and laid out as
+# described, not that the phone runs them.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/j4primelte-k318-dtb-experiment.yml'
+      - 'ci/j4primelte/k318/**'
+      - 'ci/j4primelte/k318-artix/pack-k318-headless-boot.sh'
+      - 'ci/j4primelte/k419/sources.env'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: j4primelte-k318-dtb-experiment-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  experiment:
+    name: Build the DTB / framebuffer A-B-C set
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      GIT_TERMINAL_PROMPT: "0"
+      MEDUSA_DTB_SHA256: 6fca7cf5b5bbb142afb99c5e48dadaa4129ee961a06232d10089dd91710ff993
+    steps:
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install host tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex cpio git ca-certificates \
+            libssl-dev libelf-dev libncurses-dev device-tree-compiler python3
+          df -h
+
+      - name: Read the pins
+        run: |
+          set -euo pipefail
+          source ci/j4primelte/k318/sources.env
+          {
+            echo "J4_K318_KERNEL_REPO=$J4_K318_KERNEL_REPO"
+            echo "J4_K318_KERNEL_COMMIT=$J4_K318_KERNEL_COMMIT"
+          } >> "$GITHUB_ENV"
+
+      - name: Fetch the pinned kernel tree and the AArch64 GCC 4.9 prebuilt
+        run: |
+          set -euo pipefail
+          git init --quiet k318-tree
+          git -C k318-tree remote add origin "$J4_K318_KERNEL_REPO"
+          git -C k318-tree fetch --depth=1 origin "$J4_K318_KERNEL_COMMIT"
+          git -C k318-tree checkout --quiet --detach FETCH_HEAD
+          test "$(git -C k318-tree rev-parse HEAD)" = "$J4_K318_KERNEL_COMMIT"
+
+          git init --quiet k318-toolchain
+          git -C k318-toolchain remote add origin \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9
+          git -C k318-toolchain fetch --depth=1 origin \
+            5e030eafe024784a73cdf47e6936ac0dbfc763dc
+          git -C k318-toolchain checkout --quiet --detach FETCH_HEAD
+          chmod +x k318-toolchain/bin/* 2>/dev/null || true
+          k318-toolchain/bin/aarch64-linux-android-gcc -dumpmachine | grep -q aarch64
+
+      - name: Build the two kernel variants
+        run: |
+          set -euo pipefail
+          export CROSS_COMPILE="$PWD/k318-toolchain/bin/aarch64-linux-android-"
+          # build.sh refuses a dirty tree at the pinned commit, so give each
+          # variant its own copy of the checkout.
+          for variant in display headless; do
+            rm -rf "tree-$variant"
+            git init --quiet "tree-$variant"
+            git -C "tree-$variant" remote add origin "$J4_K318_KERNEL_REPO"
+            git -C "tree-$variant" fetch --depth=1 origin "$J4_K318_KERNEL_COMMIT"
+            git -C "tree-$variant" checkout --quiet --detach FETCH_HEAD
+            KERNEL_TREE="$PWD/tree-$variant" OUT="$PWD/out-$variant" \
+              VARIANT="$variant" JOBS="$(nproc)" \
+              bash ci/j4primelte/k318/build.sh 2>&1 | tee "build-$variant.log"
+            cp "out-$variant/.config" "config-$variant"
+          done
+
+      - name: Record the DTB facts that motivate this run
+        run: |
+          set -euo pipefail
+          medusa=ci/j4primelte/k419/medusa-j4primelte-sea-open-r06.dtb
+          built=out-display/arch/arm64/boot/dts/samsung/msm8917/msm8917-sec-j4primelte-sea-open-r06.dtb
+          echo "pinned Medusa DTB        $(sha256sum "$medusa" | cut -d' ' -f1)"
+          echo "tree-configured DTB      $(sha256sum "$built" | cut -d' ' -f1)"
+          echo "differing bytes          $(cmp -l "$medusa" "$built" 2>/dev/null | wc -l)"
+          echo "$MEDUSA_DTB_SHA256  $medusa" | sha256sum -c - \
+            || { echo "::error title=pin::ci/j4primelte/k419 DTB no longer matches MEDUSA_J4_DTB_SHA256"; exit 1; }
+          # The framebuffer question, stated as an assertion rather than prose.
+          for cfg in config-display config-headless; do
+            printf '%-18s CONFIG_FB=%s  FB_MSM=%s  FRAMEBUFFER_CONSOLE=%s\n' "$cfg" \
+              "$(grep -cE '^CONFIG_FB=y' "$cfg")" \
+              "$(grep -cE '^CONFIG_FB_MSM=y' "$cfg")" \
+              "$(grep -cE '^CONFIG_FRAMEBUFFER_CONSOLE=y' "$cfg")"
+          done
+          grep -qE '^CONFIG_FB=y' config-display   || { echo "::error title=control::the display build lost CONFIG_FB"; exit 1; }
+          grep -qE '^# CONFIG_FB is not set' config-headless || { echo "::error title=headless::CONFIG_FB is still enabled"; exit 1; }
+
+      - name: Build the Artix initramfs
+        run: |
+          set -euo pipefail
+          mkdir -p initramfs-debs
+          (cd initramfs-debs && apt-get download busybox-static:arm64)
+          bash ci/j4primelte/k318-artix/build-rootfs-initramfs.sh \
+            initramfs-debs initramfs-work arch-root-initramfs.cpio.xz ARCHROOT
+          xz -t arch-root-initramfs.cpio.xz
+
+      - name: Pack A / B / C with an explicit DTB for each
+        run: |
+          set -euo pipefail
+          gcc -O2 -Wall -Wextra -Werror -o repack-boot ci/j4primelte/k510/repack-boot.c
+          mkdir -p artifacts-out
+          medusa=ci/j4primelte/k419/medusa-j4primelte-sea-open-r06.dtb
+          configured=out-display/arch/arm64/boot/dts/samsung/msm8917/msm8917-sec-j4primelte-sea-open-r06.dtb
+
+          # A: the existing pairing, rebuilt here as the control.
+          bash ci/j4primelte/k318-artix/pack-k318-headless-boot.sh ./repack-boot \
+            out-display/arch/arm64/boot/Image.gz "$medusa" \
+            arch-root-initramfs.cpio.xz artifacts-out/A-display-pinned-dtb.img
+          # B: same kernel, its own configured DTB.
+          bash ci/j4primelte/k318-artix/pack-k318-headless-boot.sh ./repack-boot \
+            out-display/arch/arm64/boot/Image.gz "$configured" \
+            arch-root-initramfs.cpio.xz artifacts-out/B-display-configured-dtb.img
+          # C: framebuffer stripped, configured DTB.
+          bash ci/j4primelte/k318-artix/pack-k318-headless-boot.sh ./repack-boot \
+            out-headless/arch/arm64/boot/Image.gz "$configured" \
+            arch-root-initramfs.cpio.xz artifacts-out/C-headless-configured-dtb.img
+
+          for img in artifacts-out/*.img; do
+            echo "=== $img"
+            python3 ci/j4primelte/k419/verify-medusa-dtb-boot.py "$img" \
+              "$(case $img in *A-*) echo "$medusa";; *) echo "$configured";; esac)" \
+              --root-label ARCHROOT
+          done
+
+          printf '%s\n' \
+            'A display + pinned 6fca7cf5 DTB   (control: the pairing used so far)' \
+            'B display + configured bd413438 DTB   (isolates the DTB)' \
+            'C headless + configured bd413438 DTB  (isolates the framebuffer)' \
+            '' \
+            'None of these is boot-tested. Flash one at a time, keep a known-good' \
+            'boot.img to restore, and report what the screen and USB do.' \
+            > artifacts-out/README-ORDER.txt
+
+          sha256sum artifacts-out/*.img | tee artifacts-out/SHA256SUMS
+
+      - name: Upload the experiment set
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-k318-dtb-experiment-${{ github.run_id }}
+          path: |
+            artifacts-out/
+            config-display
+            config-headless
+            build-display.log
+            build-headless.log
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
