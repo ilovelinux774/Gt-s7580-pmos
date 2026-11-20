@@ -6,6 +6,7 @@ on:
       - '.github/workflows/j4primelte-k318-artix.yml'
       - 'ci/j4primelte/k318-artix/**'
       - 'ci/j4primelte/k419/**'
+      - 'ci/j4primelte/k318/**'
       - 'ci/j4primelte/k510/repack-boot.c'
       - 'ci/j4primelte/k510/qcdt.py'
   workflow_dispatch:
@@ -28,6 +29,7 @@ jobs:
         shell: bash
     env:
       K419_DIR: ci/j4primelte/k419
+      K318_DIR: ci/j4primelte/k318
       K318_ARTIX_DIR: ci/j4primelte/k318-artix
     steps:
       - name: Checkout this branch
@@ -61,6 +63,19 @@ jobs:
             echo "MEDUSA_BOOT_RAMDISK_ADDR=$MEDUSA_BOOT_RAMDISK_ADDR"
             echo "MEDUSA_BOOT_SECOND_ADDR=$MEDUSA_BOOT_SECOND_ADDR"
             echo "MEDUSA_BOOT_TAGS_ADDR=$MEDUSA_BOOT_TAGS_ADDR"
+          } >> "$GITHUB_ENV"
+          # The headless 3.18 kernel is built from the same branch in this job;
+          # pass its pins through the environment for the kernel step.
+          source "$K318_DIR/sources.env"
+          {
+            echo "KERNEL_TREE=$PWD/k318-tree"
+            echo "TC_DIR=$PWD/k318-toolchain"
+            echo "K318_OUT=$PWD/k318-out"
+            echo "J4_K318_KERNEL_REPO=$J4_K318_KERNEL_REPO"
+            echo "J4_K318_KERNEL_COMMIT=$J4_K318_KERNEL_COMMIT"
+            echo "J4_K318_KERNEL_VERSION=$J4_K318_KERNEL_VERSION"
+            echo "J4_DTB_NAME=msm8917-sec-j4primelte-sea-open-r06.dtb"
+            echo "J4_K318_HEADLESS_ROOT_LABEL=$J4_K318_HEADLESS_ROOT_LABEL"
           } >> "$GITHUB_ENV"
           test "$(uname -m)" = aarch64
 
@@ -131,6 +146,79 @@ jobs:
           xz -t arch-root-initramfs.cpio.xz
           trap - ERR
 
+      - name: Build the headless 3.18.120 kernel (no framebuffer)
+        run: |
+          set -euo pipefail
+          # Same pinned tree and GCC 4.9 prebuilt as the standalone headless
+          # workflow. build.sh clears CONFIG_FB and the legacy MDSS/panel stack.
+          git init --quiet "$KERNEL_TREE"
+          git -C "$KERNEL_TREE" remote add origin "$J4_K318_KERNEL_REPO"
+          git -C "$KERNEL_TREE" fetch --depth=1 origin "$J4_K318_KERNEL_COMMIT"
+          git -C "$KERNEL_TREE" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$KERNEL_TREE" rev-parse HEAD)" = "$J4_K318_KERNEL_COMMIT"
+
+          git init --quiet "$TC_DIR"
+          git -C "$TC_DIR" remote add origin \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9
+          git -C "$TC_DIR" fetch --depth=1 origin \
+            5e030eafe024784a73cdf47e6936ac0dbfc763dc
+          git -C "$TC_DIR" checkout --quiet --detach FETCH_HEAD
+          chmod +x "$TC_DIR"/bin/* 2>/dev/null || true
+
+          CROSS_COMPILE="$TC_DIR/bin/aarch64-linux-android-" \
+            OUT="$K318_OUT" JOBS="$(nproc)" \
+            bash "$K318_DIR/build.sh" 2>&1 | tee k318-kernel-build.log
+          test -s "$K318_OUT/arch/arm64/boot/Image.gz"
+          test -s "$K318_OUT/arch/arm64/boot/dts/samsung/msm8917/${J4_DTB_NAME}"
+
+          cfg="$K318_OUT/.config"
+          fail=0
+          for sym in CONFIG_FB CONFIG_FB_MSM CONFIG_FB_MSM_MDSS CONFIG_MSM_DBA \
+                     CONFIG_LCD_CLASS_DEVICE CONFIG_BACKLIGHT_CLASS_DEVICE \
+                     CONFIG_TOUCHSCREEN_SEC_INCELL_TS CONFIG_DRM; do
+            grep -qE "^${sym}=y" "$cfg" && { echo "::error title=Config::${sym} still enabled"; fail=1; }
+          done
+          for sym in CONFIG_MEMBARRIER CONFIG_CPUSETS CONFIG_FHANDLE CONFIG_MEMCG \
+                     CONFIG_MSM_KGSL CONFIG_RNDIS_IPA CONFIG_EXT4_FS; do
+            grep -qE "^${sym}=y" "$cfg" || { echo "::error title=Config::${sym} lost"; fail=1; }
+          done
+          exit "$fail"
+
+      - name: Package the headless kernel with the Artix root handoff
+        run: |
+          set -euo pipefail
+          build_log="$PWD/k318-boot-package.log"
+          report_failure() {
+            rc=$?
+            echo "::error title=headless BOOT packaging::failed at: $BASH_COMMAND"
+            if [[ -f $build_log ]]; then
+              while IFS= read -r line; do
+                escaped=$(printf '%s' "$line" | sed 's/%/%25/g; s/::/%3A%3A/g; s/\r/%0D/g')
+                echo "::error title=headless BOOT diagnostic::$escaped"
+              done < <(tail -n 30 "$build_log")
+            fi
+            exit "$rc"
+          }
+          trap report_failure ERR
+          mkdir -p artifacts-out
+          bash "$K318_ARTIX_DIR/pack-k318-headless-boot.sh" \
+            ./repack-boot \
+            "$K318_OUT/arch/arm64/boot/Image.gz" \
+            "$K318_OUT/arch/arm64/boot/dts/samsung/msm8917/${J4_DTB_NAME}" \
+            arch-root-initramfs.cpio.xz \
+            artifacts-out/k318-headless-artix-boot.img 2>&1 | tee -a "$build_log"
+          # Independent check against the known-booting Medusa header layout.
+          python3 "$K419_DIR/verify-medusa-dtb-boot.py" \
+            artifacts-out/k318-headless-artix-boot.img \
+            "$K318_OUT/arch/arm64/boot/dts/samsung/msm8917/${J4_DTB_NAME}" \
+            --root-label "$J4_K318_HEADLESS_ROOT_LABEL" | tee -a "$build_log"
+          printf '%s\n' \
+            'Kernel: 3.18.120 headless (CONFIG_FB and the legacy MDSS/panel stack disabled).' \
+            'BOOT header: page 2048, kernel 0x80080000, ramdisk 0x83600000, tags 0x83400000' \
+            '             (identical to the Medusa image previously reported to boot).' \
+            'This image is NOT boot-tested. CI proves packaging only.' \
+            > artifacts-out/k318-headless-artix-boot.img.NOT-BOOT-TESTED.txt
+
       - name: Package the matched Medusa kernel with OpenRC rootfs handoff
         run: |
           set -euo pipefail
@@ -181,6 +269,7 @@ jobs:
             artifacts-out/pmos-kernel-artix-initcall-debug-boot.img \
             "$ARCHLINUXARM_ROOT_LABEL" initcall-debug 2>&1 | tee -a "$build_log"
           sha256sum artifacts-out/boot.img artifacts-out/pmos-kernel-artix-boot.img \
+            artifacts-out/k318-headless-artix-boot.img \
             artifacts-out/pmos-kernel-artix-nofbcon-boot.img \
             artifacts-out/pmos-kernel-artix-initcall-debug-boot.img rootfs.img > SHA256SUMS
           cat SHA256SUMS
@@ -191,6 +280,7 @@ jobs:
             echo "- PID 1: /usr/bin/openrc-init; ext4 root label: $ARCHLINUXARM_ROOT_LABEL."
             echo "- Medusa-kernel BOOT: $(stat -c %s artifacts-out/boot.img) bytes."
             echo "- pmOS-donor-kernel + Artix ramdisk BOOT: $(stat -c %s artifacts-out/pmos-kernel-artix-boot.img) bytes."
+            echo "- HEADLESS 3.18.120 kernel (no framebuffer) + Artix ramdisk BOOT: $(stat -c %s artifacts-out/k318-headless-artix-boot.img) bytes."
             echo "- pmOS-donor-kernel + Artix no-fbcon diagnostic: $(stat -c %s artifacts-out/pmos-kernel-artix-nofbcon-boot.img) bytes."
             echo "- pmOS-donor-kernel + initcall-debug diagnostic: $(stat -c %s artifacts-out/pmos-kernel-artix-initcall-debug-boot.img) bytes."
             echo "- Shared rootfs: $(stat -c %s rootfs.img) bytes; label: $ARCHLINUXARM_ROOT_LABEL."
@@ -209,6 +299,12 @@ jobs:
             artifacts-out/boot.img.build-report.txt
             artifacts-out/pmos-kernel-artix-boot.img
             artifacts-out/pmos-kernel-artix-boot.img.sha256
+            artifacts-out/k318-headless-artix-boot.img
+            artifacts-out/k318-headless-artix-boot.img.sha256
+            artifacts-out/k318-headless-artix-boot.img.inspect.txt
+            artifacts-out/k318-headless-artix-boot.img.build-report.txt
+            artifacts-out/k318-headless-artix-boot.img.NOT-BOOT-TESTED.txt
+            k318-kernel-build.log
             artifacts-out/pmos-kernel-artix-boot.img.report.txt
             artifacts-out/pmos-kernel-artix-boot.img.build-report.txt
             artifacts-out/pmos-kernel-artix-nofbcon-boot.img

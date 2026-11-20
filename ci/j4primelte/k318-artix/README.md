@@ -48,6 +48,17 @@ alternative BOOT images:
   kernel initcall if the early probe still stalls. This makes a verbose boot
   log and is diagnostic only.
 
+* `k318-headless-artix-boot.img` — the pinned 3.18.120-A11 arm64 tree rebuilt
+  with the entire legacy framebuffer stack removed (`CONFIG_FB` off, so
+  `FB_MSM*`, the Samsung panel/touch path, `MSM_DBA` and the LCD/backlight
+  classes are gone; DRM/KMS was never enabled). It is packed with the same
+  appended r06 DTB, 2048-byte page, `0x80080000`/`0x83600000`/`0x80F00000`/
+  `0x83400000` load addresses and Artix root handoff as the Medusa image that
+  was reported to boot, and its command line drops the now-meaningless
+  `console=tty0`/`fbcon=disable`. Because there is no framebuffer console at
+  all, the only way to observe this image before userspace is pstore/ramoops or
+  USB RNDIS. This variant is **not boot-tested**.
+
 The previous #37 rollback donor produced a pstore console log that ended at
 `mdss_fb_probe`, before any initramfs/rootfs messages. That points to an early
 kernel/framebuffer stall, not an OpenRC or RNDIS failure. The donor pin is now
