@@ -391,39 +391,42 @@ jobs:
           compression-level: 0
           retention-days: 30
 
-      - name: Compress the rootfs for distribution
+      - name: Split the rootfs for distribution
         run: |
           set -euo pipefail
-          # rootfs.img is 2400 MiB, above GitHub's 2 GiB per-release-asset limit,
-          # so it has to be compressed. It is almost entirely zero blocks, so a
-          # cheap preset already wins.
-          free -m || true
-          df -h . || true
-          # runner has ample free space (19 GiB here against ~6 GiB needed), so
-          # free what we can and use a compression ratio that cannot be blamed
-          # for the failure.
+          # rootfs.img is 2400 MiB, above GitHub's 2 GiB per-release-asset limit.
+          # xz compression of this image has failed repeatedly on the runner, so
+          # split it into sub-2-GiB chunks instead. split/cat are coreutils and
+          # cannot fail the way xz did.
           rm -f ArchLinuxARM-aarch64-rootfs.tar.gz
           rm -rf openrc-stage initramfs-work initramfs-debs k318-kernel k318-handoff
           df -h . || true
-          if ! xz -T1 -6 -k -f rootfs.img; then
-            echo "::error title=xz::xz failed; xz exit=$?"
-            df -h . || true
-            free -m || true
-            ls -l rootfs.img || true
-            exit 1
-          fi
-          ls -l rootfs.img rootfs.img.xz
-          xz -t rootfs.img.xz
-          df -h . || true
-          sha256sum rootfs.img rootfs.img.xz | tee rootfs-hashes.txt
+          split -b 1000M -d rootfs.img rootfs.img.part-
+          ls -l rootfs.img rootfs.img.part-*
+          # Reassembly must reproduce the original byte-for-byte.
+          cat rootfs.img.part-* | sha256sum
+          sha256sum rootfs.img
+          sha256sum rootfs.img rootfs.img.part-* | tee rootfs-hashes.txt
+          cat > README-REASSEMBLE.txt <<'EOF'
+          rootfs.img is split into parts because it is larger than GitHub's
+          2 GiB per-asset limit. Reassemble with:
+
+              cat rootfs.img.part-* > rootfs.img
+
+          Then verify with:  sha256sum -c rootfs-hashes.txt
+          EOF
+          cat README-REASSEMBLE.txt
 
       - name: Upload converted rootfs
         uses: actions/upload-artifact@v4
         with:
           name: j4primelte-318-artix-openrc-rootfs-${{ github.run_id }}
           path: |
-            rootfs.img.xz
+            rootfs.img.part-00
+            rootfs.img.part-01
+            rootfs.img.part-02
             rootfs-hashes.txt
+            README-REASSEMBLE.txt
             rootfs.img.sha256
             SHA256SUMS
             arch-root-initramfs.cpio.xz
@@ -448,10 +451,16 @@ jobs:
           AArch64 Artix/OpenRC root filesystem for the J4+ 3.18 work, from the
           official Arch Linux ARM rootfs plus the pinned Artix OpenRC overlay.
 
-          Write rootfs.img (xz -d it first) to the /system partition, or to any
-          ext4 filesystem labelled ARCHROOT. It is 2400 MiB, 96 MiB smaller than
-          the reported 2496 MiB /system; recheck the live partition size before
-          writing.
+          rootfs.img is split into rootfs.img.part-00/01/02 because it exceeds
+          GitHub's 2 GiB per-asset limit. Reassemble with:
+
+              cat rootfs.img.part-* > rootfs.img
+
+          Then verify with:  sha256sum -c rootfs-hashes.txt
+
+          Write rootfs.img to the /system partition, or to any ext4 filesystem
+          labelled ARCHROOT. It is 2400 MiB, 96 MiB smaller than the reported
+          2496 MiB /system; recheck the live partition size before writing.
 
           The initramfs (arch-root-initramfs.cpio.xz) is the matching ramdisk and
           is already inside the BOOT images from this branch; it is here only so
@@ -460,7 +469,8 @@ jobs:
           NOT boot-tested. Label: ARCHROOT, PID 1: /usr/bin/openrc-init.
           EOF
           )"
-          gh release create "$tag" rootfs.img.xz rootfs-hashes.txt \
+          gh release create "$tag" rootfs.img.part-00 rootfs.img.part-01 \
+            rootfs.img.part-02 rootfs-hashes.txt README-REASSEMBLE.txt \
             arch-root-initramfs.cpio.xz \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
             --title "J4+ Artix/OpenRC AArch64 rootfs (ARCHROOT, NOT boot-tested)" \
