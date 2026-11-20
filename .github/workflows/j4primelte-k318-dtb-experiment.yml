@@ -137,6 +137,68 @@ jobs:
           grep -qE '^CONFIG_FB=y' config-display   || { echo "::error title=control::the display build lost CONFIG_FB"; exit 1; }
           grep -qE '^# CONFIG_FB is not set' config-headless || { echo "::error title=headless::CONFIG_FB is still enabled"; exit 1; }
 
+      - name: Tar the kernels for the packaging job
+        run: |
+          set -euo pipefail
+          mkdir -p handoff
+          for v in display headless; do
+            cp "out-$v/arch/arm64/boot/Image.gz" "handoff/Image-$v.gz"
+          done
+          cp out-display/arch/arm64/boot/dts/samsung/msm8917/msm8917-sec-j4primelte-sea-open-r06.dtb \
+            handoff/configured.dtb
+          cp ci/j4primelte/k419/medusa-j4primelte-sea-open-r06.dtb handoff/pinned.dtb
+          cp config-display config-headless handoff/
+          (cd handoff && sha256sum Image-*.gz *.dtb > SHA256SUMS)
+          tar -C handoff -czf k318-experiment-kernels.tar.gz .
+          tar -tzf k318-experiment-kernels.tar.gz
+
+      - name: Upload the kernels
+        uses: actions/upload-artifact@v4
+        with:
+          name: k318-experiment-kernels-${{ github.run_id }}
+          path: k318-experiment-kernels.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  package:
+    # The Artix initramfs builder runs the cross-built arm64 BusyBox, so
+    # packaging needs a real aarch64 host while the kernel needs x86_64.
+    name: Pack A / B / C on aarch64
+    needs: experiment
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cpio curl xz-utils python3
+          gcc -O2 -Wall -Wextra -Werror -o repack-boot ci/j4primelte/k510/repack-boot.c
+
+      - name: Download and unpack the kernels
+        uses: actions/download-artifact@v4
+        with:
+          name: k318-experiment-kernels-${{ github.run_id }}
+          path: handoff
+
+      - name: Unpack and verify the kernel handoff
+        run: |
+          set -euo pipefail
+          mkdir -p k
+          tar -C k -xzf handoff/k318-experiment-kernels.tar.gz
+          (cd k && sha256sum -c SHA256SUMS)
+          ls -l k
+
       - name: Build the Artix initramfs
         run: |
           set -euo pipefail
@@ -149,29 +211,22 @@ jobs:
       - name: Pack A / B / C with an explicit DTB for each
         run: |
           set -euo pipefail
-          gcc -O2 -Wall -Wextra -Werror -o repack-boot ci/j4primelte/k510/repack-boot.c
           mkdir -p artifacts-out
-          medusa=ci/j4primelte/k419/medusa-j4primelte-sea-open-r06.dtb
-          configured=out-display/arch/arm64/boot/dts/samsung/msm8917/msm8917-sec-j4primelte-sea-open-r06.dtb
-
-          # A: the existing pairing, rebuilt here as the control.
           bash ci/j4primelte/k318-artix/pack-k318-headless-boot.sh ./repack-boot \
-            out-display/arch/arm64/boot/Image.gz "$medusa" \
+            k/Image-display.gz k/pinned.dtb \
             arch-root-initramfs.cpio.xz artifacts-out/A-display-pinned-dtb.img
-          # B: same kernel, its own configured DTB.
           bash ci/j4primelte/k318-artix/pack-k318-headless-boot.sh ./repack-boot \
-            out-display/arch/arm64/boot/Image.gz "$configured" \
+            k/Image-display.gz k/configured.dtb \
             arch-root-initramfs.cpio.xz artifacts-out/B-display-configured-dtb.img
-          # C: framebuffer stripped, configured DTB.
           bash ci/j4primelte/k318-artix/pack-k318-headless-boot.sh ./repack-boot \
-            out-headless/arch/arm64/boot/Image.gz "$configured" \
+            k/Image-headless.gz k/configured.dtb \
             arch-root-initramfs.cpio.xz artifacts-out/C-headless-configured-dtb.img
 
-          for img in artifacts-out/*.img; do
-            echo "=== $img"
-            python3 ci/j4primelte/k419/verify-medusa-dtb-boot.py "$img" \
-              "$(case $img in *A-*) echo "$medusa";; *) echo "$configured";; esac)" \
-              --root-label ARCHROOT
+          python3 ci/j4primelte/k419/verify-medusa-dtb-boot.py \
+            artifacts-out/A-display-pinned-dtb.img k/pinned.dtb --root-label ARCHROOT
+          for img in B-display-configured-dtb C-headless-configured-dtb; do
+            python3 ci/j4primelte/k419/verify-medusa-dtb-boot.py \
+              "artifacts-out/$img.img" k/configured.dtb --root-label ARCHROOT
           done
 
           printf '%s\n' \
@@ -182,19 +237,13 @@ jobs:
             'None of these is boot-tested. Flash one at a time, keep a known-good' \
             'boot.img to restore, and report what the screen and USB do.' \
             > artifacts-out/README-ORDER.txt
-
           sha256sum artifacts-out/*.img | tee artifacts-out/SHA256SUMS
 
       - name: Upload the experiment set
         uses: actions/upload-artifact@v4
         with:
           name: j4primelte-k318-dtb-experiment-${{ github.run_id }}
-          path: |
-            artifacts-out/
-            config-display
-            config-headless
-            build-display.log
-            build-headless.log
+          path: artifacts-out/
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
