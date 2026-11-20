@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 concurrency:
@@ -391,17 +391,54 @@ jobs:
           compression-level: 0
           retention-days: 30
 
+      - name: Compress the rootfs for distribution
+        run: |
+          set -euo pipefail
+          # 2400 MiB of mostly-zero ext4 compresses far below the artifact and
+          # release asset limits; xz -T0 keeps it quick.
+          xz -T0 -9 -k -f rootfs.img
+          ls -l rootfs.img rootfs.img.xz
+          xz -t rootfs.img.xz
+          sha256sum rootfs.img rootfs.img.xz | tee rootfs-hashes.txt
+
       - name: Upload converted rootfs
         uses: actions/upload-artifact@v4
         with:
           name: j4primelte-318-artix-openrc-rootfs-${{ github.run_id }}
           path: |
-            rootfs.img
+            rootfs.img.xz
+            rootfs-hashes.txt
             rootfs.img.sha256
             SHA256SUMS
             arch-root-initramfs.cpio.xz
-            openrc-stage/usr/bin/openrc-init
-            openrc-stage/usr/bin/openrc
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
+
+      - name: Publish the rootfs as a pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="j4-rootfs-${GITHUB_RUN_NUMBER}"
+          notes="$(cat <<'EOF'
+          AArch64 Artix/OpenRC root filesystem for the J4+ 3.18 work, from the
+          official Arch Linux ARM rootfs plus the pinned Artix OpenRC overlay.
+
+          Write rootfs.img (xz -d it first) to the /system partition, or to any
+          ext4 filesystem labelled ARCHROOT. It is 2400 MiB, 96 MiB smaller than
+          the reported 2496 MiB /system; recheck the live partition size before
+          writing.
+
+          The initramfs (arch-root-initramfs.cpio.xz) is the matching ramdisk and
+          is already inside the BOOT images from this branch; it is here only so
+          the pair can be rebuilt.
+
+          NOT boot-tested. Label: ARCHROOT, PID 1: /usr/bin/openrc-init.
+          EOF
+          )"
+          gh release create "$tag" rootfs.img.xz rootfs-hashes.txt \
+            arch-root-initramfs.cpio.xz \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "J4+ Artix/OpenRC AArch64 rootfs (ARCHROOT, NOT boot-tested)" \
+            --notes "$notes"
