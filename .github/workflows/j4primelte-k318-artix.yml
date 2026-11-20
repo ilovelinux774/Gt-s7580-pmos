@@ -248,7 +248,11 @@ jobs:
           (cd k318-kernel && sha256sum -c SHA256SUMS)
           ls -l k318-kernel
           test -s k318-kernel/Image.gz
-          test -s "k318-kernel/${J4_DTB_NAME}"
+          # Take the DTB name from the tarball instead of a cross-job variable;
+          # the kernel job's GITHUB_ENV does not exist in this job.
+          dtb=$(find k318-kernel -maxdepth 1 -name '*.dtb' -print -quit)
+          test -n "$dtb" || { echo "::error title=handoff::no DTB in the kernel tarball"; exit 1; }
+          echo "J4_DTB_PATH=$dtb" >> "$GITHUB_ENV"
 
       - name: Package the headless kernel with the Artix root handoff
         run: |
@@ -267,7 +271,7 @@ jobs:
           }
           trap report_failure ERR
           mkdir -p artifacts-out
-          dtb="k318-kernel/${J4_DTB_NAME}"
+          dtb="${J4_DTB_PATH:?DTB path missing from the unpack step}"
           bash "$K318_ARTIX_DIR/pack-k318-headless-boot.sh" \
             ./repack-boot k318-kernel/Image.gz "$dtb" \
             arch-root-initramfs.cpio.xz \
