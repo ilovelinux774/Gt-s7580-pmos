@@ -52,6 +52,7 @@ jobs:
           {
             echo "J4_K318_KERNEL_REPO=$J4_K318_KERNEL_REPO"
             echo "J4_K318_KERNEL_COMMIT=$J4_K318_KERNEL_COMMIT"
+            echo "J4_DTB_NAME=msm8917-sec-j4primelte-sea-open-r06.dtb"
           } >> "$GITHUB_ENV"
 
       - name: Build the headless kernel and the r06 DTB
@@ -95,15 +96,28 @@ jobs:
           done
           exit "$fail"
 
+      - name: Tar the kernel outputs
+        run: |
+          set -euo pipefail
+          # One tarball with a flat, known layout. Uploading several paths makes
+          # upload-artifact preserve their common ancestor, so the files come
+          # back nested under k318-out/... - pack our own container instead.
+          mkdir -p k318-handoff
+          cp k318-out/arch/arm64/boot/Image.gz k318-handoff/Image.gz
+          cp "k318-out/arch/arm64/boot/dts/samsung/msm8917/${J4_DTB_NAME}" \
+            k318-handoff/"${J4_DTB_NAME}"
+          cp k318-out/.config k318-handoff/kernel.config
+          cp k318-kernel-build.log k318-handoff/build.log
+          (cd k318-handoff && sha256sum Image.gz "${J4_DTB_NAME}" kernel.config > SHA256SUMS)
+          tar -C k318-handoff -czf k318-headless-kernel.tar.gz .
+          tar -tzf k318-headless-kernel.tar.gz
+          sha256sum k318-headless-kernel.tar.gz
+
       - name: Upload the headless kernel for the packaging job
         uses: actions/upload-artifact@v4
         with:
           name: k318-headless-kernel-${{ github.run_id }}
-          path: |
-            k318-out/arch/arm64/boot/Image.gz
-            k318-out/arch/arm64/boot/dts/samsung/msm8917/msm8917-sec-j4primelte-sea-open-r06.dtb
-            k318-out/.config
-            k318-kernel-build.log
+          path: k318-headless-kernel.tar.gz
           if-no-files-found: error
           retention-days: 14
 
@@ -224,7 +238,17 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: k318-headless-kernel-${{ github.run_id }}
-          path: k318-kernel
+          path: k318-handoff
+
+      - name: Unpack the kernel and check its checksums
+        run: |
+          set -euo pipefail
+          mkdir -p k318-kernel
+          tar -C k318-kernel -xzf k318-handoff/k318-headless-kernel.tar.gz
+          (cd k318-kernel && sha256sum -c SHA256SUMS)
+          ls -l k318-kernel
+          test -s k318-kernel/Image.gz
+          test -s "k318-kernel/${J4_DTB_NAME}"
 
       - name: Package the headless kernel with the Artix root handoff
         run: |
@@ -243,7 +267,7 @@ jobs:
           }
           trap report_failure ERR
           mkdir -p artifacts-out
-          dtb=k318-kernel/msm8917-sec-j4primelte-sea-open-r06.dtb
+          dtb="k318-kernel/${J4_DTB_NAME}"
           bash "$K318_ARTIX_DIR/pack-k318-headless-boot.sh" \
             ./repack-boot k318-kernel/Image.gz "$dtb" \
             arch-root-initramfs.cpio.xz \
