@@ -394,11 +394,18 @@ jobs:
       - name: Compress the rootfs for distribution
         run: |
           set -euo pipefail
-          # 2400 MiB of mostly-zero ext4 compresses far below the artifact and
-          # release asset limits; xz -T0 keeps it quick.
-          xz -T0 -9 -k -f rootfs.img
+          # rootfs.img is 2400 MiB, above GitHub's 2 GiB per-release-asset limit,
+          # so it has to be compressed. It is almost entirely zero blocks, so a
+          # cheap preset already wins: -9 allocates far more memory per thread
+          # than the arm runner has and previously got the job killed.
+          free -g || true
+          df -h . || true
+          # Free the space the extracted rootfs tarball and the loose image hold.
+          rm -f ArchLinuxARM-aarch64-rootfs.tar.gz
+          xz -T2 -6 -k -f rootfs.img
           ls -l rootfs.img rootfs.img.xz
           xz -t rootfs.img.xz
+          df -h . || true
           sha256sum rootfs.img rootfs.img.xz | tee rootfs-hashes.txt
 
       - name: Upload converted rootfs
