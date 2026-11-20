@@ -402,7 +402,13 @@ jobs:
           df -h . || true
           # Free the space the extracted rootfs tarball and the loose image hold.
           rm -f ArchLinuxARM-aarch64-rootfs.tar.gz
-          xz -T2 -6 -k -f rootfs.img
+          if ! xz -T1 -6 -k -f rootfs.img; then
+            echo "::error title=xz::xz failed; xz exit=$?"
+            df -h . || true
+            free -m || true
+            ls -l rootfs.img || true
+            exit 1
+          fi
           ls -l rootfs.img rootfs.img.xz
           xz -t rootfs.img.xz
           df -h . || true
@@ -421,6 +427,13 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
+
+      - name: Report disk before the release step
+        if: always()
+        run: |
+          echo "--- free"; free -m || true
+          echo "--- df"; df -h . || true
+          echo "--- large files"; ls -lSh rootfs.img* arch-root-initramfs.cpio.xz 2>/dev/null || true
 
       - name: Publish the rootfs as a pre-release
         env:
