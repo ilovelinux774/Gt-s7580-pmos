@@ -71,7 +71,8 @@ jobs:
           git -C k318-toolchain checkout --quiet --detach FETCH_HEAD
           chmod +x k318-toolchain/bin/* 2>/dev/null || true
 
-          CROSS_COMPILE="$PWD/k318-toolchain/bin/aarch64-linux-android-" \
+          KERNEL_TREE="$PWD/k318-tree" \
+            CROSS_COMPILE="$PWD/k318-toolchain/bin/aarch64-linux-android-" \
             OUT="$PWD/k318-out" JOBS="$(nproc)" \
             bash ci/j4primelte/k318/build.sh 2>&1 | tee k318-kernel-build.log
 
@@ -80,66 +81,35 @@ jobs:
           for sym in CONFIG_FB CONFIG_FB_MSM CONFIG_FB_MSM_MDSS CONFIG_MSM_DBA \
                      CONFIG_LCD_CLASS_DEVICE CONFIG_BACKLIGHT_CLASS_DEVICE \
                      CONFIG_TOUCHSCREEN_SEC_INCELL_TS CONFIG_DRM; do
-            grep -qE "^${sym}=y" "$cfg" && { echo "::error title=Config::${sym} still enabled"; fail=1; }
+            if grep -qE "^${sym}=y" "$cfg"; then
+              echo "::error title=Config::${sym} still enabled"
+              fail=1
+            fi
           done
           for sym in CONFIG_MEMBARRIER CONFIG_CPUSETS CONFIG_FHANDLE CONFIG_MEMCG \
                      CONFIG_MSM_KGSL CONFIG_RNDIS_IPA CONFIG_EXT4_FS; do
-            grep -qE "^${sym}=y" "$cfg" || { echo "::error title=Config::${sym} lost"; fail=1; }
+            if ! grep -qE "^${sym}=y" "$cfg"; then
+              echo "::error title=Config::${sym} lost"
+              fail=1
+            fi
           done
           exit "$fail"
 
-      - name: Package the headless kernel with the Artix root handoff
-        run: |
-          set -euo pipefail
-          build_log="$PWD/k318-boot-package.log"
-          report_failure() {
-            rc=$?
-            echo "::error title=headless BOOT packaging::failed at: $BASH_COMMAND"
-            if [[ -f $build_log ]]; then
-              while IFS= read -r line; do
-                escaped=$(printf '%s' "$line" | sed 's/%/%25/g; s/::/%3A%3A/g; s/\r/%0D/g')
-                echo "::error title=headless BOOT diagnostic::$escaped"
-              done < <(tail -n 30 "$build_log")
-            fi
-            exit "$rc"
-          }
-          trap report_failure ERR
-          mkdir -p artifacts-out
-          gcc -O2 -Wall -Wextra -Werror -o repack-boot ci/j4primelte/k510/repack-boot.c
-          # Real Artix initramfs, built on this runner from the pinned source.
-          mkdir -p initramfs-debs
-          (cd initramfs-debs && apt-get download busybox-static:arm64)
-          bash ci/j4primelte/k318-artix/build-rootfs-initramfs.sh \
-            initramfs-debs initramfs-work arch-root-initramfs.cpio.xz ARCHROOT 2>&1 | tee -a "$build_log"
-          xz -t arch-root-initramfs.cpio.xz
-
-          bash ci/j4primelte/k318-artix/pack-k318-headless-boot.sh \
-            ./repack-boot \
-            k318-out/arch/arm64/boot/Image.gz \
-            k318-out/arch/arm64/boot/dts/samsung/msm8917/msm8917-sec-j4primelte-sea-open-r06.dtb \
-            arch-root-initramfs.cpio.xz \
-            artifacts-out/k318-headless-artix-boot.img 2>&1 | tee -a "$build_log"
-          python3 ci/j4primelte/k419/verify-medusa-dtb-boot.py \
-            artifacts-out/k318-headless-artix-boot.img \
-            k318-out/arch/arm64/boot/dts/samsung/msm8917/msm8917-sec-j4primelte-sea-open-r06.dtb \
-            --root-label ARCHROOT | tee -a "$build_log"
-          printf '%s\n' \
-            'Kernel build and packaging only. NOT boot-tested on the handset.' \
-            'BOOT header: page 2048, kernel 0x80080000, ramdisk 0x83600000, tags 0x83400000.' > \
-            artifacts-out/k318-headless-artix-boot.img.NOT-BOOT-TESTED.txt
-
-      - name: Upload the headless BOOT image
+      - name: Upload the headless kernel for the packaging job
         uses: actions/upload-artifact@v4
         with:
-          name: j4primelte-k318-headless-boot-${{ github.run_id }}
+          name: k318-headless-kernel-${{ github.run_id }}
           path: |
+            k318-out/arch/arm64/boot/Image.gz
+            k318-out/arch/arm64/boot/dts/samsung/msm8917/msm8917-sec-j4primelte-sea-open-r06.dtb
             k318-out/.config
+            k318-kernel-build.log
           if-no-files-found: error
-          compression-level: 0
-          retention-days: 30
+          retention-days: 14
 
   build:
     name: Build 3.18.120 Medusa + Artix OpenRC image
+    needs: kernel
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     defaults:
@@ -250,6 +220,44 @@ jobs:
           xz -t arch-root-initramfs.cpio.xz
           trap - ERR
 
+      - name: Download the headless kernel from the x86_64 job
+        uses: actions/download-artifact@v4
+        with:
+          name: k318-headless-kernel-${{ github.run_id }}
+          path: k318-kernel
+
+      - name: Package the headless kernel with the Artix root handoff
+        run: |
+          set -euo pipefail
+          build_log="$PWD/k318-headless-package.log"
+          report_failure() {
+            rc=$?
+            echo "::error title=headless BOOT packaging::failed at: $BASH_COMMAND"
+            if [[ -f $build_log ]]; then
+              while IFS= read -r line; do
+                escaped=$(printf '%s' "$line" | sed 's/%/%25/g; s/::/%3A%3A/g; s/\r/%0D/g')
+                echo "::error title=headless BOOT diagnostic::$escaped"
+              done < <(tail -n 30 "$build_log")
+            fi
+            exit "$rc"
+          }
+          trap report_failure ERR
+          mkdir -p artifacts-out
+          dtb=k318-kernel/msm8917-sec-j4primelte-sea-open-r06.dtb
+          bash "$K318_ARTIX_DIR/pack-k318-headless-boot.sh" \
+            ./repack-boot k318-kernel/Image.gz "$dtb" \
+            arch-root-initramfs.cpio.xz \
+            artifacts-out/k318-headless-artix-boot.img 2>&1 | tee -a "$build_log"
+          python3 "$K419_DIR/verify-medusa-dtb-boot.py" \
+            artifacts-out/k318-headless-artix-boot.img "$dtb" \
+            --root-label "$ARCHLINUXARM_ROOT_LABEL" | tee -a "$build_log"
+          printf '%s\n' \
+            'Kernel: 3.18.120 arm64, CONFIG_FB and the legacy MDSS/panel stack disabled.' \
+            'BOOT header: page 2048, kernel 0x80080000, ramdisk 0x83600000, tags 0x83400000' \
+            '             (same layout as the Medusa image reported to boot).' \
+            'NOT boot-tested on the handset. CI proves packaging only.' \
+            > artifacts-out/k318-headless-artix-boot.img.NOT-BOOT-TESTED.txt
+
       - name: Package the matched Medusa kernel with OpenRC rootfs handoff
         run: |
           set -euo pipefail
@@ -300,6 +308,7 @@ jobs:
             artifacts-out/pmos-kernel-artix-initcall-debug-boot.img \
             "$ARCHLINUXARM_ROOT_LABEL" initcall-debug 2>&1 | tee -a "$build_log"
           sha256sum artifacts-out/boot.img artifacts-out/pmos-kernel-artix-boot.img \
+            artifacts-out/k318-headless-artix-boot.img \
             artifacts-out/pmos-kernel-artix-nofbcon-boot.img \
             artifacts-out/pmos-kernel-artix-initcall-debug-boot.img rootfs.img > SHA256SUMS
           cat SHA256SUMS
@@ -310,6 +319,7 @@ jobs:
             echo "- PID 1: /usr/bin/openrc-init; ext4 root label: $ARCHLINUXARM_ROOT_LABEL."
             echo "- Medusa-kernel BOOT: $(stat -c %s artifacts-out/boot.img) bytes."
             echo "- pmOS-donor-kernel + Artix ramdisk BOOT: $(stat -c %s artifacts-out/pmos-kernel-artix-boot.img) bytes."
+            echo "- HEADLESS 3.18.120 kernel (no framebuffer) + Artix ramdisk BOOT: $(stat -c %s artifacts-out/k318-headless-artix-boot.img) bytes."
             echo "- pmOS-donor-kernel + Artix no-fbcon diagnostic: $(stat -c %s artifacts-out/pmos-kernel-artix-nofbcon-boot.img) bytes."
             echo "- pmOS-donor-kernel + initcall-debug diagnostic: $(stat -c %s artifacts-out/pmos-kernel-artix-initcall-debug-boot.img) bytes."
             echo "- Shared rootfs: $(stat -c %s rootfs.img) bytes; label: $ARCHLINUXARM_ROOT_LABEL."
@@ -328,6 +338,11 @@ jobs:
             artifacts-out/boot.img.build-report.txt
             artifacts-out/pmos-kernel-artix-boot.img
             artifacts-out/pmos-kernel-artix-boot.img.sha256
+            artifacts-out/k318-headless-artix-boot.img
+            artifacts-out/k318-headless-artix-boot.img.sha256
+            artifacts-out/k318-headless-artix-boot.img.inspect.txt
+            artifacts-out/k318-headless-artix-boot.img.build-report.txt
+            artifacts-out/k318-headless-artix-boot.img.NOT-BOOT-TESTED.txt
             artifacts-out/k318-headless-artix-boot.img
             artifacts-out/k318-headless-artix-boot.img.sha256
             artifacts-out/k318-headless-artix-boot.img.inspect.txt
