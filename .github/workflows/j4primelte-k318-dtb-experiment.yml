@@ -39,7 +39,7 @@ on:
       - 'ci/j4primelte/k419/sources.env'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: j4primelte-k318-dtb-experiment-${{ github.ref }}
@@ -247,3 +247,34 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
+
+      - name: Publish a pre-release with direct download links
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="j4-k318-dtb-experiment-${GITHUB_RUN_NUMBER}"
+          notes="$(cat <<'EOF'
+          Three J4+ 3.18.120 BOOT images that separate two variables which had
+          never been tested independently.
+
+          A  display + pinned 6fca7cf5 DTB   - control, the pairing used so far
+          B  display + configured bd413438 DTB - isolates the device tree
+          C  headless + configured bd413438 DTB - isolates the framebuffer
+
+          Every earlier image paired a kernel with a DTB its own source does not
+          compile: 33,810 of 241,611 bytes differ, including reserved-memory
+          base addresses. A vs B answers whether that mattered.
+
+          Flash ONE at a time. Keep a known-good boot.img to restore.
+          NOT boot-tested - CI only proves the images build and are laid out as
+          described. Root label: ARCHROOT. Console: ttyMSM0.
+          EOF
+          )"
+          gh release create "$tag" artifacts-out/*.img artifacts-out/SHA256SUMS \
+            artifacts-out/README-ORDER.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "J4+ 3.18 DTB vs framebuffer A/B/C experiment (NOT boot-tested)" \
+            --notes "$notes"
