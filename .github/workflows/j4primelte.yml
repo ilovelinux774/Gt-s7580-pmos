@@ -264,6 +264,16 @@ jobs:
             fi
             echo "::endgroup::"
             echo "::warning title=ARMtix mirror::${url} did not serve the image; trying the next"
+            # Say *why*: a 404 means the file was renamed, a 403/503 means the
+            # host is refusing clients, and a TLS failure means the mirror is
+            # down. Printed with a browser User-Agent as well, because some
+            # mirrors only serve known clients.
+            for agent in "curl/8" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"; do
+              code=$(curl --silent --show-error --location --head --max-time 25 \
+                       --user-agent "$agent" --write-out '%{http_code}' \
+                       --output /dev/null "$url" 2>/dev/null) || code="(curl failed: $?)"
+              echo "  HTTP $code  [$agent]  $url"
+            done | sed 's/^/::notice::/'
             rm -f artix/armtix.tar.xz
           done
           if [[ -z $got ]]; then
