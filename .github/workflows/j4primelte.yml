@@ -62,8 +62,10 @@ jobs:
           python3 ci/j4primelte/test_j4boot.py
           python3 ci/j4primelte/test_rootswitch.py
           python3 ci/j4primelte/test_pipeline.py
-          # the audit half needs no root; the ext4 half runs in the rootfs job
-          python3 ci/j4primelte/test_rootfs.py
+          # As root on purpose: the second half builds a real ext4 image from a
+          # tiny synthetic tree (no network, no loop device), so a broken
+          # build-rootfs.sh fails here and not after a 1 GiB download.
+          sudo python3 ci/j4primelte/test_rootfs.py
 
       - name: The kernel-floor rule, on real binaries
         run: |
