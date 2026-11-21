@@ -1,0 +1,12 @@
+# The initramfs mounts and checks the root filesystem; everything the userspace
+# needs to mount itself is here. All entries are tolerated and none of them is
+# on a partition this project must not write to.
+#
+# proc/sys/dev are mounted by the initramfs and moved across switch_root.
+proc            /proc       proc      defaults                      0 0
+sysfs           /sys        sysfs     defaults                      0 0
+devtmpfs        /dev        devtmpfs  mode=0755,nosuid             0 0
+devpts          /dev/pts    devpts    gid=5,mode=620                0 0
+tmpfs           /run        tmpfs     mode=0755,nosuid,nodev        0 0
+tmpfs           /tmp        tmpfs     mode=1777,nosuid,nodev        0 0
+shm             /dev/shm    tmpfs     mode=1777,nosuid,nodev        0 0

@@ -1,0 +1,109 @@
+#!/bin/sh
+# Bring up the J4+ USB link from inside the *userspace*.
+#
+# This kernel registers Samsung's legacy android_usb composite gadget, not the
+# modern configfs one, so RNDIS is activated through class sysfs attributes:
+#   /sys/class/android_usb/android0/{functions,enable}
+# The initramfs proves that path works on this phone. This script repeats it
+# after switch_root so the link survives into OpenRC and can host a shell.
+#
+# It never writes to a block device, never touches a partition and never
+# configures anything but the point-to-point USB link.
+set -eu
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+LOG=/var/log/j4-rndis.log
+USBDIR=/sys/class/android_usb/android0
+IP=172.16.42.1
+HOST=172.16.42.2
+
+log() {
+    mkdir -p /var/log 2>/dev/null || true
+    printf '%s\n' "j4-rndis: $*" >> "$LOG" 2>/dev/null || true
+    printf '%s\n' "j4-rndis: $*" > /dev/kmsg 2>/dev/null || true
+}
+
+find_netdev() {
+    for candidate in rndis0 usb0; do
+        if [ -d "/sys/class/net/$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+enable_gadget() {
+    if [ ! -d "$USBDIR" ]; then
+        log "no $USBDIR: this kernel is not using the legacy composite gadget"
+        return 1
+    fi
+    # The initramfs already configured it; only touch it when the interface
+    # is genuinely absent, so a working link is never re-initialised.
+    if netdev=$(find_netdev); then
+        log "interface $netdev already exists; leaving the gadget alone"
+        return 0
+    fi
+    log "enabling android_usb function rndis"
+    echo 0 > "$USBDIR/enable" 2>/dev/null || true
+    if ! echo rndis > "$USBDIR/functions" 2>/dev/null; then
+        log "kernel rejected functions=rndis"
+        return 1
+    fi
+    echo 1 > "$USBDIR/enable" 2>/dev/null || log "could not set enable=1"
+    attempt=0
+    while [ "$attempt" -lt 20 ]; do
+        find_netdev && return 0
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    log "RNDIS enabled but no rndis0/usb0 appeared"
+    return 1
+}
+
+start() {
+    enable_gadget || return 0
+
+    netdev=$(find_netdev) || { log "no interface after gadget setup"; return 1; }
+    # A zero MAC makes the host driver drop the device on some kernels.
+    if [ "$(cat "/sys/class/net/$netdev/address" 2>/dev/null)" = "00:00:00:00:00:00" ]; then
+        ip link set "$netdev" down 2>/dev/null || true
+        ip link set "$netdev" address 02:4a:34:00:00:01 2>/dev/null || true
+    fi
+    ip address replace "$IP/24" dev "$netdev" || { log "could not set $IP/24 on $netdev"; return 1; }
+    ip link set "$netdev" up || { log "could not bring $netdev up"; return 1; }
+    log "$netdev is up at $IP/24 (host should use $HOST/24)"
+
+    # Dropbear listens on the USB address only. The image has no other network,
+    # so this cannot expose the phone to a LAN.
+    if [ -x /usr/sbin/dropbear ] || command -v dropbear >/dev/null 2>&1; then
+        mkdir -p /etc/dropbear
+        if [ ! -f /etc/dropbear/dropbear_ed25519_host_key ]; then
+            dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >> "$LOG" 2>&1 || true
+        fi
+        if ! pgrep -f "dropbear.*$IP" >/dev/null 2>&1; then
+            dropbear -p "$IP:22" >> "$LOG" 2>&1 || log "dropbear failed to start"
+        fi
+        log "dropbear listening on $IP:22"
+    else
+        log "dropbear is not installed in this userspace; ssh unavailable"
+    fi
+    return 0
+}
+
+case "${1:-start}" in
+    start) start ;;
+    stop)
+        if netdev=$(find_netdev); then
+            ip link set "$netdev" down 2>/dev/null || true
+        fi
+        log "stopped"
+        ;;
+    status)
+        netdev=$(find_netdev) || { echo "no rndis interface"; exit 3; }
+        ip address show "$netdev"
+        ;;
+    *) echo "usage: $0 {start|stop|status}" >&2; exit 2 ;;
+esac

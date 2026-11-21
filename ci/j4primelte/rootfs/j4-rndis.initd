@@ -1,0 +1,32 @@
+#!/sbin/openrc-run
+# Keep the USB link alive across the switch into userspace.
+# Not "need net": the link must come up even when the network stack is broken,
+# because it is the only way to read the logs that explain why.
+
+description="J4+ USB RNDIS link and SSH over it"
+
+depend() {
+	need localmount
+	after hostname udev devfs
+	before sshd
+}
+
+start() {
+	ebegin "Bringing up the J4+ USB link"
+	/usr/libexec/j4-rndis start
+	eend $? "USB link did not come up; see /var/log/j4-rndis.log"
+}
+
+stop() {
+	ebegin "Taking the J4+ USB link down"
+	/usr/libexec/j4-rndis stop
+	eend $?
+}
+
+status() {
+	if /usr/libexec/j4-rndis status >/dev/null 2>&1; then
+		eend 0 "USB link is up"
+	else
+		eend 3 "USB link is down"
+	fi
+}

@@ -1,0 +1,9 @@
+# Scratch space for local experiments (the reference image is 17 MB and is
+# fetched from a release by CI; never commit artifacts).
+/work/
+artifacts/
+*.img
+*.img.json
+*.log
+__pycache__/
+*.pyc

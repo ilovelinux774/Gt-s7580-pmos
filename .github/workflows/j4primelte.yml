@@ -1,0 +1,284 @@
+name: J4+ bring-up (3.18 kernel, Arch/Artix root)
+
+# Three jobs, because only one of them needs root and a 2 GB download:
+#   boot   -- x86_64, no privileges: the BOOT images, immediately uploadable
+#   rootfs -- aarch64, root: the ext4 userspace image
+#   report -- assembles the two into one artifact set plus a summary
+#
+# Nothing here publishes a release and nothing here flashes a phone.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_rootfs:
+        description: 'Also build the ext4 root filesystem image (slow, ~2 GB)'
+        type: boolean
+        default: true
+      alpine_bootstrap_url:
+        description: 'Alpine aarch64 minirootfs to use for the boot path'
+        type: string
+        default: 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-latest-aarch64.tar.gz'
+  push:
+    branches:
+      - 'arena/**'
+    paths:
+      - 'ci/j4primelte/**'
+      - '.github/workflows/j4primelte.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: j4primelte-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GIT_TERMINAL_PROMPT: '0'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  boot:
+    name: BOOT images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends curl ca-certificates python3
+
+      - name: Unit tests
+        run: |
+          set -euo pipefail
+          python3 ci/j4primelte/test_j4boot.py
+          python3 ci/j4primelte/test_rootswitch.py
+          python3 ci/j4primelte/test_pipeline.py
+
+      - name: Download the reference BOOT image
+        run: |
+          set -euo pipefail
+          source ci/j4primelte/pins.env
+          mkdir -p artifacts
+          curl --fail --location --retry 4 --retry-delay 3 --connect-timeout 30 \
+            -o artifacts/reference.img "$J4_REFERENCE_BOOT_URL"
+          echo "$J4_REFERENCE_BOOT_SHA256  artifacts/reference.img" | sha256sum -c -
+
+      - name: Inspect the reference image
+        run: |
+          set -euo pipefail
+          python3 ci/j4primelte/j4boot.py inspect artifacts/reference.img --reference \
+            | tee artifacts/reference.inspect.json
+
+      - name: Extract the pinned kernel payload and DTB
+        run: |
+          set -euo pipefail
+          python3 ci/j4primelte/extract_payload.py artifacts/reference.img artifacts/payload
+
+      - name: Check the mkinitfs recipe against the real initramfs
+        run: |
+          set -euo pipefail
+          python3 ci/j4primelte/mkinitfs_recipe.py check artifacts/payload/ramdisk.gz \
+            --out-dir artifacts/recipe
+
+      - name: Extract the proven pmOS initramfs
+        run: |
+          set -euo pipefail
+          python3 ci/j4primelte/uncpio.py artifacts/payload/ramdisk.gz artifacts/pmos-initramfs
+          test -x artifacts/pmos-initramfs/init
+          test -L artifacts/pmos-initramfs/bin
+
+      - name: Build the root-switch initramfs
+        run: |
+          set -euo pipefail
+          python3 ci/j4primelte/make_rootswitch_initramfs.py \
+            artifacts/pmos-initramfs artifacts/rootswitch-initramfs.gz \
+            --root-label ARCHROOT
+
+      - name: Pack the normal BOOT image
+        run: |
+          set -euo pipefail
+          python3 ci/j4primelte/pack-boot.py \
+            --reference artifacts/reference.img \
+            --initramfs artifacts/rootswitch-initramfs.gz \
+            --out artifacts/boot.img \
+            | tee artifacts/boot.img.pack.log
+
+      - name: Pack the debug BOOT image
+        run: |
+          set -euo pipefail
+          # Identical payload; only the command line differs. This is the image
+          # to flash first: it stops in the proven initramfs shell so a failed
+          # root switch is debuggable over USB instead of a black screen.
+          python3 ci/j4primelte/pack-boot.py \
+            --reference artifacts/reference.img \
+            --initramfs artifacts/rootswitch-initramfs.gz \
+            --out artifacts/boot-debug.img \
+            --extra-cmdline pmos.debug-shell \
+            | tee artifacts/boot-debug.img.pack.log
+
+      - name: Verify both images independently
+        run: |
+          set -euo pipefail
+          for image in artifacts/boot.img artifacts/boot-debug.img; do
+            python3 ci/j4primelte/j4boot.py verify "$image" \
+              --expect-kernel-version 3.18.120-j4-medusa64-debug+ \
+              --expect-dtb \
+              --expect-dtb-sha256 "$(source ci/j4primelte/pins.env; echo "$J4_DTB_SHA256")" \
+              --require-cmdline "root=LABEL=ARCHROOT" \
+              --require-cmdline "console=ttyMSM0,115200n8" \
+              --require-cmdline "console=tty0" \
+              --forbid-cmdline "pmos_root_uuid" \
+              --forbid-cmdline "pmos_rootfsopts"
+          done
+          python3 ci/j4primelte/j4boot.py verify artifacts/boot-debug.img \
+            --require-cmdline "pmos.debug-shell"
+          sha256sum artifacts/boot.img artifacts/boot-debug.img | tee artifacts/SHA256SUMS
+
+      - name: Write the flash instructions
+        run: |
+          set -euo pipefail
+          {
+            echo "J4+ (SM-J415F) BOOT images"
+            echo
+            echo "Kernel payload and appended DTB are byte-identical to the image"
+            echo "that reached the initramfs shell on the phone:"
+            echo "  kernel  $(source ci/j4primelte/pins.env; echo "$J4_KERNEL_PAYLOAD_SHA256")"
+            echo "  dtb     $(source ci/j4primelte/pins.env; echo "$J4_DTB_SHA256")"
+            echo
+            echo "Flash ONE of these to BOOT (/dev/mmcblk0p23, 32 MiB) from OrangeFox:"
+            echo
+            echo "  boot-debug.img  FIRST. Stops in the initramfs debug shell, so the"
+            echo "                  root discovery can be read over USB at 172.16.42.1."
+            echo "  boot.img        Normal boot: hands over to the ARCHROOT filesystem."
+            echo
+            echo "Both expect an ext4 filesystem labelled ARCHROOT on the partition"
+            echo "the rootfs image is written to. Without it, the hook logs every"
+            echo "device it refused and the boot stays in the initramfs."
+            echo
+            echo "Neither image writes to any block device."
+          } > artifacts/README-FIRST.txt
+          cat artifacts/README-FIRST.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: j4-boot-${{ github.run_number }}
+          path: |
+            artifacts/boot.img
+            artifacts/boot-debug.img
+            artifacts/*.json
+            artifacts/*.log
+            artifacts/SHA256SUMS
+            artifacts/README-FIRST.txt
+            artifacts/recipe/*
+            artifacts/payload/appended.dtb
+            artifacts/payload/inspect.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  rootfs:
+    name: Root filesystem image
+    if: inputs.build_rootfs
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            e2fsprogs curl ca-certificates python3 xz-utils
+
+      - name: Download Arch Linux ARM aarch64
+        run: |
+          set -euo pipefail
+          source ci/j4primelte/pins.env
+          curl --fail --location --retry 4 --retry-delay 3 --connect-timeout 30 \
+            -o ArchLinuxARM-aarch64.tar.gz "$ARCHLINUXARM_ROOTFS_URL"
+          ls -l ArchLinuxARM-aarch64.tar.gz
+          sha256sum ArchLinuxARM-aarch64.tar.gz | tee archlinuxarm.sha256
+
+      - name: Download the Alpine bootstrap
+        env:
+          ALPINE_URL: ${{ inputs.alpine_bootstrap_url }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 4 --retry-delay 3 --connect-timeout 30 \
+            -o alpine-minirootfs.tar.gz "$ALPINE_URL"
+          ls -l alpine-minirootfs.tar.gz
+          sha256sum alpine-minirootfs.tar.gz | tee alpine.sha256
+
+      - name: Build the ext4 root filesystem
+        run: |
+          set -euo pipefail
+          sudo -E ALPINE_BOOTSTRAP="$PWD/alpine-minirootfs.tar.gz" \
+            bash ci/j4primelte/build-rootfs.sh \
+              "$PWD/ArchLinuxARM-aarch64.tar.gz" "$PWD/rootfs.img" \
+            2>&1 | tee rootfs-build.log
+
+      - name: Independent checks on the finished image
+        run: |
+          set -euo pipefail
+          source ci/j4primelte/pins.env
+          echo "== filesystem features a 3.18 kernel cannot mount =="
+          features=$(dumpe2fs -h rootfs.img 2>/dev/null | sed -n 's/^Filesystem features:[[:space:]]*//p')
+          echo "$features"
+          for bad in metadata_csum metadata_csum_seed meta_bg orphan_file fast_commit; do
+            if grep -qw "$bad" <<<"$features"; then
+              echo "::error title=unsafe ext4 feature::$bad is set; 3.18 will not mount this"
+              exit 1
+            fi
+          done
+          echo "== label =="
+          label=$(dumpe2fs -h rootfs.img 2>/dev/null | sed -n 's/^Filesystem volume name:[[:space:]]*//p')
+          echo "$label"
+          test "$label" = "$ARCHLINUXARM_ROOT_LABEL"
+          echo "== size vs the recorded partition =="
+          bytes=$(stat -c %s rootfs.img)
+          echo "$bytes <= $J4_SYSTEM_PARTITION_BYTES"
+          test "$bytes" -le "$J4_SYSTEM_PARTITION_BYTES"
+
+      - name: Write the rootfs instructions
+        run: |
+          set -euo pipefail
+          {
+            echo "J4+ (SM-J415F) root filesystem"
+            echo
+            echo "  rootfs.img   raw ext4, label ARCHROOT, $(stat -c %s rootfs.img) bytes"
+            echo
+            echo "This is a bare filesystem, NOT a disk image: write it to a"
+            echo "partition, not to /dev/mmcblk0."
+            echo
+            echo "Boot path is Alpine/musl at /alpine, because Arch Linux ARM's"
+            echo "glibc refuses to start on a 3.18 kernel. Arch stays at /."
+            echo "See ci/j4primelte/README-rootfs.md."
+            echo
+            echo "This replaces whatever is on that partition. The postmarketOS"
+            echo "install on this phone is NOT touched; nothing here writes BOOT."
+          } > rootfs-README.txt
+          cat rootfs-README.txt
+          sha256sum rootfs.img > rootfs.img.sha256
+          cat rootfs.img.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: j4-rootfs-${{ github.run_number }}
+          path: |
+            rootfs.img
+            rootfs.img.sha256
+            rootfs-README.txt
+            rootfs-build.log
+            archlinuxarm.sha256
+            alpine.sha256
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 14
