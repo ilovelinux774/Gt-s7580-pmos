@@ -51,6 +51,11 @@ if (( image_bytes > J4_SYSTEM_PARTITION_BYTES )); then
   exit 1
 fi
 
+# Make every failure explain itself: CI job logs are not always readable, and a
+# bare "exit 1" from a 200-line script is not a diagnosis.
+trap 'rc=$?; echo "build-rootfs: FAILED at line $LINENO: $BASH_COMMAND (rc=$rc)" >&2' ERR
+STEP=start
+
 root=$(mktemp -d "${TMPDIR:-/tmp}/j4-root.XXXXXX")
 mnt=$(mktemp -d "${TMPDIR:-/tmp}/j4-mnt.XXXXXX")
 loopdev=''
@@ -62,9 +67,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+STEP=extract-arch
 echo "== extracting Arch Linux ARM =="
 tar --numeric-owner --same-owner --xattrs --acls --selinux --sparse -xpf "$archive" -C "$root"
-[[ -x "$root/usr/bin/bash" ]] || { echo "tarball has no /usr/bin/bash" >&2; exit 1; }
+if [[ ! -x "$root/usr/bin/bash" ]]; then
+  echo "Arch tarball has no executable /usr/bin/bash; top level was:" >&2
+  ls -la "$root" | head -20 >&2
+  exit 1
+fi
 
 echo "== boot-path audit (before) =="
 # Informational here: a fresh Arch tarball is glibc-only by definition, and
@@ -74,10 +84,15 @@ python3 "$HERE/audit-rootfs.py" "$root" --allow-glibc-boot || true
 
 if [[ -n $bootstrap ]]; then
   [[ -s $bootstrap ]] || { echo "missing Alpine bootstrap: $bootstrap" >&2; exit 1; }
-  echo "== installing the Alpine/musl boot path =="
+  STEP=alpine-boot-path
+echo "== installing the Alpine/musl boot path =="
   mkdir -p "$root/alpine"
   tar --numeric-owner -xzf "$bootstrap" -C "$root/alpine"
-  [[ -x "$root/alpine/sbin/apk" ]] || { echo "bootstrap has no /sbin/apk" >&2; exit 1; }
+  if [[ ! -x "$root/alpine/sbin/apk" ]]; then
+    echo "bootstrap has no executable /sbin/apk; top level was:" >&2
+    ls -la "$root/alpine" >&2
+    exit 1
+  fi
   mkdir -p "$root/alpine"/{dev,proc,sys,run,tmp,var/log}
   chmod 1777 "$root/alpine/tmp"
 
@@ -118,6 +133,7 @@ python3 "$HERE/audit-rootfs.py" "$root" || {
   exit 1
 }
 
+STEP=ext4-image
 echo "== creating the ext4 image =="
 mkdir -p "$(dirname "$out")"
 truncate -s "$image_bytes" "$out"
