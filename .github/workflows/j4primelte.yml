@@ -248,6 +248,24 @@ jobs:
       - name: Build the ext4 root filesystem
         run: |
           set -euo pipefail
+          # Job logs are not always readable (artifact storage may be blocked),
+          # so every failure has to be visible in the run summary itself.
+          report() {
+            rc=$?
+            if (( rc != 0 )); then
+              {
+                echo "### Root filesystem build FAILED (rc=$rc)"
+                echo
+                echo "Last 40 lines of rootfs-build.log:"
+                echo '```'
+                tail -40 rootfs-build.log 2>/dev/null || echo "(no log)"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "::error title=rootfs build::build-rootfs.sh exited $rc"
+            fi
+            exit "$rc"
+          }
+          trap report EXIT
           sudo -E ALPINE_BOOTSTRAP="$PWD/alpine-minirootfs.tar.gz" \
             bash ci/j4primelte/build-rootfs.sh \
               "$PWD/ArchLinuxARM-aarch64.tar.gz" "$PWD/rootfs.img" \
