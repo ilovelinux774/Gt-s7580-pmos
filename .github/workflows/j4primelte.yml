@@ -15,9 +15,9 @@ on:
         type: boolean
         default: true
       alpine_bootstrap_url:
-        description: 'Alpine aarch64 minirootfs to use for the boot path'
+        description: 'Alpine aarch64 minirootfs (blank = discover the current one)'
         type: string
-        default: 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-latest-aarch64.tar.gz'
+        default: ''
   push:
     branches:
       - 'arena/**'
@@ -212,10 +212,38 @@ jobs:
           ALPINE_URL: ${{ inputs.alpine_bootstrap_url }}
         run: |
           set -euo pipefail
+          # Alpine only publishes minirootfs inside a versioned release
+          # directory (stable/releases/aarch64/), not under latest-stable, so a
+          # hardcoded URL rots. Discover it from the directory index instead of
+          # guessing, and fail with the listing if the layout changes.
+          if [ -n "${ALPINE_URL:-}" ]; then
+            url=$ALPINE_URL
+          else
+            base=https://dl-cdn.alpinelinux.org/alpine
+            for branch in latest-stable v3.22 v3.21 v3.20; do
+              if index=$(curl --fail --silent --show-error --location \
+                   "$base/$branch/releases/aarch64/" 2>/dev/null); then
+                name=$(printf '%s' "$index" \
+                  | grep -o 'alpine-minirootfs-[0-9][0-9.]*-aarch64\.tar\.gz' \
+                  | sort -u | tail -1)
+                if [ -n "$name" ]; then
+                  url="$base/$branch/releases/aarch64/$name"
+                  break
+                fi
+              fi
+            done
+            if [ -z "${url:-}" ]; then
+              echo "::error title=Alpine bootstrap::no minirootfs found in any known release branch"
+              exit 1
+            fi
+          fi
+          echo "Alpine bootstrap: $url"
           curl --fail --location --retry 4 --retry-delay 3 --connect-timeout 30 \
-            -o alpine-minirootfs.tar.gz "$ALPINE_URL"
+            -o alpine-minirootfs.tar.gz "$url"
           ls -l alpine-minirootfs.tar.gz
+          tar -tzf alpine-minirootfs.tar.gz > /dev/null
           sha256sum alpine-minirootfs.tar.gz | tee alpine.sha256
+          echo "$url" > alpine-bootstrap.url
 
       - name: Build the ext4 root filesystem
         run: |
@@ -279,6 +307,7 @@ jobs:
             rootfs-build.log
             archlinuxarm.sha256
             alpine.sha256
+            alpine-bootstrap.url
           if-no-files-found: error
           compression-level: 1
           retention-days: 14
