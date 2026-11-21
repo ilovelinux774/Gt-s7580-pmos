@@ -150,10 +150,17 @@ CI does this; locally it needs root for the owner/mode/device-node reproduction
 and the ext4 tooling (`e2fsprogs`):
 
 ```sh
-url=$(sed -n "s/^ARTIX_IMAGE_URL='\(.*\)'/\1/p" ci/j4primelte/pins.env)
-curl -LO "$url"
-sudo bash ci/j4primelte/build-rootfs.sh armtix-openrc-*.tar.xz rootfs.img 2400
+file=$(sed -n "s/^ARTIX_IMAGE_FILE='\(.*\)'/\1/p" ci/j4primelte/pins.env)
+curl -LO "https://armtix.artixlinux.org/images/$file"   # or one of the mirrors
+sudo bash ci/j4primelte/build-rootfs.sh "$file" rootfs.img 2400
 ```
+
+The three image mirrors (`ARTIX_IMAGE_MIRRORS` in `pins.env`) are tried in
+order by CI, because they do not all answer at the same time — while this was
+being written the primary returned HTTP errors and only the index page was
+readable. Whichever mirror answers must match `ARTIX_IMAGE_SHA256`. If every
+mirror is down, the `rootfs` job fails at the download with the list of URLs it
+tried, and the `boot` job's artifacts are unaffected.
 
 The tarball is ~1 GiB compressed and is not committed. CI checks it against
 `ARTIX_IMAGE_SHA256` in `pins.env` and records the hash it saw in the job

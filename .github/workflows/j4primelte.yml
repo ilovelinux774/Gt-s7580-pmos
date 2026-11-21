@@ -238,22 +238,57 @@ jobs:
         run: |
           set -euo pipefail
           source ci/j4primelte/pins.env
-          url=${ARTIX_IMAGE_OVERRIDE:-$ARTIX_IMAGE_URL}
-          echo "ARMtix image: $url"
-          echo "$url" > artix-image.url
-          curl --fail --location --retry 4 --retry-delay 5 --connect-timeout 30 \
-            --output armtix.tar.xz "$url"
+          mkdir -p artix
+          # The mirrors are tried in order: the primary has been answering with
+          # HTTP 5xx, and the mirrors are different hosts, not different files.
+          # Whatever answers must match the pinned hash unless the run
+          # explicitly overrode the URL.
+          candidates=()
+          if [[ -n ${ARTIX_IMAGE_OVERRIDE:-} ]]; then
+            candidates=("$ARTIX_IMAGE_OVERRIDE")
+          else
+            for mirror in "${ARTIX_IMAGE_MIRRORS[@]}"; do
+              candidates+=("${mirror%/}/$ARTIX_IMAGE_FILE")
+            done
+          fi
+          got=''
+          for url in "${candidates[@]}"; do
+            echo "::group::try $url"
+            if curl --fail --location --retry 2 --retry-delay 3 --connect-timeout 20 \
+                 --speed-limit 1024 --speed-time 60 \
+                 --output artix/armtix.tar.xz "$url"; then
+              echo "downloaded from $url"
+              got=$url
+              echo "::endgroup::"
+              break
+            fi
+            echo "::endgroup::"
+            echo "::warning title=ARMtix mirror::${url} did not serve the image; trying the next"
+            rm -f artix/armtix.tar.xz
+          done
+          if [[ -z $got ]]; then
+            echo "::error title=ARMtix image::no mirror served $ARTIX_IMAGE_FILE"
+            echo "  tried:"
+            printf '    %s\n' "${candidates[@]}"
+            echo "Check the image index (https://armtix.artixlinux.org/images/) and, if"
+            echo "the file was renamed, update ARTIX_IMAGE_FILE and ARTIX_IMAGE_SHA256 in"
+            echo "ci/j4primelte/pins.env -- or pass the new URL as the artix_image_url"
+            echo "workflow input."
+            exit 1
+          fi
+          ln -sf artix/armtix.tar.xz armtix.tar.xz
           ls -l armtix.tar.xz
           actual=$(sha256sum armtix.tar.xz | cut -d' ' -f1)
-          echo "$actual  armtix.tar.xz" | tee armtix.sha256
-          if [[ -n $ARTIX_IMAGE_OVERRIDE ]]; then
+          echo "$actual  armtix.tar.xz" | tee artix/armtix.sha256
+          echo "$got" > artix/image.url
+          if [[ -n ${ARTIX_IMAGE_OVERRIDE:-} ]]; then
             echo "::warning title=unpinned ARMtix image::built from an override URL; the pins.env hash was not checked"
           else
             echo "$ARTIX_IMAGE_SHA256  armtix.tar.xz" | sha256sum -c -
           fi
           # Cheap structural check before spending minutes on the build.
           xz --test armtix.tar.xz
-          tar -tJf armtix.tar.xz | grep -qx './etc/os-release\|etc/os-release' || {
+          tar -tJf armtix.tar.xz | grep -qxE '(\./)?etc/os-release' || {
             echo "::error title=ARMtix tarball::no /etc/os-release in the archive"
             tar -tJf armtix.tar.xz | head -20
             exit 1
@@ -275,7 +310,7 @@ jobs:
                 df -h . | tail -2
                 echo '```'
                 echo "ARMtix tarball: $(stat -c %s armtix.tar.xz 2>/dev/null || echo MISSING) bytes"
-                echo "ARMtix URL: $(cat artix-image.url 2>/dev/null || echo unknown)"
+                echo "ARMtix URL: $(cat artix/image.url 2>/dev/null || echo unknown)"
                 for img in rootfs.img; do
                   [ -e "$img" ] && echo "$img: $(stat -c %s "$img") bytes"
                 done
@@ -388,8 +423,8 @@ jobs:
             rootfs.img.audit.json
             rootfs-README.txt
             rootfs-build.log
-            armtix.sha256
-            artix-image.url
+            artix/armtix.sha256
+            artix/image.url
           if-no-files-found: error
           compression-level: 1
           retention-days: 14
