@@ -58,6 +58,8 @@ jobs:
           python3 ci/j4primelte/test_j4boot.py
           python3 ci/j4primelte/test_rootswitch.py
           python3 ci/j4primelte/test_pipeline.py
+          # the audit half needs no root; the ext4 half runs in the rootfs job
+          python3 ci/j4primelte/test_rootfs.py
 
       - name: Download the reference BOOT image
         run: |

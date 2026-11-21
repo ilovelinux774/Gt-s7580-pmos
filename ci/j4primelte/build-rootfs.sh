@@ -66,11 +66,11 @@ echo "== extracting Arch Linux ARM =="
 tar --numeric-owner --same-owner --xattrs --acls --selinux --sparse -xpf "$archive" -C "$root"
 [[ -x "$root/usr/bin/bash" ]] || { echo "tarball has no /usr/bin/bash" >&2; exit 1; }
 
-echo "== boot-path audit =="
-python3 "$HERE/audit-rootfs.py" "$root" || {
-  echo "audit-rootfs.py rejected the tree; see the message above" >&2
-  exit 1
-}
+echo "== boot-path audit (before) =="
+# Informational here: a fresh Arch tarball is glibc-only by definition, and
+# that is exactly why the Alpine boot path below exists. The hard gate runs
+# against the finished tree instead.
+python3 "$HERE/audit-rootfs.py" "$root" --allow-glibc-boot || true
 
 if [[ -n $bootstrap ]]; then
   [[ -s $bootstrap ]] || { echo "missing Alpine bootstrap: $bootstrap" >&2; exit 1; }
@@ -112,14 +112,30 @@ else
   echo "   Arch Linux ARM glibc is not expected to start on a 3.18 kernel."
 fi
 
+echo "== boot-path audit (after) =="
+python3 "$HERE/audit-rootfs.py" "$root" || {
+  echo "refusing to build an image whose PID 1 cannot start on this kernel" >&2
+  exit 1
+}
+
 echo "== creating the ext4 image =="
 mkdir -p "$(dirname "$out")"
 truncate -s "$image_bytes" "$out"
-mkfs.ext4 -F -b 4096 -m 1 -L "$label" "$out" >/dev/null
-for feature in metadata_csum metadata_csum_seed meta_bg orphan_file fast_commit 64bit; do
+# Features a 3.18 kernel will refuse to mount. This is the single list: it is
+# passed to mkfs, cleared again afterwards in case the host's mke2fs defaults
+# ignored it, and then used as the final gate below. "64bit" is deliberately
+# NOT here: ext4 64-bit block numbers exist since 2.6.28 and 3.18 handles them.
+# (Removing that feature also needs a full resize2fs pass, which is not worth
+# the risk.)
+UNSUPPORTED_FEATURES=(metadata_csum metadata_csum_seed meta_bg orphan_file fast_commit)
+# resize_inode and meta_bg are mutually exclusive, and ^meta_bg already keeps
+# it off, so only the features that need no companion option are filtered here.
+mkfs.ext4 -F -b 4096 -m 1 -L "$label" \
+  -O ^metadata_csum,^metadata_csum_seed,^orphan_file,^fast_commit "$out" >/dev/null
+for feature in "${UNSUPPORTED_FEATURES[@]}"; do
   if dumpe2fs -h "$out" 2>/dev/null | grep -qw "$feature"; then
     echo "  clearing feature a 3.18 kernel cannot mount: $feature"
-    tune2fs -O "^$feature" "$out" >/dev/null
+    tune2fs -O "^$feature" "$out" >/dev/null || true
   fi
 done
 
@@ -143,12 +159,13 @@ echo "== verifying the image =="
 e2fsck -fn "$out" >/dev/null || { echo "e2fsck rejected the image" >&2; exit 1; }
 features=$(dumpe2fs -h "$out" 2>/dev/null | sed -n 's/^Filesystem features:[[:space:]]*//p')
 echo "features: $features"
-for bad in metadata_csum metadata_csum_seed meta_bg orphan_file fast_commit; do
+for bad in "${UNSUPPORTED_FEATURES[@]}"; do
   if grep -qw "$bad" <<<"$features"; then
     echo "3.18 cannot mount this image: $bad is set" >&2
     exit 1
   fi
 done
+echo "all ${#UNSUPPORTED_FEATURES[@]} unsafe features are absent"
 echo "label: $(dumpe2fs -h "$out" 2>/dev/null | sed -n 's/^Filesystem volume name:[[:space:]]*//p')"
 echo "free space: $available bytes of $image_bytes"
 sha256sum "$out" > "$out.sha256"

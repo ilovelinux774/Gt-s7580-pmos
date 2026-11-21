@@ -97,13 +97,47 @@ def classify(interpreter: str | None) -> str:
     return f"unknown ({interpreter})"
 
 
+def resolve_inside(root: Path, rel: str) -> Path | None:
+    """Resolve a path inside the tree without following it outside the tree.
+
+    ``/sbin/init`` in this image is a symlink to ``/alpine/sbin/init``: absolute
+    in the *target* filesystem, which on the build host means "the build host's
+    /alpine". Those links are correct on the phone, so they are resolved here
+    manually rather than through os.path.realpath.
+    """
+    seen: set[Path] = set()
+    current = root / rel
+    for _ in range(16):
+        if current in seen:
+            return None  # symlink loop
+        seen.add(current)
+        if not current.is_symlink():
+            return current if current.exists() else None
+        target = os.readlink(current)
+        if target.startswith("/"):
+            current = root / target.lstrip("/")
+        else:
+            current = (current.parent / target)
+    return None
+
+
 def audit(root: Path) -> dict:
     found = []
     for rel in INIT_CANDIDATES + EARLY_EXEC:
         path = root / rel
-        if not path.exists():
+        if not path.exists() and not path.is_symlink():
             continue
-        resolved = Path(os.path.realpath(path))
+        resolved = resolve_inside(root, rel)
+        if resolved is None:
+            found.append(
+                {
+                    "path": "/" + rel,
+                    "resolves_to": "(unresolvable: dangling or escaping symlink)",
+                    "interpreter": None,
+                    "kind": "missing",
+                }
+            )
+            continue
         try:
             inside = resolved.relative_to(root)
         except ValueError:
@@ -121,7 +155,7 @@ def audit(root: Path) -> dict:
     boot_path = []
     for rel in HOOK_ORDER:
         for item in found:
-            if item["path"] == "/" + rel:
+            if item["path"] == "/" + rel and item["kind"] != "missing":
                 boot_path.append(item)
                 break
         if boot_path:
@@ -147,7 +181,9 @@ def main() -> int:
     args = parser.parse_args()
 
     root = Path(args.rootfs)
-    if not (root / "etc").is_dir() and not (root / "usr").is_dir():
+    # A rootfs always has at least one of these; anything else is a wrong path,
+    # not a rootfs with a bad boot path, and should say so.
+    if not any((root / d).is_dir() for d in ("etc", "usr", "bin", "sbin")):
         print(f"{root} does not look like a root filesystem", file=sys.stderr)
         return 1
 
