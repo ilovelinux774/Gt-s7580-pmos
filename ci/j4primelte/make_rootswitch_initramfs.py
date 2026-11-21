@@ -17,7 +17,7 @@ So this initramfs reuses the proven parts and nothing else:
 * the same kernel and appended Rev06 DTB, untouched, because those are what
   made ``mdss_fb_probe`` survive;
 * a small ``/hooks-extra`` script that finds an ext4 filesystem with a
-  configurable label (default ``ARCHROOT``), refuses to touch anything that
+  configurable label (default ``ARTIXROOT``), refuses to touch anything that
   looks like a postmarketOS install, and switches to *its* init instead of a
   hardcoded ``/sbin/init``.
 
@@ -25,7 +25,7 @@ The initramfs is built from an extracted pmOS initramfs directory, so the
 build never needs pmbootstrap, chroot or an armhf interpreter.
 
     python3 ci/j4primelte/make_rootswitch_initramfs.py pmos-initramfs/ out.gz \
-        --root-label ARCHROOT
+        --root-label ARTIXROOT
 
 The output is a plain gzip stream, because this bootloader's ramdisk is an
 unwrapped gzip cpio archive (see j4boot.py).
@@ -98,7 +98,12 @@ fi
 say "found $LABEL on $found"
 
 mkdir -p /j4root
-if ! mount -t ext4 -o ro,noload "$found" /j4root; then
+# Read-only, and without "noload". A read-only ext4 mount does not replay the
+# journal on its own, so nothing is written here; but the remount below turns
+# the mount read-write, and ext4 only recovers the journal at that point. With
+# noload still in effect the filesystem would go read-write with an unreplayed
+# journal, which is how a clean filesystem acquires errors.
+if ! mount -t ext4 -o ro "$found" /j4root; then
     say "refusing to continue: $found is not mountable read-only as ext4"
     exit 0
 fi
@@ -112,15 +117,20 @@ if [ -e /j4root/etc/os-release ] &&
     exit 0
 fi
 
+# OpenRC first, and deliberately so. The image is ARMtix, whose init is
+# openrc-init; Arch's glibc systemd would start as far as the kernel floor goes
+# but brings its own assumptions about /run, cgroups and a writable /usr, none
+# of which are established here. Anything else at /sbin/init is still honoured
+# last, so a busybox or script init also works.
 init=''
-for candidate in /usr/lib/systemd/systemd /usr/bin/openrc-init /sbin/init /usr/bin/init; do
+for candidate in /usr/bin/openrc-init /sbin/openrc-init /sbin/init /usr/bin/init; do
     if [ -x "/j4root$candidate" ] || [ -L "/j4root$candidate" ]; then
         init=$candidate
         break
     fi
 done
 if [ -z "$init" ]; then
-    say "refusing to switch: $found has none of systemd/openrc-init/init"
+    say "refusing to switch: $found has none of openrc-init/init"
     umount /j4root
     exit 0
 fi
@@ -133,7 +143,9 @@ if ! mount -o move /j4root /sysroot; then
 fi
 
 # Make it writable only after everything is in place, and never repair it here:
-# the filesystem has not been checked in this boot.
+# the filesystem has not been checked in this boot. A writable root is what
+# OpenRC needs to record service state in /run and /var; read-only is a
+# degraded boot, not a refusal.
 if ! mount -o remount,rw /sysroot 2>/dev/null; then
     say "WARNING: $found did not remount read-write; continuing read-only"
     mount -o remount,ro /sysroot 2>/dev/null || true
@@ -232,7 +244,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("pmos_initramfs", help="directory holding the extracted initramfs")
     parser.add_argument("output", help="gzip-initramfs written here")
-    parser.add_argument("--root-label", default="ARCHROOT")
+    parser.add_argument("--root-label", default="ARTIXROOT")
     parser.add_argument(
         "--work-dir",
         default=None,

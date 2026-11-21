@@ -4,9 +4,15 @@
     python3 ci/j4primelte/test_rootfs.py            # audit tests only
     sudo python3 ci/j4primelte/test_rootfs.py       # + a real ext4 build
 
-The ext4 test writes a 48 MiB loop-mounted image and checks the two properties
-that make the image usable on this phone: the label the initramfs hook searches
-for, and the absence of ext4 features a 3.18 kernel cannot mount.
+The audit tests are the important ones. They assert the rule this project got
+wrong once: a glibc tree is fine when its ABI floor is at or below the phone's
+kernel, and only a floor *above* the kernel makes an image unbootable. Nothing
+here keys off "musl" or "glibc" as a label.
+
+The ext4 test builds a small image from a fake tree and checks the three
+properties that make it usable on 3.18: the label the initramfs looks for, the
+absence of ext4 features 3.18 cannot mount, and a populated tree (owner, modes,
+symlinks, device nodes) that came out of ``mke2fs -d`` without a loop mount.
 """
 
 from __future__ import annotations
@@ -23,24 +29,52 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 AUDIT = HERE / "audit-rootfs.py"
 BUILD = HERE / "build-rootfs.sh"
+sys.path.insert(0, str(HERE))
+import elfnotes  # noqa: E402
+
+ELF_MACHINE = {"aarch64": 183, "arm32": 40}
 
 
-def elf_with_interp(interp: str) -> bytes:
-    payload = interp.encode() + b"\x00"
-    ehdr, phdr = 64, 56
-    offset = ehdr + phdr
-    data = bytearray(offset + len(payload))
+def elf_with_floor(interp: str | None, floor: tuple[int, int, int] | None,
+                   machine: str = "aarch64") -> bytes:
+    """A minimal ELF64-LE with an optional PT_INTERP and .note.ABI-tag."""
+    payload = b""
+    phdrs: list[bytes] = []
+    ehdr = 64
+    phdr = 56
+    count = 1 if interp else 0
+    count += 1 if floor else 0
+    offset = ehdr + phdr * count
+    body = bytearray()
+
+    def add_segment(p_type: int, data: bytes) -> None:
+        nonlocal offset
+        phdrs.append(struct.pack("<IIQQQQQQ", p_type, 4, offset, 0, 0, len(data), len(data), 4))
+        body.extend(data)
+        pad = (-len(data)) % 8
+        body.extend(b"\x00" * pad)
+        offset += len(data) + pad
+
+    if interp:
+        add_segment(3, interp.encode() + b"\x00")
+    if floor:
+        name = b"GNU\x00"
+        desc = struct.pack("<IIII", 0, *floor)
+        note = struct.pack("<III", len(name), len(desc), 1) + name + desc
+        add_segment(4, note)
+
+    data = bytearray(ehdr + phdr * len(phdrs) + len(body))
     data[0:4] = b"\x7fELF"
     data[4] = 2  # ELF64
     data[5] = 1  # little endian
     data[6] = 1
-    struct.pack_into("<Q", data, 32, ehdr)
-    struct.pack_into("<H", data, 54, phdr)
-    struct.pack_into("<H", data, 56, 1)
-    struct.pack_into("<I", data, ehdr, 3)  # PT_INTERP
-    struct.pack_into("<Q", data, ehdr + 8, offset)
-    struct.pack_into("<Q", data, ehdr + 32, len(payload))
-    data[offset : offset + len(payload)] = payload
+    struct.pack_into("<H", data, 18, ELF_MACHINE[machine])
+    struct.pack_into("<Q", data, 32, ehdr)          # e_phoff
+    struct.pack_into("<H", data, 54, phdr)          # e_phentsize
+    struct.pack_into("<H", data, 56, len(phdrs))    # e_phnum
+    for index, entry in enumerate(phdrs):
+        data[ehdr + index * phdr : ehdr + (index + 1) * phdr] = entry
+    data[ehdr + phdr * len(phdrs):] = body
     return bytes(data)
 
 
@@ -54,11 +88,58 @@ def write_tree(root: Path, layout: dict[str, bytes | None]) -> None:
         path.chmod(0o755)
 
 
+class ElfNoteTests(unittest.TestCase):
+    """The reader itself, on real files from this machine plus synthetic ones."""
+
+    def test_reads_the_abi_tag_of_a_real_binary(self) -> None:
+        facts = elfnotes.read_elf("/bin/sh")
+        self.assertTrue(facts.readable, facts.reason)
+        self.assertEqual(facts.kind, "glibc")
+        self.assertIsNotNone(facts.abi_floor)
+        self.assertLessEqual(facts.abi_floor, (6, 1, 0))
+
+    def test_a_static_binary_has_no_interpreter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "static"
+            path.write_bytes(elf_with_floor(None, None))
+            facts = elfnotes.read_elf(path)
+            self.assertEqual(facts.kind, "static")
+            self.assertIsNone(facts.abi_floor)
+
+    def test_a_floor_is_read_back_exactly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "lib"
+            path.write_bytes(elf_with_floor("/lib/ld-linux-aarch64.so.1", (4, 4, 0)))
+            facts = elfnotes.read_elf(path)
+            self.assertEqual(facts.kind, "glibc")
+            self.assertEqual(facts.abi_floor, (4, 4, 0))
+            self.assertEqual(facts.floor_text, "4.4.0")
+
+    def test_musl_interpreter_is_classified_from_the_string(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "lib"
+            path.write_bytes(elf_with_floor("/lib/ld-musl-aarch64.so.1", None))
+            self.assertEqual(elfnotes.read_elf(path).kind, "musl")
+
+    def test_kernel_version_parsing(self) -> None:
+        self.assertEqual(elfnotes.parse_version("3.18.120-j4-medusa64-debug+"), (3, 18, 120))
+        self.assertEqual(elfnotes.parse_version("4.4"), (4, 4, 0))
+        self.assertEqual(elfnotes.parse_version("3.7.0"), (3, 7, 0))
+
+    def test_floor_above_the_kernel_is_detected(self) -> None:
+        kernel = elfnotes.parse_version("3.18.120")
+        self.assertTrue(elfnotes.floor_exceeds((4, 4, 0), kernel))
+        self.assertFalse(elfnotes.floor_exceeds((3, 7, 0), kernel))
+        self.assertFalse(elfnotes.floor_exceeds((3, 18, 120), kernel))
+        self.assertFalse(elfnotes.floor_exceeds(None, kernel))
+
+
 class AuditTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
         self.root = self.tmp / "root"
         self.root.mkdir()
+        (self.root / "etc").mkdir()
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -69,28 +150,53 @@ class AuditTests(unittest.TestCase):
             capture_output=True, text=True,
         )
 
-    def test_glibc_boot_path_is_refused(self) -> None:
-        write_tree(self.root, {"usr/lib/systemd/systemd": elf_with_interp("/usr/lib/ld-linux-aarch64.so.1")})
+    def test_artix_glibc_floor_3_7_boots_on_3_18(self) -> None:
+        """The whole point: ALARM/ARMtix glibc carries 3.7.0, so it is fine."""
+        write_tree(self.root, {
+            "usr/bin/openrc-init": elf_with_floor("/lib/ld-linux-aarch64.so.1", (3, 7, 0)),
+            "usr/lib/ld-linux-aarch64.so.1": b"",  # present, not ELF
+            "bin/busybox": elf_with_floor("/lib/ld-musl-aarch64.so.1", None),
+        })
+        os.symlink("usr/bin", self.root / "sbin")
         result = self.run_audit()
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("Fatal: kernel too old", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("boot path: /usr/bin/openrc-init", result.stdout)
         self.assertIn("glibc", result.stdout)
 
-    def test_glibc_boot_path_can_be_downgraded_to_a_warning(self) -> None:
-        write_tree(self.root, {"usr/lib/systemd/systemd": elf_with_interp("/usr/lib/ld-linux-aarch64.so.1")})
-        result = self.run_audit("--allow-glibc-boot")
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("WARNING", result.stdout)
-
-    def test_musl_boot_path_is_accepted(self) -> None:
+    def test_a_glibc_floor_above_the_kernel_fails(self) -> None:
+        """Upstream Arch Linux's glibc is --enable-kernel=4.4. That tree dies."""
         write_tree(self.root, {
-            "alpine/usr/bin/openrc-init": elf_with_interp("/lib/ld-musl-aarch64.so.1"),
+            "usr/bin/openrc-init": elf_with_floor("/lib/ld-linux-aarch64.so.1", (4, 4, 0)),
         })
-        (self.root / "usr/bin").mkdir(parents=True, exist_ok=True)
-        os.symlink("/alpine/usr/bin/openrc-init", self.root / "usr/bin/openrc-init")
         result = self.run_audit()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("boot path: /usr/bin/openrc-init (musl)", result.stdout)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("refuse to start", result.stdout)
+        self.assertIn("Fatal: kernel too old", result.stderr)
+
+    def test_one_bad_helper_anywhere_fails_the_audit(self) -> None:
+        """The init is fine; something it execs is not. That is still a dead boot."""
+        write_tree(self.root, {
+            "usr/bin/openrc-init": elf_with_floor("/lib/ld-linux-aarch64.so.1", (3, 7, 0)),
+            "usr/lib/systemd/systemd": elf_with_floor("/usr/lib/ld-linux-aarch64.so.1", (4, 19, 0)),
+        })
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("/usr/lib/systemd/systemd", result.stdout)
+
+    def test_kernel_argument_changes_the_verdict(self) -> None:
+        write_tree(self.root, {
+            "usr/bin/openrc-init": elf_with_floor("/lib/ld-linux-aarch64.so.1", (4, 4, 0)),
+        })
+        self.assertEqual(self.run_audit().returncode, 2)
+        self.assertEqual(self.run_audit("--kernel", "6.1.0").returncode, 0)
+
+    def test_openrc_init_is_preferred_over_systemd(self) -> None:
+        write_tree(self.root, {
+            "usr/bin/openrc-init": elf_with_floor("/lib/ld-linux-aarch64.so.1", (3, 7, 0)),
+            "usr/lib/systemd/systemd": elf_with_floor("/lib/ld-linux-aarch64.so.1", (3, 7, 0)),
+        })
+        result = self.run_audit()
+        self.assertIn("boot path: /usr/bin/openrc-init", result.stdout)
 
     def test_static_boot_path_is_accepted(self) -> None:
         write_tree(self.root, {"sbin/init": b"#!/bin/sh\nexec /bin/sh\n"})
@@ -99,72 +205,74 @@ class AuditTests(unittest.TestCase):
 
     def test_dangling_symlink_is_not_a_boot_path(self) -> None:
         (self.root / "sbin").mkdir(parents=True)
-        os.symlink("/alpine/sbin/init", self.root / "sbin/init")
+        os.symlink("/usr/bin/openrc-init", self.root / "sbin/init")
         result = self.run_audit()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("no init", result.stderr)
+        self.assertIn("no candidate for PID 1", result.stderr)
 
-    def test_glibc_systemd_beats_a_musl_init_unless_it_is_moved(self) -> None:
-        """This is the trap build-rootfs.sh has to undo.
-
-        Arch ships systemd, the hook tries systemd before OpenRC, and systemd
-        is glibc. A rootfs with a perfectly good musl /sbin/init next to an
-        untouched Arch systemd still cannot boot, and the audit has to say so
-        rather than accept the musl init it finds second.
-        """
+    def test_unknown_floor_is_a_warning_not_a_failure(self) -> None:
         write_tree(self.root, {
-            "usr/lib/systemd/systemd": elf_with_interp("/usr/lib/ld-linux-aarch64.so.1"),
-            "alpine/sbin/init": elf_with_interp("/lib/ld-musl-aarch64.so.1"),
+            "usr/bin/openrc-init": elf_with_floor("/lib/ld-linux-aarch64.so.1", None),
         })
-        (self.root / "sbin").mkdir(parents=True, exist_ok=True)
-        os.symlink("/alpine/sbin/init", self.root / "sbin/init")
-        result = self.run_audit()
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("boot path: /usr/lib/systemd/systemd (glibc)", result.stdout)
-
-    def test_moving_systemd_aside_makes_the_musl_init_the_boot_path(self) -> None:
-        write_tree(self.root, {
-            "usr/lib/systemd/systemd": elf_with_interp("/usr/lib/ld-linux-aarch64.so.1"),
-            "alpine/sbin/init": elf_with_interp("/lib/ld-musl-aarch64.so.1"),
-        })
-        (self.root / "sbin").mkdir(parents=True, exist_ok=True)
-        os.symlink("/alpine/sbin/init", self.root / "sbin/init")
-        (self.root / "usr/lib/systemd/systemd").rename(self.root / "alpine/systemd.arch")
         result = self.run_audit()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("boot path: /sbin/init (musl)", result.stdout)
+        self.assertIn("no ABI note", result.stdout)
+
+    def test_wrong_architecture_is_a_warning(self) -> None:
+        write_tree(self.root, {
+            "usr/bin/openrc-init": elf_with_floor("/lib/ld-linux-aarch64.so.1", (3, 7, 0),
+                                                  machine="arm32"),
+        })
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("are not aarch64", result.stdout)
+
+    def test_json_report_has_the_decision_in_it(self) -> None:
+        write_tree(self.root, {
+            "usr/bin/openrc-init": elf_with_floor("/lib/ld-linux-aarch64.so.1", (3, 7, 0)),
+        })
+        out = self.tmp / "audit.json"
+        self.run_audit("--json-out", str(out))
+        import json
+
+        report = json.loads(out.read_text())
+        self.assertEqual(report["kernel"], "3.18.120")
+        self.assertEqual(report["chosen_by_hook"]["hook_path"], "/usr/bin/openrc-init")
+        self.assertEqual(report["chosen_by_hook"]["abi_floor"], "3.7.0")
+        self.assertEqual(report["refuses_this_kernel"], [])
 
 
-@unittest.skipUnless(os.geteuid() == 0, "needs root for a loop-mounted image")
+@unittest.skipUnless(os.geteuid() == 0, "needs root to create device nodes")
 class Ext4ImageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
-        self.root = self.tmp / "tree"
-        write_tree(self.root, {
-            "usr/bin/bash": elf_with_interp("/usr/lib/ld-linux-aarch64.so.1"),
-            "usr/lib/libc.so.6": b"",
-            "usr/lib/systemd/systemd": elf_with_interp("/usr/lib/ld-linux-aarch64.so.1"),
+        self.tree = self.tmp / "tree"
+        write_tree(self.tree, {
+            "etc/os-release": b'ID=artix\nNAME="Artix Linux"\n',
+            "usr/bin/openrc-init": elf_with_floor("/lib/ld-linux-aarch64.so.1", (3, 7, 0)),
+            "usr/lib/ld-linux-aarch64.so.1": b"",
+            "etc/init.d/j4-rndis": b"#!/sbin/openrc-run\n",
         })
-        self.arch = self.tmp / "arch.tar.gz"
-        subprocess.run(["tar", "-C", str(self.root), "-czf", str(self.arch), "."], check=True)
-        self.alpine_tree = self.tmp / "alpinetree"
-        write_tree(self.alpine_tree, {
-            "sbin/apk": elf_with_interp("/lib/ld-musl-aarch64.so.1"),
-            "sbin/init": elf_with_interp("/lib/ld-musl-aarch64.so.1"),
-            "usr/bin/openrc-init": elf_with_interp("/lib/ld-musl-aarch64.so.1"),
-        })
-        self.alpine = self.tmp / "alpine.tar.gz"
-        subprocess.run(["tar", "-C", str(self.alpine_tree), "-czf", str(self.alpine), "."], check=True)
+        (self.tree / "etc/init.d").mkdir(parents=True, exist_ok=True)
+        os.chmod(self.tree / "etc/init.d/j4-rndis", 0o755)
+        (self.tree / "usr/bin/bash").write_bytes(
+            elf_with_floor("/usr/lib/ld-linux-aarch64.so.1", (3, 7, 0))
+        )
+        os.chmod(self.tree / "usr/bin/bash", 0o755)
+        os.symlink("/usr/bin/openrc-init", self.tree / "etc/init.d/../sbin-init-link") \
+            if (self.tree / "sbin").exists() else None
+        subprocess.run(["tar", "-C", str(self.tree), "-cJf", str(self.tmp / "artix.tar.xz"), "."],
+                       check=True)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def build(self) -> subprocess.CompletedProcess:
+    def build(self, *extra: str, size: str = "48") -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env["PATH"] = "/sbin:/usr/sbin:" + env.get("PATH", "")
-        env["ALPINE_BOOTSTRAP"] = str(self.alpine)
         return subprocess.run(
-            ["bash", str(BUILD), str(self.arch), str(self.tmp / "rootfs.img"), "48"],
+            ["bash", str(BUILD), str(self.tmp / "artix.tar.xz"),
+             str(self.tmp / "rootfs.img"), size, *extra],
             capture_output=True, text=True, env=env,
         )
 
@@ -173,40 +281,52 @@ class Ext4ImageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         image = self.tmp / "rootfs.img"
         self.assertTrue(image.exists())
+        label = subprocess.run(["dumpe2fs", "-h", str(image)],
+                               capture_output=True, text=True).stdout
+        self.assertIn("Filesystem volume name:   ARTIXROOT", label)
+        features = [line for line in label.splitlines()
+                    if line.startswith("Filesystem features:")][0]
+        for bad in ("metadata_csum", "meta_bg", "orphan_file", "fast_commit", "quota"):
+            self.assertNotIn(bad, features, features)
 
-        label = subprocess.run(
-            ["dumpe2fs", "-h", str(image)], capture_output=True, text=True
-        ).stdout
-        self.assertIn("Filesystem volume name:   ARCHROOT", label)
-        features = [line for line in label.splitlines() if line.startswith("Filesystem features:")][0]
-        for bad in ("metadata_csum", "meta_bg", "orphan_file", "fast_commit"):
-            self.assertNotIn(bad, features)
-
-    def test_arch_systemd_is_moved_out_of_the_boot_path(self) -> None:
+    def test_the_tree_is_populated_without_a_loop_mount(self) -> None:
         result = self.build()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("moved Arch systemd aside", result.stdout)
-        mnt = self.tmp / "mnt"
-        mnt.mkdir()
-        subprocess.run(["mount", "-o", "loop,ro", str(self.tmp / "rootfs.img"), str(mnt)], check=True)
-        try:
-            self.assertFalse((mnt / "usr/lib/systemd/systemd").exists())
-            self.assertTrue((mnt / "alpine/systemd.arch").exists())
-            self.assertEqual(os.readlink(mnt / "sbin/init"), "/alpine/sbin/init")
-            self.assertTrue((mnt / "alpine/etc/init.d/j4-rndis").exists())
-        finally:
-            subprocess.run(["umount", str(mnt)], check=True)
+        listing = subprocess.run(["debugfs", "-R", "ls -l /usr/bin", str(self.tmp / "rootfs.img")],
+                                 capture_output=True, text=True).stdout
+        self.assertIn("openrc-init", listing)
+        self.assertIn("bash", listing)
 
-    def test_a_glibc_only_boot_path_fails_the_build(self) -> None:
+    def test_an_unbootable_tree_fails_the_build(self) -> None:
+        tree = self.tmp / "upstream"
+        write_tree(tree, {
+            "etc/os-release": b"ID=arch\n",
+            "usr/bin/openrc-init": elf_with_floor("/lib/ld-linux-aarch64.so.1", (4, 4, 0)),
+        })
+        archive = self.tmp / "upstream.tar.xz"
+        subprocess.run(["tar", "-C", str(tree), "-cJf", str(archive), "."], check=True)
         env = dict(os.environ)
         env["PATH"] = "/sbin:/usr/sbin:" + env.get("PATH", "")
-        env.pop("ALPINE_BOOTSTRAP", None)
         result = subprocess.run(
-            ["bash", str(BUILD), str(self.arch), str(self.tmp / "nogood.img"), "48"],
+            ["bash", str(BUILD), str(archive), str(self.tmp / "bad.img"), "48"],
             capture_output=True, text=True, env=env,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot start on this kernel", result.stderr)
+
+    def test_a_tree_without_openrc_init_is_refused_early(self) -> None:
+        tree = self.tmp / "wronginit"
+        write_tree(tree, {"etc/os-release": b"ID=artix\n"})
+        archive = self.tmp / "wronginit.tar.xz"
+        subprocess.run(["tar", "-C", str(tree), "-cJf", str(archive), "."], check=True)
+        env = dict(os.environ)
+        env["PATH"] = "/sbin:/usr/sbin:" + env.get("PATH", "")
+        result = subprocess.run(
+            ["bash", str(BUILD), str(archive), str(self.tmp / "x.img"), "48"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no openrc-init", result.stderr)
 
 
 if __name__ == "__main__":

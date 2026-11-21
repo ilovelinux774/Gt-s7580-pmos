@@ -1,31 +1,31 @@
 #!/usr/bin/env bash
-# Build the ext4 root filesystem the J4+ boots into from a 3.18 kernel.
+# Build the ext4 root filesystem the J4+ boots into, from ARMtix.
 #
-#   sudo ALPINE_BOOTSTRAP=alpine-minirootfs.tar.gz \
-#        bash ci/j4primelte/build-rootfs.sh ArchLinuxARM-aarch64.tar.gz rootfs.img [size-MiB]
+#   sudo bash ci/j4primelte/build-rootfs.sh armtix-openrc-20260921.tar.xz rootfs.img [size-MiB]
 #
-# Two things make this different from writing the Arch ARM tarball to a
-# partition:
+# Two things decide whether the result is worth flashing, and both are checks
+# in this script rather than hopes:
 #
-# 1. The filesystem has to be mountable by Linux 3.18. Modern e2fsprogs defaults
-#    add metadata_csum, which 3.18 refuses outright. The feature set is checked,
-#    cleared and then re-checked, and the build fails if anything unsafe remains.
+# 1. The filesystem has to be mountable by Linux 3.18. Modern e2fsprogs
+#    defaults add metadata_csum, which 3.18 refuses outright, and 64bit /
+#    orphan_file / fast_commit are either unreadable or risky there. The
+#    feature set is created explicitly, cleared after the fact, and re-checked;
+#    the build fails if anything unsafe survives.
 #
-# 2. Arch Linux ARM's glibc needs a newer kernel than 3.18 for dynamically
-#    linked binaries; its /usr/bin/bash would abort with "Fatal: kernel too
-#    old". The image therefore also carries an Alpine/musl tree, which is
-#    configured at runtime rather than against a kernel-floor, and the boot
-#    path is pointed at it. Arch stays at / for its packages and tooling.
-#    See ci/j4primelte/README-rootfs.md.
+# 2. The userspace has to be *able to start*. The gate is audit-rootfs.py,
+#    which reads .note.ABI-tag out of every ELF in the tree and refuses the
+#    image when a binary on the boot path demands a newer kernel than this
+#    phone has. ARMtix's glibc carries a 3.7.0 floor, so it passes on 3.18.120;
+#    a tree built against upstream Arch's glibc (4.4) would not, and would be
+#    caught here instead of on a black screen.
+#
+# No Alpine, no second userspace, no symlink games: one tree, one init.
+# See ci/j4primelte/README-rootfs.md.
 set -euo pipefail
 
 if [[ $# -lt 2 || $# -gt 3 ]]; then
-  echo "usage: [ALPINE_BOOTSTRAP=...] $0 <ArchLinuxARM-aarch64.tar.gz> <rootfs.img> [size-MiB]" >&2
+  echo "usage: $0 <armtix-openrc-*.tar.xz> <rootfs.img> [size-MiB]" >&2
   exit 2
-fi
-if [[ $EUID -ne 0 ]]; then
-  echo "run as root: original ownership and modes have to survive into the image" >&2
-  exit 1
 fi
 
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -34,13 +34,13 @@ source "$HERE/pins.env"
 
 archive=$(realpath "$1")
 out=$(realpath -m "$2")
-size_mib=${3:-$ARCHLINUXARM_ROOTFS_IMAGE_MIB}
-label=$ARCHLINUXARM_ROOT_LABEL
-bootstrap=${ALPINE_BOOTSTRAP:-}
+size_mib=${3:-$ARTIX_ROOTFS_IMAGE_MIB}
+label=$ARTIX_ROOT_LABEL
+init_system=$ARTIX_INIT
 
-[[ -s $archive ]] || { echo "missing Arch Linux ARM tarball: $archive" >&2; exit 1; }
+[[ -s $archive ]] || { echo "missing ARMtix tarball: $archive" >&2; exit 1; }
 [[ $size_mib =~ ^[0-9]+$ ]] || { echo "size must be a MiB integer" >&2; exit 1; }
-for tool in truncate mkfs.ext4 tune2fs dumpe2fs losetup mount umount tar e2fsck python3; do
+for tool in truncate mke2fs dumpe2fs e2fsck debugfs tar xz python3; do
   command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 1; }
 done
 
@@ -57,133 +57,209 @@ trap 'rc=$?; echo "build-rootfs: FAILED at line $LINENO: $BASH_COMMAND (rc=$rc)"
 STEP=start
 
 root=$(mktemp -d "${TMPDIR:-/tmp}/j4-root.XXXXXX")
-mnt=$(mktemp -d "${TMPDIR:-/tmp}/j4-mnt.XXXXXX")
-loopdev=''
-mounted=0
-cleanup() {
-  if (( mounted )); then umount "$mnt" || true; fi
-  if [[ -n $loopdev ]]; then losetup -d "$loopdev" || true; fi
-  rm -rf "$root" "$mnt"
-}
+cleanup() { chmod -R u+rwX "$root" 2>/dev/null || true; rm -rf "$root"; }
 trap cleanup EXIT
 
-STEP=extract-arch
-echo "== extracting Arch Linux ARM =="
-tar --numeric-owner --same-owner --xattrs --acls --selinux --sparse -xpf "$archive" -C "$root"
-if [[ ! -x "$root/usr/bin/bash" ]]; then
-  echo "Arch tarball has no executable /usr/bin/bash; top level was:" >&2
-  ls -la "$root" | head -20 >&2
-  exit 1
-fi
-
-echo "== boot-path audit (before) =="
-# Informational here: a fresh Arch tarball is glibc-only by definition, and
-# that is exactly why the Alpine boot path below exists. The hard gate runs
-# against the finished tree instead.
-python3 "$HERE/audit-rootfs.py" "$root" --allow-glibc-boot || true
-
-if [[ -n $bootstrap ]]; then
-  [[ -s $bootstrap ]] || { echo "missing Alpine bootstrap: $bootstrap" >&2; exit 1; }
-  STEP=alpine-boot-path
-echo "== installing the Alpine/musl boot path =="
-  mkdir -p "$root/alpine"
-  tar --numeric-owner -xzf "$bootstrap" -C "$root/alpine"
-  if [[ ! -x "$root/alpine/sbin/apk" ]]; then
-    echo "bootstrap has no executable /sbin/apk; top level was:" >&2
-    ls -la "$root/alpine" >&2
-    exit 1
-  fi
-  mkdir -p "$root/alpine"/{dev,proc,sys,run,tmp,var/log}
-  chmod 1777 "$root/alpine/tmp"
-
-  # The hook in the initramfs prefers /usr/bin/openrc-init, then /sbin/init.
-  # Anything already at those paths is Arch's own and is preserved, not deleted.
-  for entry in sbin/init usr/bin/openrc-init; do
-    mkdir -p "$root/$(dirname "$entry")"
-    if [[ -e "$root/$entry" && ! -L "$root/$entry" ]]; then
-      mv "$root/$entry" "$root/alpine/$(basename "$entry").arch"
-      echo "  preserved Arch /$entry as /alpine/$(basename "$entry").arch"
-    fi
-    ln -sfn "/alpine/$entry" "$root/$entry"
-    echo "  /$entry -> /alpine/$entry"
-  done
-
-  # Arch ships systemd, and the hook tries systemd before OpenRC. Leaving it
-  # there would pick the one glibc binary that cannot run. Move it aside rather
-  # than delete it: Arch's own package database still expects the file.
-  if [[ -e "$root/usr/lib/systemd/systemd" && ! -L "$root/usr/lib/systemd/systemd" ]]; then
-    mv "$root/usr/lib/systemd/systemd" "$root/alpine/systemd.arch"
-    echo "  moved Arch systemd aside (the hook would have chosen it over OpenRC)"
-  fi
-
-  # The services have to exist inside the tree that runs.
-  install -D -m 0755 "$HERE/rootfs/j4-rndis" "$root/alpine/usr/libexec/j4-rndis"
-  install -D -m 0755 "$HERE/rootfs/j4-rndis.initd" "$root/alpine/etc/init.d/j4-rndis"
-  mkdir -p "$root/alpine/etc/runlevels/default"
-  ln -sfn /etc/init.d/j4-rndis "$root/alpine/etc/runlevels/default/j4-rndis"
-  install -D -m 0644 "$HERE/rootfs/fstab" "$root/etc/fstab"
+STEP=extract-artix
+echo "== extracting ARMtix ($init_system) =="
+# The image is an .xz'd tar of a root tree. Root is needed to reproduce owner,
+# mode, hard links, and the /dev/null + /dev/console nodes the init needs to
+# exist before devtmpfs is mounted over them.
+if [[ $EUID -eq 0 ]]; then
+  tar --numeric-owner --same-owner --xattrs --acls --selinux --sparse \
+      --xz -xpf "$archive" -C "$root"
 else
-  echo "== no ALPINE_BOOTSTRAP: the boot path is whatever the tarball shipped =="
-  echo "   Arch Linux ARM glibc is not expected to start on a 3.18 kernel."
+  echo "warning: not root; owners and device nodes will not survive" >&2
+  tar --xz -xpf "$archive" -C "$root"
 fi
 
-echo "== boot-path audit (after) =="
-python3 "$HERE/audit-rootfs.py" "$root" || {
-  echo "refusing to build an image whose PID 1 cannot start on this kernel" >&2
+# ARMtix tarballs are flat, but tolerate a single top-level directory.
+if [[ ! -e $root/etc && $(find "$root" -maxdepth 1 -mindepth 1 -type d | wc -l) -eq 1 ]]; then
+  inner=$(find "$root" -maxdepth 1 -mindepth 1 -type d)
+  echo "  tarball has one top-level directory; hoisting $(basename "$inner")"
+  shopt -s dotglob
+  mv "$inner"/* "$root"/
+  rmdir "$inner"
+  shopt -u dotglob
+fi
+
+[[ -d $root/etc ]] || { echo "no /etc after extraction; is this a rootfs?" >&2; exit 1; }
+
+STEP=sanity
+echo "== checking the tree is ARMtix and not something else =="
+if [[ -r $root/etc/os-release ]]; then
+  grep -E '^(ID|NAME|ID_LIKE)=' "$root/etc/os-release" | sed 's/^/  /' || true
+else
+  echo "warning: no /etc/os-release in the tree" >&2
+fi
+case $init_system in
+  openrc)
+    [[ -x $root/usr/bin/openrc-init || -x $root/sbin/openrc-init ]] || {
+      echo "FAIL: no openrc-init in the tree, but ARTIX_INIT=openrc" >&2
+      echo "      /sbin/init is a symlink to $(readlink "$root/sbin/init" 2>/dev/null || echo '(nothing)')" >&2
+      exit 1
+    }
+    ;;
+  *) echo "unsupported ARTIX_INIT=$init_system (only openrc is built here)" >&2; exit 1 ;;
+esac
+
+# The kernel has no modules of its own in the userspace, and ARMtix ships the
+# generic aarch64 kernels plus firmware. Dropping them keeps the image inside
+# the recorded partition and removes 300 MiB of modules for kernels this phone
+# will never boot. Set J4_KEEP_KERNELS=1 to keep them.
+if [[ ${J4_KEEP_KERNELS:-0} != 1 ]]; then
+  STEP=trim-kernels
+  echo "== removing generic kernel packages' payload from the image =="
+  for path in usr/lib/modules boot; do
+    if [[ -e $root/$path ]]; then
+      before=$(du -sm "$root/$path" 2>/dev/null | cut -f1)
+      rm -rf "${root:?}/$path"
+      mkdir -p "$root/$path"
+      echo "  $path: removed ${before:-?} MiB"
+    fi
+  done
+fi
+
+STEP=tree-fixups
+echo "== tree fixups =="
+# The handoff works from /dev, /proc, /sys and /run already being mounted by
+# the initramfs, but they must also exist as directories in the image.
+for path in dev proc sys run tmp var/log var/run var/tmp; do
+  mkdir -p "$root/$path"
+done
+chmod 1777 "$root/tmp" "$root/var/tmp"
+[[ -e $root/var/run ]] || ln -s /run "$root/var/run"
+# /dev/console is what OpenRC's logger and getty talk to. ARMtix ships these
+# nodes in its tarball; recreate them only if extraction lost them (non-root).
+if [[ $EUID -eq 0 ]]; then
+  [[ -e $root/dev/null ]] || mknod -m 0666 "$root/dev/null" c 1 3
+  [[ -e $root/dev/console ]] || mknod -m 0600 "$root/dev/console" c 5 1
+fi
+
+# This project's own service: keep the USB RNDIS link (and an SSH listener on
+# it) alive across the switch into userspace. It never touches a block device.
+if [[ -d $root/etc/init.d ]]; then
+  install -D -m 0755 "$HERE/rootfs/j4-rndis" "$root/usr/libexec/j4-rndis"
+  install -D -m 0755 "$HERE/rootfs/j4-rndis.initd" "$root/etc/init.d/j4-rndis"
+  mkdir -p "$root/etc/runlevels/default"
+  ln -sfn /etc/init.d/j4-rndis "$root/etc/runlevels/default/j4-rndis"
+  # The boot console here is ttyMSM0; a getty on it is how a serial cable sees
+  # a login prompt. It costs nothing when no cable is attached, and the link is
+  # only created when the init script exists (a dangling runlevel entry would
+  # make OpenRC fail the runlevel instead of skipping it).
+  for level in sysinit boot default; do
+    mkdir -p "$root/etc/runlevels/$level"
+  done
+  if [[ -f $root/etc/init.d/agetty.ttyMSM0 ]]; then
+    ln -sfn /etc/init.d/agetty.ttyMSM0 "$root/etc/runlevels/default/agetty.ttyMSM0"
+    if [[ -f $root/etc/conf.d/agetty.ttyMSM0 ]]; then
+      sed -i 's/^#\?baud=.*/baud=115200/' "$root/etc/conf.d/agetty.ttyMSM0"
+      sed -i 's/^#\?term_type=.*/term_type=vt100/' "$root/etc/conf.d/agetty.ttyMSM0"
+    fi
+    echo "  agetty on ttyMSM0 enabled at 115200"
+  else
+    echo "  no agetty.ttyMSM0 init script; serial login not enabled"
+  fi
+else
+  echo "warning: no /etc/init.d in the tree; the J4+ USB service was not installed" >&2
+fi
+install -D -m 0644 "$HERE/rootfs/fstab" "$root/etc/fstab"
+
+# Evidence survives a failed boot only if the target tree can receive it.
+mkdir -p "$root/var/log/j4"
+
+STEP=audit
+echo "== 3.18 compatibility gate =="
+python3 "$HERE/audit-rootfs.py" "$root" --kernel "$ARTIX_KERNEL_FLOOR_ALLOWED" \
+  --json-out "$out.audit.json" || {
+  echo "refusing to build an image whose userspace cannot start on this kernel" >&2
   exit 1
 }
 
 STEP=ext4-image
-echo "== creating the ext4 image =="
+echo "== creating the ext4 image ($size_mib MiB, label $label) =="
 mkdir -p "$(dirname "$out")"
 truncate -s "$image_bytes" "$out"
-# Features a 3.18 kernel will refuse to mount. This is the single list: it is
-# passed to mkfs, cleared again afterwards in case the host's mke2fs defaults
-# ignored it, and then used as the final gate below. "64bit" is deliberately
-# NOT here: ext4 64-bit block numbers exist since 2.6.28 and 3.18 handles them.
-# (Removing that feature also needs a full resize2fs pass, which is not worth
-# the risk.)
-UNSUPPORTED_FEATURES=(metadata_csum metadata_csum_seed meta_bg orphan_file fast_commit)
-# resize_inode and meta_bg are mutually exclusive, and ^meta_bg already keeps
-# it off, so only the features that need no companion option are filtered here.
-mkfs.ext4 -F -b 4096 -m 1 -L "$label" \
-  -O ^metadata_csum,^metadata_csum_seed,^orphan_file,^fast_commit "$out" >/dev/null
-for feature in "${UNSUPPORTED_FEATURES[@]}"; do
-  if dumpe2fs -h "$out" 2>/dev/null | grep -qw "$feature"; then
-    echo "  clearing feature a 3.18 kernel cannot mount: $feature"
-    tune2fs -O "^$feature" "$out" >/dev/null || true
-  fi
+
+# Features a 3.18 kernel cannot mount or handle. DISABLE_AT_MKFS is handed to
+# mke2fs as an explicit -O, so a host whose defaults change cannot slip one
+# through; UNSAFE_FEATURES adds the two that this mke2fs refuses to toggle
+# (iversion, dirdata) and is used as the final gate, so an image that somehow
+# carries them is rejected instead of flashed.
+#   metadata_csum, metadata_csum_seed, orphan_file, fast_commit -- 3.18 has no
+#       checksummed metadata at all: it refuses the mount outright
+#   meta_bg  -- group descriptor layout 3.18 does not know
+#   quota    -- 3.18 has no quota inodes, and mke2fs 1.47 enables this by default
+#   ea_inode, large_dir, casefold, encrypt -- not in 3.18's ext4
+#   bigalloc -- cluster allocation, not in 3.18's ext4
+# 64bit is deliberately NOT in the list: 64-bit block numbers are ancient and
+# 3.18 handles them; removing the feature needs resize2fs, which is not worth
+# the risk on a 2.4 GiB image.
+DISABLE_AT_MKFS=(metadata_csum metadata_csum_seed meta_bg orphan_file fast_commit
+                 quota ea_inode large_dir casefold encrypt bigalloc)
+UNSAFE_FEATURES=("${DISABLE_AT_MKFS[@]}" iversion dirdata)
+disabled=''
+for feature in "${DISABLE_AT_MKFS[@]}"; do
+  disabled+="${disabled:+,}^$feature"
 done
+# One mke2fs call: -O owns the feature list, -d copies owner, modes, symlinks,
+# hard links and device nodes straight out of the tree. Nothing needs a loop
+# device, which CI runners cannot count on.
+echo "== creating and populating the filesystem =="
+mke2fs -q -F -t ext4 -b 4096 -I 256 -m 1 -L "$label" -O "$disabled" -d "$root" "$out" >/dev/null
 
-loopdev=$(losetup --find --show "$out")
-mount "$loopdev" "$mnt"
-mounted=1
-cp -a "$root"/. "$mnt"/
-read -r _ _ _ available _ < <(df -P -B1 "$mnt" | tail -n 1)
-minimum_free=$((image_bytes / 20))
-if (( available < minimum_free )); then
-  echo "image leaves too little room: $available < $minimum_free" >&2
-  exit 1
-fi
-sync
-umount "$mnt"
-mounted=0
-losetup -d "$loopdev"
-loopdev=''
-
+STEP=verify
 echo "== verifying the image =="
 e2fsck -fn "$out" >/dev/null || { echo "e2fsck rejected the image" >&2; exit 1; }
 features=$(dumpe2fs -h "$out" 2>/dev/null | sed -n 's/^Filesystem features:[[:space:]]*//p')
 echo "features: $features"
-for bad in "${UNSUPPORTED_FEATURES[@]}"; do
+for bad in "${UNSAFE_FEATURES[@]}"; do
   if grep -qw "$bad" <<<"$features"; then
     echo "3.18 cannot mount this image: $bad is set" >&2
     exit 1
   fi
 done
-echo "all ${#UNSUPPORTED_FEATURES[@]} unsafe features are absent"
-echo "label: $(dumpe2fs -h "$out" 2>/dev/null | sed -n 's/^Filesystem volume name:[[:space:]]*//p')"
-echo "free space: $available bytes of $image_bytes"
+echo "all ${#UNSAFE_FEATURES[@]} unsafe features are absent"
+got_label=$(dumpe2fs -h "$out" 2>/dev/null | sed -n 's/^Filesystem volume name:[[:space:]]*//p')
+echo "label: $got_label"
+[[ $got_label == "$label" ]] || { echo "label is '$got_label', expected '$label'" >&2; exit 1; }
+
+# The init is the one thing the initramfs hook will exec. Prove it is in the
+# image, executable, and that its interpreter exists at the path it asks for.
+STEP=verify-init
+init_path=usr/bin/openrc-init
+[[ -e $root/sbin/openrc-init ]] && init_path=sbin/openrc-init
+debugfs -R "stat /$init_path" "$out" 2>/dev/null | head -4
+# debugfs exits 0 even when the lookup fails, so the presence test is on its
+# own output, not on its status.
+present() { debugfs -R "stat /$1" "$out" 2>/dev/null | grep -q '^Inode:'; }
+for path in etc/os-release etc/init.d/j4-rndis usr/libexec/j4-rndis \
+            usr/lib/ld-linux-aarch64.so.1 lib/ld-linux-aarch64.so.1 etc/fstab; do
+  present "$path" && echo "  present: /$path"
+done
+present etc/fstab || { echo "FAIL: the fstab was not written into the image" >&2; exit 1; }
+
+# The whole point of this image: PID 1 in the image, not just in the tree.
+debugfs -R "stat /$init_path" "$out" 2>/dev/null | grep -q "Mode:" || {
+  echo "FAIL: /$init_path is not in the image" >&2
+  exit 1
+}
+
+# The audit report belongs next to the image, not inside it.
+if [[ -f $out.audit.json ]]; then
+  echo "audit report: $out.audit.json"
+fi
+blocks=$(dumpe2fs -h "$out" 2>/dev/null | sed -n 's/^Block count:[[:space:]]*//p')
+block_size=$(dumpe2fs -h "$out" 2>/dev/null | sed -n 's/^Block size:[[:space:]]*//p')
+free=$(dumpe2fs -h "$out" 2>/dev/null | sed -n 's/^Free blocks:[[:space:]]*//p')
+if [[ -n ${blocks:-} && -n ${free:-} && -n ${block_size:-} ]]; then
+  echo "used: $(((blocks - free) * block_size)) bytes, free: $((free * block_size)) bytes of $image_bytes"
+  if (( free * block_size < image_bytes / 20 )); then
+    echo "image leaves less than 5% free; the handset will not have room to work" >&2
+    exit 1
+  fi
+fi
+
 sha256sum "$out" > "$out.sha256"
 cat "$out.sha256"
 echo "build-rootfs: ok"

@@ -122,7 +122,7 @@ class SyntheticPipelineTests(unittest.TestCase):
         cmdline = j4boot.unpack_image(self.out.read_bytes()).header.full_cmdline()
         self.assertNotIn("pmos_root_uuid", cmdline)
         self.assertNotIn("pmos.debug-shell", cmdline)
-        self.assertIn("root=LABEL=ARCHROOT", cmdline)
+        self.assertIn("root=LABEL=ARTIXROOT", cmdline)
         self.assertIn("rootfstype=ext4", cmdline)
         self.assertIn("rootwait", cmdline)
         # the console options are part of what makes the panel path survive
@@ -154,7 +154,7 @@ class SyntheticPipelineTests(unittest.TestCase):
     def test_report_is_written_next_to_the_image(self) -> None:
         self.run_pack("--allow-unpinned-kernel")
         report = json.loads(self.out.with_suffix(self.out.suffix + ".json").read_text())
-        self.assertEqual(report["root_label"], "ARCHROOT")
+        self.assertEqual(report["root_label"], "ARTIXROOT")
         self.assertEqual(report["kernel_payload_sha256"],
                          j4boot.sha256(j4boot.unpack_image(self.reference_data).kernel))
 
@@ -187,7 +187,7 @@ class RealReferencePipelineTests(unittest.TestCase):
         out = self.tmp / "rootswitch.gz"
         subprocess.run(
             [sys.executable, str(HERE / "make_rootswitch_initramfs.py"),
-             str(tree), str(out), "--root-label", "ARCHROOT"],
+             str(tree), str(out), "--root-label", "ARTIXROOT"],
             check=True, capture_output=True,
         )
         self.assertTrue((out.parent / (out.name + ".root") / "hooks-extra"
@@ -215,7 +215,7 @@ class RealReferencePipelineTests(unittest.TestCase):
         verify = subprocess.run(
             [sys.executable, str(HERE / "j4boot.py"), "verify", str(out),
              "--expect-kernel-version", "3.18.120-j4-medusa64-debug+",
-             "--expect-dtb", "--require-cmdline", "root=LABEL=ARCHROOT",
+             "--expect-dtb", "--require-cmdline", "root=LABEL=ARTIXROOT",
              "--forbid-cmdline", "pmos_root_uuid"],
             capture_output=True, text=True,
         )

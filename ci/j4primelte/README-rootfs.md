@@ -1,68 +1,128 @@
-# Root filesystem for a 3.18 kernel: what works, what does not, and why
+# Root filesystem for a 3.18 kernel: ARMtix, and the correction that makes it possible
 
-This note exists so the next person does not have to rediscover it from a black
-screen. It is about the userspace, not the kernel.
+This note is about the userspace, not the kernel. It replaces an earlier version
+of itself that was wrong in a way that mattered, so it starts with that.
 
-## The problem in one paragraph
+## What the earlier version claimed, and why it was wrong
 
-Arch Linux ARM aarch64 ships glibc. glibc's `--enable-kernel` sets a **minimum
-kernel version baked into the binary at build time**; if the running kernel is
-older, `_dl_start` prints `Fatal: kernel too old` and exits. Current Arch Linux
-ARM is built for a kernel well above 3.7, and this phone's kernel is
-**3.18.120**. That means `/usr/lib/systemd/systemd`, `/usr/bin/bash`, `pacman`,
-`ssh`, `ip` — every dynamically linked Arch binary — aborts before `main()`.
-Nothing in userspace can raise the floor: it is not a runtime check that a
-configuration file can disable.
+The previous note said:
 
-musl does not work this way. It targets the syscalls the kernel provides, and
-Alpine's musl userspace runs on kernels this old. **So the boot path has to be
-musl, and the only realistically available musl aarch64 userspace is Alpine.**
+> Arch Linux ARM's glibc is built with a kernel floor newer than 3.18. A
+> dynamically linked glibc binary aborts at startup with `Fatal: kernel too
+> old`. systemd, bash, pacman — everything Arch ships — is glibc, so none of it
+> can be PID 1 here. musl is configured at runtime, not against a kernel floor,
+> and runs on 3.18.
+
+The conclusion drawn from it was an image with Alpine/musl at `/alpine` and Arch
+at `/`, with `/sbin/init` symlinked across trees. That is a lot of machinery to
+work around a check that is not triggered.
+
+The mechanism the note described is real; the numbers were not.
+
+* glibc's startup check reads the `.note.ABI-tag` note (`NT_GNU_ABI_TAG`) that
+  glibc's own build writes into every binary it links. If the note's version is
+  newer than `uname`, `_dl_start` prints `Fatal: kernel too old` and exits
+  before `main`. It really is a build-time constant with no runtime override.
+* The note's value is `--enable-kernel`, **except that it can never be lower
+  than the architecture minimum**. For aarch64 that minimum is **3.7.0**, set in
+  glibc's `sysdeps/unix/sysv/linux/aarch64/configure.ac`
+  (`arch_minimum_kernel=3.7.0`); for arm32 it is 3.2.0.
+* Arch Linux ARM's `core/glibc` PKGBUILD — which ARMtix inherits — passes **no
+  `--enable-kernel` at all**. Its aarch64 binaries therefore carry `ABI: 3.7.0`.
+
+3.7.0 is below this phone's **3.18.120**, so the binaries Arch-derived
+userspaces ship are allowed to start. The `Fatal: kernel too old` case appears
+when a distribution *raises* the floor: upstream Arch Linux builds its glibc
+with `--enable-kernel=4.4`, and a tree built against that really would die here.
+
+You do not have to take any of this on trust. `ci/j4primelte/audit-rootfs.py`
+reads the note out of the image's own binaries:
+
+```sh
+python3 ci/j4primelte/audit-rootfs.py rootfs-tree/ --kernel 3.18.120 --json-out audit.json
+```
+
+It walks every ELF in the tree (not a hand-written list of paths), prints each
+one's interpreter, library kind, architecture and ABI floor, and fails when
+anything on the boot path carries a floor above 3.18.120. The JSON report names
+every offending file. The image build runs this and refuses to produce an image
+that fails it.
+
+RHEL's own glibc spec documents the same reasoning from the other direction: it
+pins aarch64 at `--enable-kernel=3.10.0` precisely because "Gemini PDA has
+3.18.x" is in the set of machines it supports.
 
 ## What this image therefore is
 
-One ext4 filesystem, label `ARCHROOT`, with two userspaces on it:
+One ext4 filesystem, label **`ARTIXROOT`**, holding **ARMtix** — Artix Linux
+built for aarch64 — with **OpenRC**, straight from the ARMtix release tarball:
 
-| path | contents | runs on 3.18? |
-|---|---|---|
-| `/` | Arch Linux ARM aarch64 (glibc) | no, for dynamic binaries |
-| `/alpine` | Alpine aarch64 (musl) + OpenRC | yes |
-| `/sbin/init`, `/usr/bin/openrc-init` | symlinks into `/alpine` | yes |
+| path | what it is |
+|---|---|
+| `/usr/bin/openrc-init` | PID 1 (ARMtix's OpenRC fork) |
+| `/sbin/init` | ARMtix's own symlink, untouched |
+| `/etc/init.d/j4-rndis` | this project's USB RNDIS + SSH service |
+| `/usr/libexec/j4-rndis` | the script behind it |
 
-The initramfs hook prefers `/usr/lib/systemd/systemd`, then
-`/usr/bin/openrc-init`. `build-rootfs.sh` **moves Arch's systemd binary aside**
-(`/alpine/systemd.arch`) so the hook cannot pick the one candidate that is
-guaranteed to fail. `audit-rootfs.py` re-checks the final tree and fails the
-build if the boot path is glibc.
+No Alpine. No second userspace. No cross-tree symlink for the initramfs to trip
+over. Artix is not a compromise here: it *is* the target, and the glibc analysis
+above says it can run.
 
-Arch stays at `/` on purpose: its package database, `/usr/lib` and its tooling
-remain intact for when a newer kernel exists. The two trees do not share
-libraries, so there is no ABI conflict; the cost is roughly 600 MB of the
-partition.
+The initramfs hook tries `/usr/bin/openrc-init`, then `/sbin/openrc-init`, then
+`/sbin/init`, then `/usr/bin/init`. It does not look for systemd: ARMtix does not
+ship it, and an image that had it would be a different system with different
+assumptions about `/run` and cgroups.
 
-## Honest list of what is still unproven
+## What the build changes in the tarball
 
-* **No musl userspace has ever run on this kernel.** The claim that it will is
-  based on musl's design, on Alpine's published kernel support, and on the fact
-  that the *initramfs* on this phone already runs a static musl BusyBox
-  successfully (the reference ramdisk links against `ld-musl-armhf.so.1`). That
-  last point is real evidence for musl on 3.18, but for a *static* binary.
-* **`switch_root` on this kernel is untested.** It needs `mount --move` of
-  `/dev`, `/proc`, `/sys` to behave; the 3.18 kernel here has
-  `CONFIG_DEVTMPFS=y` and `CONFIG_DEVTMPFS_MOUNT=y`, which is the usual
-  prerequisite.
-* **OpenRC as PID 1 under musl needs `/dev/console` and cgroups** to exist the
-  way it expects. The initramfs establishes both; nothing in CI can prove the
-  handover.
+`build-rootfs.sh` extracts the tarball and touches as little as possible:
+
+* removes `usr/lib/modules/*` and `boot/*` — the ARMtix images carry generic
+  aarch64 kernels and a full firmware/kernel set this phone will never boot, and
+  they alone are several hundred megabytes. `J4_KEEP_KERNELS=1` keeps them;
+* creates `dev`, `proc`, `sys`, `run`, `tmp`, `var/log` if the tarball lacks
+  them, and re-creates `/dev/null` and `/dev/console` when extraction had no
+  root privileges to make them;
+* installs the `j4-rndis` service and enables it in the `default` runlevel;
+* enables `agetty.ttyMSM0` at 115200 when ARMtix ships that init script, so a
+  serial cable sees a login prompt;
+* writes `/etc/fstab` (nothing in it points at a partition this project must not
+  write to).
+
+It does not patch packages, does not run `pacman`, does not chroot, and does not
+need an aarch64 interpreter on the build host.
+
+## Filesystem features
+
+The kernel is 3.18. Its ext4 has no idea what checksummed metadata is, so an
+image created with modern `mke2fs` defaults fails to mount — and the initramfs
+reports `ERROR: unable to mount root partition!` while the image looks healthy.
+
+`build-rootfs.sh` passes an explicit feature list:
+
+```
+^metadata_csum,^metadata_csum_seed,^meta_bg,^orphan_file,^fast_commit,^quota,
+^ea_inode,^large_dir,^casefold,^encrypt,^bigalloc
+```
+
+then reads the features back with `dumpe2fs` and fails if any of them — or
+`iversion`/`dirdata`, which this `mke2fs` will not toggle — survived. `64bit`
+stays on deliberately: 64-bit block numbers predate 3.18, and removing the
+feature needs a `resize2fs` pass that is not worth the risk on a 2.4 GiB image.
+
+The image is populated with `mke2fs -d <tree>`, not a loop mount: owners, modes,
+symlinks, hard links and device nodes all survive, and no runner needs
+`CAP_SYS_ADMIN`.
 
 ## Where the root filesystem goes
 
-The image is a **bare ext4 filesystem**, not a partition table: write it to a
+The image is a **bare ext4 filesystem**, not a partition table. Write it to a
 partition (the phone's `system` / `userdata` partition, whichever is unused and
-large enough) and the partition itself carries `LABEL=ARCHROOT`. The initramfs
-finds it with `blkid -s LABEL`, exactly like the pmOS init does for its own
+large enough) and the partition itself carries `LABEL=ARTIXROOT`. The initramfs
+finds it with `blkid -s LABEL`, exactly as the pmOS init does for its own
 `pmOS_root`.
 
-The recorded `/system` size on this handset is 2,617,245,696 bytes
+The recorded `/system` size is 2,617,245,696 bytes
 (`pins.env: J4_SYSTEM_PARTITION_BYTES`); the default image is 2400 MiB, leaving
 ~96 MiB of slack. `build-rootfs.sh` refuses to build larger than the recorded
 partition, and refuses to emit an image with less than 5 % free space.
@@ -71,27 +131,31 @@ partition, and refuses to emit an image with less than 5 % free space.
 pmOS rootfs the owner is keeping, and it does not touch BOOT. Boot a known-good
 BOOT image and reflash that partition to undo it.
 
-## Filesystem features
+## Honest list of what is still unproven
 
-`build-rootfs.sh` clears `metadata_csum`, `metadata_csum_seed`, `meta_bg`,
-`orphan_file`, `fast_commit` and `64bit`, then verifies with `dumpe2fs` and
-fails if any survived. 3.18's ext4 has no idea what `metadata_csum` is: it will
-not mount the filesystem at all, and the initramfs will report
-`ERROR: unable to mount root partition!` while looking perfectly healthy.
+The audit proves the userspace *can* start. It cannot prove that it does.
+
+* **`switch_root` on this kernel is untested.** It needs `mount --move` of
+  `/dev`, `/proc`, `/sys` to behave; 3.18 here has `CONFIG_DEVTMPFS=y` and
+  `CONFIG_DEVTMPFS_MOUNT=y`, which is the usual prerequisite.
+* **OpenRC as PID 1 needs `/dev/console`, a writable `/run` and working
+  cgroups.** The initramfs establishes the first two; nothing in CI can prove
+  the handover.
+* **Nothing has run on the phone in this configuration yet.** The first flash
+  should be `boot-debug.img`, which stops in the proven initramfs shell.
 
 ## Reproducing the image
 
-CI does this; locally it needs root for the loop mount:
+CI does this; locally it needs root for the owner/mode/device-node reproduction
+and the ext4 tooling (`e2fsprogs`):
 
 ```sh
-sudo apt-get install -y e2fsprogs
-curl -LO "$(grep ARCHLINUXARM_ROOTFS_URL ci/j4primelte/pins.env | cut -d"'" -f2)"
-curl -LO "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-minirootfs-latest-aarch64.tar.gz"
-sudo ALPINE_BOOTSTRAP=$PWD/alpine-minirootfs-latest-aarch64.tar.gz \
-     bash ci/j4primelte/build-rootfs.sh \
-     ArchLinuxARM-aarch64-latest.tar.gz rootfs.img 2400
+url=$(sed -n "s/^ARTIX_IMAGE_URL='\(.*\)'/\1/p" ci/j4primelte/pins.env)
+curl -LO "$url"
+sudo bash ci/j4primelte/build-rootfs.sh armtix-openrc-*.tar.xz rootfs.img 2400
 ```
 
-Neither tarball is committed: together they are well over 200 MB, and the
-repository is not the place for them. CI downloads them fresh and records their
-hashes in the job summary.
+The tarball is ~1 GiB compressed and is not committed. CI checks it against
+`ARTIX_IMAGE_SHA256` in `pins.env` and records the hash it saw in the job
+summary; the tarball is a rolling release, so bumping the pin is a deliberate
+act, not an automatic one.

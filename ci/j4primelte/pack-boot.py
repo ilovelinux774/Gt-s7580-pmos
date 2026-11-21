@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pack a J4+ BOOT image that boots the Artix/Arch userspace.
+"""Pack a J4+ BOOT image that boots the Artix userspace.
 
 The invariant of this script is that *nothing about the kernel changes*. The
 kernel payload (arm64 Image.gz + appended Rev06 DTB) is copied verbatim out of
@@ -11,7 +11,7 @@ page size, load addresses, header version -- is taken from that same image.
         --reference  medusa64-fbdev-parent-debug.img \
         --initramfs  rootswitch-initramfs.gz \
         --out        boot.img \
-        --root-label ARCHROOT
+        --root-label ARTIXROOT
 
 Run ``j4boot.py inspect`` on the output afterwards (this script does it too).
 """
@@ -81,7 +81,7 @@ def main() -> int:
                         help="BOOT image that booted on the phone (kernel source)")
     parser.add_argument("--initramfs", required=True, help="gzip initramfs to install")
     parser.add_argument("--out", required=True)
-    parser.add_argument("--root-label", default="ARCHROOT")
+    parser.add_argument("--root-label", default="ARTIXROOT")
     parser.add_argument("--console", default="ttyMSM0,115200n8")
     parser.add_argument("--extra-cmdline", action="append", default=[],
                         help="append raw tokens (repeatable)")

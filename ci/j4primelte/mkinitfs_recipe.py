@@ -193,7 +193,7 @@ def check(initramfs: Path, out_dir: Path | None) -> int:
         (out_dir / "initramfs.recipe").write_text(
             build_recipe("samsung-j4primelte", "3.18.120-j4-medusa64-debug+", all_modules())
         )
-        (out_dir / "deviceinfo").write_text(deviceinfo_text("ARCHROOT"))
+        (out_dir / "deviceinfo").write_text(deviceinfo_text("ARTIXROOT"))
     report = {
         "initramfs": str(initramfs),
         "entries": len(present),
@@ -230,12 +230,12 @@ def main() -> int:
     if args.command == "recipe":
         text = build_recipe("samsung-j4primelte", "3.18.120-j4-medusa64-debug+", all_modules())
         print(text)
-        print(deviceinfo_text("ARCHROOT"))
+        print(deviceinfo_text("ARTIXROOT"))
         if args.out_dir:
             out = Path(args.out_dir)
             out.mkdir(parents=True, exist_ok=True)
             (out / "initramfs.recipe").write_text(text)
-            (out / "deviceinfo").write_text(deviceinfo_text("ARCHROOT"))
+            (out / "deviceinfo").write_text(deviceinfo_text("ARTIXROOT"))
             print(f"wrote {out}/initramfs.recipe and {out}/deviceinfo")
         return 0
     return args.func(args)

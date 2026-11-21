@@ -109,7 +109,7 @@ class BuildTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def build(self, label: str = "ARCHROOT") -> Path:
+    def build(self, label: str = "ARTIXROOT") -> Path:
         argv = [
             "make_rootswitch_initramfs.py",
             str(self.src),
@@ -203,7 +203,7 @@ class HookBehaviourTests(unittest.TestCase):
         for path in (self.j4root, self.sysroot, self.dev):
             path.mkdir(parents=True)
         self.log = self.tmp / "mounts.log"
-        (self.bin / "blkid").write_text("#!/bin/sh\nprintf 'ARCHROOT\\n'\n")
+        (self.bin / "blkid").write_text("#!/bin/sh\nprintf 'ARTIXROOT\\n'\n")
         (self.bin / "mount").write_text(f"#!/bin/sh\necho \"mount $*\" >> {self.log}\nexit 0\n")
         (self.bin / "umount").write_text(f"#!/bin/sh\necho \"umount $*\" >> {self.log}\n")
         for tool in ("blkid", "mount", "umount"):
@@ -215,7 +215,7 @@ class HookBehaviourTests(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def render_hook(self) -> Path:
-        text = mk.HOOK.replace("@ROOT_LABEL@", "ARCHROOT")
+        text = mk.HOOK.replace("@ROOT_LABEL@", "ARTIXROOT")
         text = (
             text.replace("/dev/kmsg", str(self.tmp / "kmsg"))
             .replace("/dev/console", str(self.tmp / "console"))
@@ -252,7 +252,7 @@ class HookBehaviourTests(unittest.TestCase):
     def test_root_without_an_init_is_refused(self) -> None:
         result = self.run_hook()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"mount -t ext4 -o ro,noload {self.dev}/mmcblk0p47 {self.j4root}", self.log_lines())
+        self.assertIn(f"mount -t ext4 -o ro {self.dev}/mmcblk0p47 {self.j4root}", self.log_lines())
         self.assertIn(f"umount {self.j4root}", self.log_lines())
         self.assertFalse((self.run_state / "init").exists())
         self.assertFalse(any("move" in line for line in self.log_lines()))
@@ -281,15 +281,23 @@ class HookBehaviourTests(unittest.TestCase):
         self.assertEqual((self.run_state / "init").read_text().strip(), "/usr/bin/openrc-init")
         self.assertIn("mmcblk0p47", (self.run_state / "device").read_text())
 
-    def test_systemd_target_is_preferred_over_generic_init(self) -> None:
-        (self.j4root / "usr/lib/systemd").mkdir(parents=True)
-        systemd = self.j4root / "usr/lib/systemd/systemd"
-        systemd.write_text("#!/bin/sh\n")
-        systemd.chmod(0o755)
+    def test_openrc_init_is_found_before_the_generic_init(self) -> None:
+        (self.j4root / "usr/bin").mkdir(parents=True)
         (self.j4root / "sbin").mkdir()
-        (self.j4root / "sbin/init").write_text("#!/bin/sh\n")
+        for name in ("usr/bin/openrc-init", "sbin/init"):
+            path = self.j4root / name
+            path.write_text("#!/bin/sh\n")
+            path.chmod(0o755)
         self.run_hook()
-        self.assertEqual((self.run_state / "init").read_text().strip(), "/usr/lib/systemd/systemd")
+        self.assertEqual((self.run_state / "init").read_text().strip(), "/usr/bin/openrc-init")
+
+    def test_sbin_init_is_still_honoured_when_there_is_no_openrc_init(self) -> None:
+        (self.j4root / "sbin").mkdir()
+        init = self.j4root / "sbin/init"
+        init.write_text("#!/bin/sh\n")
+        init.chmod(0o755)
+        self.run_hook()
+        self.assertEqual((self.run_state / "init").read_text().strip(), "/sbin/init")
 
     def test_nothing_is_ever_resized_or_written_to_the_target(self) -> None:
         (self.j4root / "usr/bin").mkdir(parents=True)

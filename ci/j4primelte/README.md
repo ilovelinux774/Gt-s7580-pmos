@@ -56,29 +56,53 @@ Nothing in the hook mounts anything read-write, resizes anything, or writes to
 a partition. `test_rootswitch.py` runs the real hook under `/bin/sh` with
 stubbed `blkid`/`mount` and asserts exactly that.
 
-## 2. Why Artix/Arch and not postmarketOS
+## 2. Why ARMtix (Artix), and why the glibc worry is over
 
-Not aesthetics — the pmOS install that exists on this phone is ARMv7 and is the
+Not aesthetics: the pmOS install that exists on this phone is ARMv7 and is the
 state the owner does not want to lose. Switching to it means mounting and
-resizing it, which is precisely what this project refuses to do. So the boot
-image has to hand the phone to a *different* root filesystem on a *different*
-partition.
+resizing it, which is what this project refuses to do. So the boot image hands
+the phone to a *different* root filesystem on a *different* partition — Artix,
+because that is what the owner wants to run, not because anything else failed.
 
-The catch, and the reason the last attempt stalled where it did:
+The previous attempt stalled on this claim:
 
-> Arch Linux ARM's glibc is built with a kernel floor newer than 3.18. A
-> dynamically linked glibc binary aborts at startup with
-> `Fatal: kernel too old` on this kernel. systemd, bash, pacman — everything
-> Arch ships — is glibc, so none of it can be PID 1 here.
+> Arch Linux ARM's glibc is built with a kernel floor newer than 3.18 ...
+> everything Arch ships is glibc, so none of it can be PID 1 here.
 
-musl is configured at runtime, not against a kernel floor, and runs on 3.18.
-That is why `build-rootfs.sh` puts an Alpine/musl tree at `/alpine` and points
-`/sbin/init` and `/usr/bin/openrc-init` at it, while keeping Arch's packages at
-`/` for tooling. `audit-rootfs.py` is the gate: if the boot path is glibc, the
-build fails instead of producing another image that cannot work.
+The mechanism is real — glibc refuses to start when `.note.ABI-tag` names a
+kernel newer than `uname` says — but the number was wrong. glibc's aarch64
+minimum is **3.7.0** (`arch_minimum_kernel` in
+`sysdeps/unix/sysv/linux/aarch64/configure.ac`), and Arch Linux ARM's glibc
+PKGBUILD passes no `--enable-kernel` that could raise it. ARMtix inherits that
+glibc, so its binaries carry `ABI: 3.7.0`, which is below this phone's
+**3.18.120**. Upstream Arch Linux's glibc, built with `--enable-kernel=4.4`,
+*would* fail here — that is the case the check catches.
 
-OpenRC (rather than systemd) is not a preference either: OpenRC 0.44+ from
-Artix builds and runs on Alpine's musl, and Alpine ships it as its init.
+So the workaround the earlier attempt built (Alpine/musl at `/alpine`, Arch at
+`/`, `/sbin/init` symlinked between them) is gone. There is one userspace now,
+and it is ARMtix with OpenRC as PID 1.
+
+`audit-rootfs.py` is the gate, and it no longer reasons from library names: it
+reads the note out of every ELF in the tree and fails the build when any file —
+on the boot path or not — demands a kernel newer than 3.18.120.
+`README-rootfs.md` has the full analysis and the evidence.
+
+## 2a. What the initramfs hook looks for
+
+`/usr/bin/openrc-init`, then `/sbin/openrc-init`, then `/sbin/init`, then
+`/usr/bin/init`, on an ext4 filesystem labelled `ARTIXROOT`. It refuses to touch
+anything whose `/etc/os-release` says `postmarketos`, and it mounts the target
+read-only first, remounting read-write only after the init has been chosen.
+Nothing in it resizes, repairs or writes to a partition.
+
+## 2b. The journal, and the one mount detail that matters
+
+The hook mounts the target read-only first and remounts it read-write only
+after the init has been chosen. The read-only mount is **not** `-o noload`: an
+ext4 read-only mount does not replay the journal on its own, so nothing is
+written anyway, but the read-write remount *does* recover it. `noload` would
+keep the flag in effect across that remount and hand a filesystem with an
+unreplayed journal to the kernel as read-write.
 
 ## 3. The pipeline
 
@@ -94,9 +118,15 @@ boot.txt ──j4boot.py──► kernel.payload + appended.dtb + ramdisk.gz
                               └──────────────── pack-boot.py ─────────────┘
                                                      │
                                                  boot.img   (kernel byte-identical to boot.txt)
+
+ARMtix tarball ──build-rootfs.sh──► audit-rootfs.py (3.18 gate) ──mke2fs -d──► rootfs.img
 ```
 
-Scripts (all runnable without the phone, and without a network):
+Two chains, one shared BOOT image. The rootfs chain never runs in the boot job:
+it is the only part that needs a 1 GiB download, root and a few minutes.
+
+Scripts (all runnable without the phone; only `build-rootfs.sh` and the
+reference-image step need a network):
 
 | script | purpose |
 |---|---|
@@ -106,10 +136,12 @@ Scripts (all runnable without the phone, and without a network):
 | `mkinitfs_recipe.py` | the mkinitfs recipe, checked against the real initramfs |
 | `make_rootswitch_initramfs.py` | build the ramdisk that hands over to the labelled root |
 | `pack-boot.py` | assemble a BOOT image; refuses to change the kernel |
-| `audit-rootfs.py` | the 3.18-compatibility gate for a root filesystem |
-| `build-rootfs.sh` | ext4 rootfs image with a 3.18-safe feature set (CI, needs root) |
+| `elfnotes.py` | read an ELF's interpreter, architecture and `.note.ABI-tag` floor |
+| `audit-rootfs.py` | the 3.18 gate: every ELF's floor vs 3.18.120 |
+| `build-rootfs.sh` | ARMtix ext4 rootfs image, 3.18-safe features, no loop mount |
 
-Tests: `test_j4boot.py`, `test_rootswitch.py`, `test_pipeline.py`.
+Tests: `test_j4boot.py`, `test_rootswitch.py`, `test_pipeline.py`,
+`test_rootfs.py` (the last one also builds a real image when run as root).
 
 ## 4. What has and has not been proven
 
@@ -120,16 +152,27 @@ Proven on the phone, by the owner:
   `172.16.42.1`;
 * the pmOS rootfs on that install is usable (a *different* image).
 
+Proven on the artifacts, without the phone:
+
+* the BOOT images keep the kernel payload and DTB byte-identical to the image
+  that booted, and fit the 32 MiB BOOT partition;
+* the rootfs image uses only ext4 features 3.18 can mount, and carries the
+  label the hook searches for;
+* **no ELF in the rootfs refuses to start on 3.18.120.** Each binary's
+  `.note.ABI-tag` is read out of the image and compared; ARMtix's glibc
+  carries 3.7.0. So "Fatal: kernel too old" cannot be the reason a boot fails.
+
 Not proven, and not claimed here:
 
-* that the kernel can run the Alpine userspace at all (no musl userspace has
-  run on this kernel yet);
+* that this kernel runs this userspace at all (nothing but the initramfs has
+  run on it yet);
 * that the root-switch hook finds the labelled filesystem on the real device;
-* that a userspace init survives `switch_root` on this kernel;
+* that `openrc-init` survives `switch_root` on this kernel;
 * anything about the panel, GPU, Wi-Fi, audio, or touch in this configuration.
 
-Every one of those is a step in §5 with a pass/fail criterion. A green CI run
-means the artifacts are internally consistent, nothing more.
+The kernel has no framebuffer console, so a failed boot gives no visible
+feedback. Every step below therefore has a pass/fail criterion read over USB or
+serial, not looked at on the panel.
 
 ## 5. Next steps, in order
 
@@ -137,7 +180,7 @@ means the artifacts are internally consistent, nothing more.
    `pmos.debug-shell` kept, so if the hook finds nothing you are at a shell
    over USB instead of a black screen. The hook logs every decision to
    `/dev/kmsg` and `/dev/console`.
-2. Confirm the log says `found ARCHROOT on /dev/mmcblk0pNN` and
+2. Confirm the log says `found ARTIXROOT on /dev/mmcblk0pNN` and
    `userspace init will be /usr/bin/openrc-init`.
 3. Only then allow `switch_root`. The pass criterion is a login over the USB
    link from a *userspace* SSH, not from the initramfs.
