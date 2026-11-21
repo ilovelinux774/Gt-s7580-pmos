@@ -156,11 +156,27 @@ sudo bash ci/j4primelte/build-rootfs.sh "$file" rootfs.img 2400
 ```
 
 The three image mirrors (`ARTIX_IMAGE_MIRRORS` in `pins.env`) are tried in
-order by CI, because they do not all answer at the same time — while this was
-being written the primary returned HTTP errors and only the index page was
-readable. Whichever mirror answers must match `ARTIX_IMAGE_SHA256`. If every
-mirror is down, the `rootfs` job fails at the download with the list of URLs it
-tried, and the `boot` job's artifacts are unaffected.
+order, because they do not all answer at the same time. Measured on
+2026-11-21 from a GitHub-hosted runner: the primary answered `403`, the second
+mirror failed DNS, the third did not resolve at all — while the image index and
+its `sha256sums` were still readable through another path. Whichever mirror
+answers must match `ARTIX_IMAGE_SHA256`.
+
+So the tarball download is the one step of this project that depends on a third
+party being reachable. If every mirror refuses, the `rootfs` job fails at that
+step, names the URLs it tried and the HTTP status each returned, and leaves the
+`boot` job and its artifacts untouched. To build anyway, host the tarball
+somewhere the runner can reach — a release asset of this repository is the
+obvious place, since the reference BOOT image is already published there — and
+dispatch the workflow with:
+
+```
+artix_image_url    = <url of the copy>
+artix_image_sha256 = 250abf136930f5c7d4ba1a6d2b9b56f6b32acb072e05ccb4b6ab7aa23b834699
+```
+
+The hash is checked in that path too, so a copy is as trustworthy as the
+original: it is the same bytes or the build stops.
 
 The tarball is ~1 GiB compressed and is not committed. CI checks it against
 `ARTIX_IMAGE_SHA256` in `pins.env` and records the hash it saw in the job

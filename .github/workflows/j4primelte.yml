@@ -15,7 +15,11 @@ on:
         type: boolean
         default: true
       artix_image_url:
-        description: 'ARMtix rootfs tarball (blank = the one pinned in pins.env)'
+        description: 'ARMtix rootfs tarball URL (blank = the pinned mirrors). Use when they refuse the runner.'
+        type: string
+        default: ''
+      artix_image_sha256:
+        description: 'sha256 of the tarball at artix_image_url (blank = the pin in pins.env)'
         type: string
         default: ''
   push:
@@ -235,15 +239,22 @@ jobs:
       - name: Download ARMtix
         env:
           ARTIX_IMAGE_OVERRIDE: ${{ inputs.artix_image_url }}
+          ARTIX_SHA_OVERRIDE: ${{ inputs.artix_image_sha256 }}
         run: |
           set -euo pipefail
           source ci/j4primelte/pins.env
           mkdir -p artix
-          # The mirrors are tried in order: the primary has been answering with
-          # HTTP 5xx, and the mirrors are different hosts, not different files.
-          # Whatever answers must match the pinned hash unless the run
-          # explicitly overrode the URL.
+          # The mirrors are tried in order; they are different hosts, not
+          # different files. Whatever answers must match the expected hash,
+          # which is the pin unless this run overrode it.
           candidates=()
+          expected=$ARTIX_IMAGE_SHA256
+          if [[ -n ${ARTIX_SHA_OVERRIDE:-} ]]; then
+            expected=$ARTIX_SHA_OVERRIDE
+            if [[ $expected != "$ARTIX_IMAGE_SHA256" ]]; then
+              echo "::warning title=unpinned ARMtix image::expected hash differs from the pin in pins.env; this image is not the pinned one"
+            fi
+          fi
           if [[ -n ${ARTIX_IMAGE_OVERRIDE:-} ]]; then
             candidates=("$ARTIX_IMAGE_OVERRIDE")
           else
@@ -269,7 +280,7 @@ jobs:
             # down. Printed with a browser User-Agent as well, because some
             # mirrors only serve known clients.
             for agent in "curl/8" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"; do
-              code=$(curl --silent --show-error --location --head --max-time 25 \
+              code=$(curl --silent --location --head --max-time 25 \
                        --user-agent "$agent" --write-out '%{http_code}' \
                        --output /dev/null "$url" 2>/dev/null) || code="(curl failed: $?)"
               echo "  HTTP $code  [$agent]  $url"
@@ -280,10 +291,14 @@ jobs:
             echo "::error title=ARMtix image::no mirror served $ARTIX_IMAGE_FILE"
             echo "  tried:"
             printf '    %s\n' "${candidates[@]}"
-            echo "Check the image index (https://armtix.artixlinux.org/images/) and, if"
-            echo "the file was renamed, update ARTIX_IMAGE_FILE and ARTIX_IMAGE_SHA256 in"
-            echo "ci/j4primelte/pins.env -- or pass the new URL as the artix_image_url"
-            echo "workflow input."
+            echo "The ARMtix hosts are frequently unreachable from CI runners (403,"
+            echo "or DNS failure). Either:"
+            echo "  * check https://armtix.artixlinux.org/images/ and, if the file was"
+            echo "    renamed, update ARTIX_IMAGE_FILE and ARTIX_IMAGE_SHA256 in"
+            echo "    ci/j4primelte/pins.env; or"
+            echo "  * put the tarball anywhere the runner can reach and dispatch this"
+            echo "    workflow with artix_image_url=<url> and artix_image_sha256=<hash>."
+            echo "    The hash is still checked, so a copy is as good as the original."
             exit 1
           fi
           ln -sf artix/armtix.tar.xz armtix.tar.xz
@@ -291,11 +306,9 @@ jobs:
           actual=$(sha256sum armtix.tar.xz | cut -d' ' -f1)
           echo "$actual  armtix.tar.xz" | tee artix/armtix.sha256
           echo "$got" > artix/image.url
-          if [[ -n ${ARTIX_IMAGE_OVERRIDE:-} ]]; then
-            echo "::warning title=unpinned ARMtix image::built from an override URL; the pins.env hash was not checked"
-          else
-            echo "$ARTIX_IMAGE_SHA256  armtix.tar.xz" | sha256sum -c -
-          fi
+          # Always verified: an override changes where the bytes come from,
+          # never whether they are checked.
+          echo "$expected  armtix.tar.xz" | sha256sum -c -
           # Cheap structural check before spending minutes on the build.
           xz --test armtix.tar.xz
           tar -tJf armtix.tar.xz | grep -qxE '(\./)?etc/os-release' || {
