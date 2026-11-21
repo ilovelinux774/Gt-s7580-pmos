@@ -182,3 +182,13 @@ The tarball is ~1 GiB compressed and is not committed. CI checks it against
 `ARTIX_IMAGE_SHA256` in `pins.env` and records the hash it saw in the job
 summary; the tarball is a rolling release, so bumping the pin is a deliberate
 act, not an automatic one.
+
+## If the ARMtix download is the only thing standing in the way
+
+The rootfs image cannot be built without the tarball, and the only copies the
+author of this repository knows about are on the three ARMtix mirrors. If they
+refuse your runner as well, the fastest exit is to mirror the tarball as a
+release asset of this repository, exactly as the reference BOOT image already
+is, and then dispatch the workflow with `artix_image_url` and
+`artix_image_sha256`. That keeps the pinned hash in force and removes the
+third-party dependency from every future build.
